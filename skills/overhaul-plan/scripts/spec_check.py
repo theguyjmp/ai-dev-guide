@@ -220,10 +220,17 @@ def main():
               "import allowlist": r"allow-?list",
               "module header naming the owner": r"header",
               "pasted search before new code": r"search",
-              "slop lint": r"Lint:\s*`?slop"}
+              "slop lint": r"Lint:\s*`?slop",
+              "hook-first rule (stop and hook before writing the code)": r"hook-first",
+              "look-alike lint over private helpers": r"look-?alike[^\n]*private|private[^\n]*look-?alike",
+              "LF line endings (.gitattributes)": r"gitattributes"}
     mach = texts.get("spec/MACHINES.md", "")
     if not re.search(r"\bfind\b", mach) or not re.search(r"in-?flight", mach, re.I):
         miss("MACHINES lacks the find command and its in-flight index (exists, planned, in flight)")
+    if not re.search(r"\bsupersede\b", mach):
+        miss("MACHINES lacks the supersede command (clears a replaced packet's rows, worktree and branch)")
+    if not re.search(r"\btop \d+\b", mach):
+        miss("MACHINES lacks find's ranking and cap (top N hits)")
     for name, rx in guards.items():
         if not re.search(rx, std, re.I):
             miss(f"STANDARDS lacks the {name}")
@@ -241,6 +248,11 @@ def main():
             miss(f"tripwire {h} has no number")
         if len(r) < 4 or not all(c for c in r[1:4]):
             miss(f"tripwire {h} needs threshold, source and action columns")
+
+    for name, rx in {"ruling holds on in-flight packets": r"\bhold", "superseded-packet path": r"supersed",
+                     "measured counts in COORD-STATE": r"measured", "clean end state (no stale rows, branches, worktrees)": r"stale|end state"}.items():
+        if not re.search(rx, ma, re.I):
+            miss(f"MASTER-AGENT lacks the {name}")
 
     # Phase 0, gates, no time words in brief text, brief fields.
     if not re.search(r"Phase 0", plan):
