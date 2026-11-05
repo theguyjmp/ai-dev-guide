@@ -115,7 +115,7 @@ A red stall or freeze gate stops the phase. You never see the target, only the r
 When functions proven equal the total and the full gate is green, launch one final blind Opus audit against STANDARDS and the definition of done. If it passes, stop every agent, remove the external scheduler entries, and report in four lines. Dispatch nothing new after that: no "improvement", "polish" or "hardening" packets unless the owner files them as functions or bugs.
 
 ## Your own context
-Stay under 150k tokens: small tool output (tail, grep, diff --stat), no whole-file reads, no log reading beyond reds. Before 150k, make sure COORD-STATE.md is current and ask the owner for /compact or a fresh session.
+Stay under 150k tokens: small tool output (tail, grep, diff --stat), no whole-file reads, no log reading beyond reds. Keep COORD-STATE.md current so an automatic compaction loses nothing. Compaction is automatic: never ask the owner for /compact or a fresh session.
 
 ## Never
 - Write feature code, write briefs past M0, or review PRs yourself.
