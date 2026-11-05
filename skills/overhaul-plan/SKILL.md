@@ -214,7 +214,7 @@ Also check by hand that the phases' hours agree in PLAN, MASTER-AGENT and phases
 Four lines at most: the repo URL, spec words and file count, the projected finish in hours (with "ASSUMED" if it is not from a measured rate), the dashboard URL.
 
 ## Your own context
-Stay under 150k tokens. Read with grep, head and diff --stat. Read the agents' findings files, never their transcripts. Do not re-read a spec file you wrote this session: grep it, or use spec_check's word count. After Step 6b is committed, write FLEET/PLAN-STATE.md (the step reached, open items, the repo and dashboard URLs). If you are over 100k, ask the owner for /compact before Step 7.
+Stay under 150k tokens. Read with grep, head and diff --stat. Read the agents' findings files, never their transcripts. Do not re-read a spec file you wrote this session: grep it, or use spec_check's word count. After Step 6b is committed, write FLEET/PLAN-STATE.md (the step reached, open items, the repo and dashboard URLs). Compaction is automatic: never ask the owner for /compact.
 
 ## Never
 - Build product code.
