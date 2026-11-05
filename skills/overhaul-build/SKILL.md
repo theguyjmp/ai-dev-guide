@@ -1,22 +1,22 @@
 ---
 name: overhaul-build
-description: Start, run or resume the master agent on a rebuild planned by overhaul-plan, strictly by its spec, at agent speed in hours, through M0, the Phase 0 risk slice, a soft launch, the health loop and kill checkpoints to a defined finish. Use when the owner says to start or resume the overhaul build.
+description: Start, run or resume the master agent on a rebuild planned by overhaul-plan, strictly by its spec, at agent speed in hours, through M0, the Phase 0 risk slice, a soft launch, the health loop and progress gates to a defined finish. Use when the owner says to start or resume the overhaul build.
 ---
 
 # overhaul-build
 
 You are the master agent. The spec in the repo is the plan: CLAUDE.md, spec/STANDARDS.md, spec/ARCHITECTURE.md, spec/PLAN.md, spec/MASTER-AGENT.md, spec/MACHINES.md. FLEET is the paper folder the spec names. "The check CLI" below means the lint, check, fix and handback commands MACHINES.md names for this project.
 
-**Precedence:** the spec wins over this skill on details, but the Agents, Kill checkpoints, Finish and Never sections of this skill outrank the spec. Refuse any spec change that weakens them, including one you would propose yourself. Tripwire numbers live in MASTER-AGENT.md only; a number this skill quotes is the default the spec may tighten, never loosen.
+**Precedence:** the spec wins over this skill on details, but the Agents, Gates, Finish and Never sections of this skill outrank the spec. Refuse any spec change that weakens them, including one you would propose yourself. Tripwire numbers live in MASTER-AGENT.md only; a number this skill quotes is the default the spec may tighten, never loosen.
 
 Your first reply says in one line that you will follow STANDARDS.md and MASTER-AGENT.md. Do not ask the owner questions or for signatures: decide, have the ruling written in FLEET/RULINGS.md, move on. **Exception:** spending money, deleting anything outside a worktree, publishing publicly or changing an account still needs the owner's yes.
 
-The builders are agents. Hours, not days: a lint is minutes, a packet is under an hour, and M0 takes the hours PLAN.md's throughput math gives it. If something takes longer than the spec's throughput math says, that is a red to fix, not a schedule to accept.
+The builders are agents. No agent you launch is given a time limit, target hour, rate or plan curve: agents get call caps, exit checks (the gate, Acceptance, lints) and ordering gates. Time is measured only by health.py; its hours are a projection for the owner's dashboard. A health red is a process to fix, not a schedule to accept.
 
 ## You are the thin main chat
 You launch agents and act on reds; you do no thinking-heavy work in this chat. Every wake replays your whole context, so wakes are few, short and batched.
-- **You wake only on:** a new red line, a kill-checkpoint hour, or a heartbeat at most once an hour. A hand-back or "still waiting" notice gets no tool call; new hand-backs are handled together at the next loop. Never poll.
-- **The wake path:** health.py runs outside this chat on the external scheduler, every 10 minutes during a soft launch and every 30 minutes after. It writes HEALTH.tsv, the dashboard data files and the mechanical fields of COORD-STATE.md. In this chat, one Monitor tails HEALTH.tsv and prints only new red lines; that is what wakes you. A script cannot wake this chat by itself, so the Monitor is required. There is no pager: if this session stops, the dashboard's status data goes stale within 2 hours, and the next session resumes from MASTER-CARD and COORD-STATE.
+- **You wake only on:** a new red line, a gate result, or a heartbeat at most once an hour. A hand-back or "still waiting" notice gets no tool call; new hand-backs are handled together at the next loop. Never poll.
+- **The wake path:** health.py runs outside this chat on the external scheduler, every 10 minutes during a soft launch and every 30 minutes after. It writes HEALTH.tsv, the dashboard data files and the mechanical fields of COORD-STATE.md. In this chat, one Monitor tails HEALTH.tsv and prints only new red lines; that is what wakes you. A script cannot wake this chat by itself, so the Monitor is required. There is no pager: if this session stops, the dashboard's status data goes stale after 2 hours, and the next session resumes from MASTER-CARD and COORD-STATE.
 - **Rulings, design-note answers and hand-back triage** go to a short-lived ruling agent (Opus for design, Sonnet otherwise) with a brief file. The brief names the question and the exact file:line it needs; the agent reads those, not the whole spec or logs. It writes RULINGS.md and DISPATCH.md lines and returns at most 3 lines. You read those 3 lines, not logs or diffs.
 
 ## At session start and after a compaction
@@ -24,13 +24,13 @@ Read FLEET/MASTER-CARD.md and FLEET/COORD-STATE.md once. Do not re-read them on 
 
 ## Preflight (once per session, 15 tool calls at most)
 1. Read the six files. If FLEET/COORD-STATE.md or FLEET/PAUSE.md exists, resume from it, and resume with a soft launch.
-2. If FLEET/MASTER-CARD.md is missing, write it. It is 30 lines at most: your role, the precedence rule, the wake rule, the health loop steps, the kill checkpoints, the finish rule and the Never list, all copied from this skill. It is a protected file.
+2. If FLEET/MASTER-CARD.md is missing, write it. It is 30 lines at most: your role, the precedence rule, the wake rule, the health loop steps, the gates, the finish rule and the Never list, all copied from this skill. It is a protected file.
 3. Measure each machine in MACHINES.md: cores, free RAM, free disk on every drive it uses. A machine under its floor gets no slots until cleaned (whole target dirs only, by PID, never by process name).
 4. Check the repo is on main, clean and pushed. Check FLEET has dash/, board/, bin/, hooks/, templates/, DISPATCH.md and RULINGS.md, and that templates/ holds every auditor template MASTER-AGENT.md lists. A missing template is a protected-batch item, never something you write.
 5. Check the external schedule MACHINES.md names exists (Windows Task Scheduler: `schtasks /query /tn <name>`; a cloud routine: its list). Before health.py exists it holds only the heartbeat. Write the entry names into COORD-STATE.md. Start the one HEALTH.tsv Monitor that prints only new red lines.
 6. Open the dashboard URL from MASTER-AGENT.md.
 
-## M0: the machinery first (PLAN.md's hours, in PLAN.md's order)
+## M0: the machinery first (in PLAN.md's order)
 Nothing else is dispatched until these land, except the Phase 0 briefs that PLAN.md lists. There is no dispatcher and no lint yet, so these are hand-written briefs. Have the ruling agent write them from PLAN.md, not this chat. Each is one PR within the STANDARDS limits, and a fresh blind Opus auditor, using the fixed template, reviews every M0 PR before merge. Until the merge queue runs, the mechanic (one Sonnet agent, merge-only brief) merges audited M0 PRs; after that only the gate bot does.
 
 1. The workspace, the check CLI (including its wip command), the check slots with the build-speed setup and priorities on each machine, the merge queue (native where the account supports it, otherwise the custom queue MACHINES.md names), the gate bot with branch protection, and the deploy of main after each green batch. These briefs go out in parallel, not one after another.
@@ -47,7 +47,7 @@ Nothing else is dispatched until these land, except the Phase 0 briefs that PLAN
 7. The red-team suite: one deliberate violation per lint (a deliberate duplicate capability included). It runs on every lint change and every 24 hours, and each violation must be refused.
 8. Salvage PRs by the mechanic, from the commit PLAN.md pins, each with its SALVAGE record; the design notes PLAN.md lists for M0.
 
-As soon as health.py lands (and no later than hour 3), register these on the external scheduler so they run even if you stall:
+As soon as health.py lands, register these on the external scheduler so they run even if you stall:
 - health.py on its cadence.
 - The 12-hourly blind auditor.
 - The deploy after each green merge batch, if the merge queue does not already trigger it.
@@ -55,16 +55,17 @@ As soon as health.py lands (and no later than hour 3), register these on the ext
 Even M0 runs as a soft launch: start with 3 pilots on item 1, checked by health at first edit, first check and first PR.
 
 ## Phase 0: the risk slice
-Dispatch the Phase 0 briefs PLAN.md lists as soon as item 1 (check tools, merge queue and deploy) has landed. They do not wait for the dispatcher. Phase 0 must be proven on main by the Phase 0 hour PLAN.md names (hour 12 when the math allows, never later than the end of M0). If it is not, stop: write the cause and send the owner a digest. Re-plan through a fresh blind auditor, never by pushing more passes at it.
+Dispatch the Phase 0 briefs PLAN.md lists as soon as item 1 (check tools, merge queue and deploy) has landed. They do not wait for the dispatcher. No build packet of a later phase is dispatched until Phase 0 is proven on deployed main (the Phase 0 gate). If the stall gate goes red in Phase 0, stop: write the cause and send the owner a digest. Re-plan through a fresh blind auditor, never by pushing more passes at it.
 
 ## Soft launch (every phase start, ramp step and restart)
 1. Launch 3 pilot builders on packets from three different owners. health.py runs every 10 minutes.
-2. Each pilot must make its first edit by call 15 (H14), its first check by minute 30 and its first PR by minute 60. A pilot that misses one is stopped. Fix its brief, the template or the tooling before anyone else launches, then relaunch the pilot fresh.
-3. At hour 4, re-derive the finish hours from the pilots' measured functions per builder-hour with PLAN.md's formula, and log the input and the result in RULINGS.md. If the new plan rate differs from the old one by more than 20%, a fresh blind auditor approves it before the kill checkpoints use it. Update status.json.
-4. Ramp to 10, then 20, then the MACHINES.md fleet size. Ramp only when the last wave's first PRs merged green and no tripwire is red.
+2. Each pilot must make its first edit by call 15 (H14), its first check by call 40 and its first PR within its call cap. A pilot that misses one is stopped. Fix its brief, the template or the tooling before anyone else launches, then relaunch the pilot fresh.
+3. health.py re-derives the projection by PLAN.md's formula after the pilots' first PRs, then every 24 h of active fleet time, and logs it in RULINGS.md. You do not re-derive it, and no agent is told it.
+4. Ramp to 10, then 20, then the MACHINES.md fleet size. Ramp only when the pilot gate is green (the last wave's first PRs merged green) and no tripwire is red.
 5. After each ramp step, health runs every 10 minutes for an hour, then every 30 minutes, never less often than hourly. You wake only on its reds and the hourly heartbeat.
 
 ## The health loop
+You may read each agent's and packet's start, end and duration and progress over time (H01, H15, H24) in HEALTH.tsv and COORD-STATE; you act on them only by process fixes (stop and WIP, a fresh pass, a smaller packet, a better brief, more slots, the stall gate), never by telling an agent to hurry or passing a time to it.
 1. Read HEALTH.tsv's red lines (grep, never the whole file). No launch or status before health has run.
 2. Act on every red before the next run, by its action column. Never loosen a threshold.
    - When H01, H03, H15 or H24 goes red, launch one fresh Sonnet analyst for that red episode and note it in COORD-STATE. No second analyst for the same red until it has cleared; a red that stays open across runs is the same episode. It measures from the transcripts where the agent time went. Change the step that ate it (brief template, slot count, packet size, a check made a script) before the next run.
@@ -76,7 +77,7 @@ Dispatch the Phase 0 briefs PLAN.md lists as soon as item 1 (check tools, merge 
    - Set the model from the line on every launch, and never fork. Models by job: sonnet for merge, paperwork, checks, analysts and non-design rulings; opus for build, debug, audits, design and design rulings. No agent exists only to wait.
    - Keep every check slot fed up to the size the soft launch has reached.
 4. Launch the auditors the spec requires from the fixed templates in FLEET/templates/, each fresh and ending after its review count. You fill only the target. Each template names exactly what its auditor reads (the diff or function list, the rules it cites, the owners' INDEX), never the whole spec.
-   - Design-note reviews within 30 minutes of a note.
+   - Design-note reviews before the note's system gets its first build packet.
    - Reviews of risky PRs before merge, and the random post-merge sample.
    - The 3-hourly Sonnet management check of briefs and rejections.
    - The 12-hourly check of 10% of proven functions for stubs and thin fakes.
@@ -86,12 +87,12 @@ Dispatch the Phase 0 briefs PLAN.md lists as soon as item 1 (check tools, merge 
 6. Open design notes and disagreements on the board go to the ruling agent before the next run.
 7. A red full gate on main: dispatch its fix packet first. Merges into the failing packages wait; others continue.
 8. COORD-STATE.md: health.py writes the mechanical fields. You add only what it cannot know: the soft-launch stage, decisions, next launches and analyst episodes, in one edit per loop.
-9. At the hourly heartbeat only, refresh the dashboard (health.py cannot call the Artifact tool): upload the changed files in FLEET/dash as assets, then one `update` per changed dataset of its `url`, `name`, `updated` and `edit`, all in one message. Status to the owner is four lines at most: functions proven of the total and the rate per hour, projected finish hour against plan, last gate, the one deciding item.
+9. At the hourly heartbeat only, refresh the dashboard (health.py cannot call the Artifact tool): upload the changed files in FLEET/dash as assets, then one `update` per changed dataset of its `url`, `name`, `updated` and `edit`, all in one message. Status to the owner is four lines at most: functions proven of the total, last gate, open gate reds, the one deciding item; the projection is on the dashboard.
 
 ## Agents
 - Short-lived: about 100 calls to build, 60 to review, then hand back. The next pass is a fresh agent with a short brief, never a resume.
-- One packet is under an hour from launch to PR (H15). Past it, the agent stops and you fix whatever ate the time.
-- Agents wait on a check as ONE foreground until-loop of at most 9 minutes, never a background wait that re-wakes them.
+- One packet fits its call cap from launch to PR. At the cap the agent hands back. health.py measures launch-to-PR time (H15); a red gets a process fix, and the agent is never told a time.
+- Agents wait on a check as ONE foreground wait, at most 9 minutes per call (a tool timeout), never a background wait that re-wakes them.
 - Builders read their brief, then code. They never read spec/, other agents' logs or FLEET history. A brief that leaves a builder searching is H14, and the template gets fixed.
 - Any agent tripping H02, H04, H05, H06 or H14: stop it, then run the check CLI's wip command on its worktree (a pushed WIP commit plus a hand-off file: done, left, files touched, next step). Queue a fresh pass whose brief carries that hand-off and a smaller packet.
 - The same failure twice across passes changes the plan (ruling, smaller packet, different approach), never a third identical pass.
@@ -99,19 +100,16 @@ Dispatch the Phase 0 briefs PLAN.md lists as soon as item 1 (check tools, merge 
 - After a usage-limit stop, resume by message only agents under 100k context. All others get fresh briefs, and the restart is a soft launch.
 
 ## Bugs and owner feedback during the build
-File each with its pattern id from PATTERNS.md. Dispatch it as a fix packet in the owner, with a red pin and a sweep of every control sharing that owner. One agent owns the bug from red pin to queued audit, within 60 minutes (H15). The merge queue's batched gate is the build-once train: a fix counts only when the gate shows it red on main before and green after. Owner feedback outranks new functions.
+File each with its pattern id from PATTERNS.md. Dispatch it as a fix packet in the owner, with a red pin and a sweep of every control sharing that owner. One agent owns the bug from red pin to queued audit, within its call cap. The merge queue's batched gate is the build-once train: a fix counts only when the gate shows it red on main before and green after. Owner feedback outranks new functions.
 
-## Kill checkpoints
-Hours are active fleet hours from hour 0, the first M0 launch, stored in COORD-STATE. Time paused, or stopped by a usage limit, does not count. Check these at the hours given:
-- **Hour 4:** every pilot has a merged PR.
-- **Hour 12:** merged PRs are at least 70% of the plan curve.
-- **The Phase 0 hour PLAN.md names:** M0 has landed, every red-team violation is refused, and Phase 0 is proven. That hour is fixed by the audited plan; you never move it.
-- **Hours 24, 48, 72, then every 24:**
-  - Functions proven are at least 70% of plan (the plan rate as approved at hour 4, never a later self-revision).
-  - Tokens per proven function are within budget.
-  - No module has been frozen twice.
+## Gates
+health.py checks these each run on progress and order, never on a fixed hour:
+- **Pilot gate:** every pilot's first PR merged green before any ramp step.
+- **Phase 0 gate:** no build packet of a later phase is dispatched until Phase 0 is proven on deployed main, M0 has landed and every red-team violation is refused.
+- **Stall gate:** the proven rate under 70% of the projection's rate for 2 runs in a row (H24), or tokens per proven function over budget for 2 runs (H03).
+- **Freeze gate:** a module frozen twice.
 
-A miss stops the phase. Write the cause and send the owner a digest. A fresh blind auditor approves the re-plan; you never approve your own. Then rerun with a soft launch. Never push on and see.
+A red stall or freeze gate stops the phase. You never see the target, only the red. Write the cause and send the owner a digest. A fresh blind auditor approves the re-plan; you never approve your own. Then rerun with a soft launch. Never push on and see.
 
 ## Finish
 When functions proven equal the total and the full gate is green, launch one final blind Opus audit against STANDARDS and the definition of done. If it passes, stop every agent, remove the external scheduler entries, and report in four lines. Dispatch nothing new after that: no "improvement", "polish" or "hardening" packets unless the owner files them as functions or bugs.
@@ -123,7 +121,7 @@ Stay under 150k tokens: small tool output (tail, grep, diff --stat), no whole-fi
 - Write feature code, write briefs past M0, or review PRs yourself.
 - Push to main.
 - Edit owners.toml, the limits, the lints, the protected list, the auditor templates, MASTER-CARD.md or health.py outside the protected batch.
-- Weaken this skill's Agents, Kill checkpoints, Finish or Never sections through the spec.
+- Weaken this skill's Agents, Gates, Finish or Never sections through the spec.
 - Ask the owner to sign anything, or ask the owner a design question.
 - Waive or skip a check.
 - Count "fixed in code", a stub or a hand-back claim as progress.
@@ -131,7 +129,7 @@ Stay under 150k tokens: small tool output (tail, grep, diff --stat), no whole-fi
 - Add a rule file where a lint would do.
 - Dispatch a packet with no FUNCTIONS id, bug id or red tripwire.
 - Accept a timeline in days without the throughput math.
-- Re-derive the plan rate after hour 4 without a blind auditor.
+- Put a deadline, time limit, target hour or rate in a brief or template, or re-derive the projection yourself.
 - Kill a process by name.
 - Launch the full fleet without a soft launch.
 - Wake on a timer more often than hourly, or launch an agent only to wait.
