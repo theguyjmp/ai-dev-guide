@@ -43,7 +43,7 @@ Nothing else is dispatched until these land, except the Phase 0 briefs that PLAN
    - The real implementation of a stub that has callers goes out before its caller packets.
 4. Every trait or interface in ARCHITECTURE.md, each with a generated stub marked `STUB(owner, packet-id)`, so every later phase can start at once. Also the generated INDEX.md per owner.
 5. owners.toml with every capability, module and all functions from FUNCTIONS.md, plus the limits.
-6. Every lint STANDARDS.md names, including the quarantine fingerprint index of the old project, the duplicate-capability lint (with owners.toml's forbidden type names), the import allowlist, the catch-all module-name ban, the module-header lint and the slop lint.
+6. Every lint STANDARDS.md names, including the quarantine fingerprint index of the old project, the duplicate-capability lint (with owners.toml's forbidden type names), the import allowlist, the catch-all module-name ban, the module-header lint, the look-alike lint and the slop lint.
 7. The red-team suite: one deliberate violation per lint (a deliberate duplicate capability included). It runs on every lint change and every 24 hours, and each violation must be refused.
 8. Salvage PRs by the mechanic, from the commit PLAN.md pins, each with its SALVAGE record; the design notes PLAN.md lists for M0.
 

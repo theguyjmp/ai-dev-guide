@@ -50,6 +50,7 @@ Tables do not count toward the word cap, but no spec table may have more than 40
      - No PR copies or re-implements a capability another owner's INDEX lists.
      - Each capability's owners.toml row lists its forbidden type names (for example Undo, History, Journal for the undo owner), and the duplicate-capability lint fails any of them defined outside the owner.
      - No catch-all modules: utils, helpers, common, shared, misc, tmp, legacy, v2 and the like are refused by a name lint, so every shared function has a named owner.
+     - A look-alike lint flags any new public function, component or type whose name tokens or normalized body shape match another owner's INDEX entry or code; the PR goes to the risky-PR auditor, who merges it only with a hook request to that owner or a written reason it differs.
      - Only the callers an owner row lists may import that owner (an import-allowlist lint), and layers depend only downward.
      - Every module starts with a header naming its purpose and owner id.
      - Before new public code, the PR pastes the search of the INDEX files and the repo that shows the capability does not exist yet.
