@@ -31,6 +31,20 @@
 .vr [data-dash-source-state=empty] { color: transparent; }
 .vr [data-dash-source-state=refreshing] { opacity: .5; transition: opacity var(--cds-dur-slow); }
 @media (max-width: 36rem) { .vr .row { grid-template-columns: minmax(0, 1fr) 4rem 3rem 5rem; } .vr .row .st { display: none; } }
+.vr [hidden] { display: none !important; }
+.vr h2 { font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); margin: 0; }
+.vr .sect-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--cds-gap-sm) var(--cds-gap-md); }
+.vr .gauges { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); gap: var(--cds-gap-md); }
+.vr .gauge { display: grid; min-height: 5rem; }
+.vr .gauge > * { grid-area: 1 / 1; }
+.vr .gauge .arc { min-width: 0; }
+.vr .gauge .arc svg { display: block; }
+.vr .gauge .big { align-self: end; justify-self: center; font-size: 2rem; line-height: 1; padding-bottom: .1rem; }
+.vr .acct { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--cds-gap-xs); font-size: var(--cds-font-size-body); }
+.vr .acct li { overflow-wrap: anywhere; }
+.vr .acct b { font-weight: var(--cds-font-weight-medium); }
+.vr .acct .ok { color: var(--color-ok); }
+.vr .acct .muted { color: var(--color-fg-muted); }
 </style>
 
 <div class="vr">
@@ -58,6 +72,53 @@
       <span class="big" data-draw="phase" data-source="status" data-field="phase">—</span>
       <span class="sub" data-draw="phase-state" data-source="status" data-field="phase_state">—</span>
     </div>
+  </section>
+
+  <section class="rates" id="rates">
+    <div class="sect-head">
+      <h2>Measured rates</h2>
+      <span class="sub" data-show="measured" hidden>measured <span data-draw="r-ago" data-source="rates" data-field="measured_at" data-where="metric=functions">—</span></span>
+      <span class="sub" data-show="unmeasured" hidden>not measured yet</span>
+    </div>
+    <div class="gauges">
+      <div class="card">
+        <span class="label">Functions per hour</span>
+        <div class="gauge"><div class="arc" data-draw="r-gauge" data-metric="functions" data-source="rates"></div><span class="big" data-draw="r-rate" data-metric="functions" data-source="rates" data-field="per_hour" data-where="metric=functions">—</span></div>
+        <span class="sub" data-show="unmeasured" data-metric="functions" hidden>not measured yet</span>
+        <span class="sub">since start <span data-draw="r-since" data-metric="functions" data-source="rates" data-field="per_hour_total" data-where="metric=functions">—</span>/h</span>
+        <span class="sub"><span data-draw="r-done" data-metric="functions" data-source="rates" data-field="done" data-where="metric=functions">—</span> of <span data-draw="r-total" data-metric="functions" data-source="rates" data-field="total" data-where="metric=functions">—</span> done</span>
+        <span class="sub" data-show="every" data-metric="functions" hidden>about one every <span data-draw="r-every" data-metric="functions" data-source="rate-every" data-field="hours" data-where="metric=functions">—</span> h</span>
+      </div>
+      <div class="card">
+        <span class="label">Systems per hour</span>
+        <div class="gauge"><div class="arc" data-draw="r-gauge" data-metric="systems" data-source="rates"></div><span class="big" data-draw="r-rate" data-metric="systems" data-source="rates" data-field="per_hour" data-where="metric=systems">—</span></div>
+        <span class="sub" data-show="unmeasured" data-metric="systems" hidden>not measured yet</span>
+        <span class="sub">since start <span data-draw="r-since" data-metric="systems" data-source="rates" data-field="per_hour_total" data-where="metric=systems">—</span>/h</span>
+        <span class="sub"><span data-draw="r-done" data-metric="systems" data-source="rates" data-field="done" data-where="metric=systems">—</span> of <span data-draw="r-total" data-metric="systems" data-source="rates" data-field="total" data-where="metric=systems">—</span> done</span>
+        <span class="sub" data-show="every" data-metric="systems" hidden>about one every <span data-draw="r-every" data-metric="systems" data-source="rate-every" data-field="hours" data-where="metric=systems">—</span> h</span>
+      </div>
+      <div class="card">
+        <span class="label">Phases per hour</span>
+        <div class="gauge"><div class="arc" data-draw="r-gauge" data-metric="phases" data-source="rates"></div><span class="big" data-draw="r-rate" data-metric="phases" data-source="rates" data-field="per_hour" data-where="metric=phases">—</span></div>
+        <span class="sub" data-show="unmeasured" data-metric="phases" hidden>not measured yet</span>
+        <span class="sub">since start <span data-draw="r-since" data-metric="phases" data-source="rates" data-field="per_hour_total" data-where="metric=phases">—</span>/h</span>
+        <span class="sub"><span data-draw="r-done" data-metric="phases" data-source="rates" data-field="done" data-where="metric=phases">—</span> of <span data-draw="r-total" data-metric="phases" data-source="rates" data-field="total" data-where="metric=phases">—</span> done</span>
+        <span class="sub" data-show="every" data-metric="phases" hidden>about one every <span data-draw="r-every" data-metric="phases" data-source="rate-every" data-field="hours" data-where="metric=phases">—</span> h</span>
+      </div>
+      <div class="card">
+        <span class="label">Tokens per hour</span>
+        <div class="gauge"><div class="arc" data-draw="r-gauge" data-metric="tokens" data-source="rates"></div><span class="big" data-draw="r-rate" data-metric="tokens" data-source="rates" data-field="per_hour" data-where="metric=tokens">—</span></div>
+        <span class="sub" data-show="unmeasured" data-metric="tokens" hidden>not measured yet</span>
+        <span class="sub">since start <span data-draw="r-since" data-metric="tokens" data-source="rates" data-field="per_hour_total" data-where="metric=tokens">—</span>/h</span>
+        <span class="sub"><span data-draw="r-done" data-metric="tokens" data-source="rates" data-field="done" data-where="metric=tokens">—</span> used so far</span>
+        <span class="sub"><span data-draw="r-perfn" data-metric="tokens" data-source="rates" data-field="per_function" data-where="metric=tokens">—</span> per proven function</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card accts" id="accounts" hidden>
+    <span class="label">Claude accounts</span>
+    <ul class="acct" data-draw="accounts" data-source="accounts"></ul>
   </section>
 
   <section class="card">
@@ -148,6 +209,105 @@
           }));
         }
       }));
+    }
+  });
+})();
+</script>
+
+<script>
+dash.calc('rate-every', {
+  inputs: ['rates'],
+  title: 'Hours per completion',
+  description: 'One divided by the last-24-hour rate per hour, for each measured rate.',
+  fn: (rates) => rates.map((r) => ({ metric: r.metric, hours: Number(r.per_hour) > 0 ? 1 / Number(r.per_hour) : null })),
+});
+</script>
+
+<script>
+(() => {
+  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const num = (v) => (v == null || v === '' || isNaN(Number(v)) ? null : Number(v));
+  const yes = (v) => v === true || v === 1 || String(v).toLowerCase() === 'true';
+  const rows = (id) => { const d = dash.data(id); return d.status === 'ok' && Array.isArray(d.data) ? d.data : null; };
+  const rowOf = (id, m) => (rows(id) || []).find((r) => r.metric === m) || null;
+  const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+  const fmtRate = (m, v) => v == null ? '—' : m === 'tokens' ? compact.format(v) : d3.format(v >= 10 ? '.1f' : '.2f')(v);
+  const fmtCount = (m, v) => v == null ? '—' : m === 'tokens' ? compact.format(v) : d3.format(',')(v);
+  const ago = (iso) => {
+    const t = iso ? new Date(iso) : null; if (!t || isNaN(t)) return '—';
+    const m = Math.round((Date.now() - t.getTime()) / 60000);
+    if (m < 1) return 'just now';
+    if (m < 60) return m + ' min ago';
+    const h = Math.round(m / 60); if (h < 48) return h + ' h ago';
+    return Math.round(h / 24) + ' d ago';
+  };
+
+  dash.onData(() => {
+    const r = rows('rates');
+    const measured = !!r && r.some((x) => x.measured_at);
+    for (const e of document.querySelectorAll('#dash-root [data-show]')) {
+      const m = e.dataset.metric; const row = m && r ? r.find((x) => x.metric === m) : null;
+      const rate = row ? num(row.per_hour) : null;
+      const show = { measured: !m && measured, unmeasured: m ? !!r && rate == null : !!r && !measured, every: rate != null && rate > 0 && rate < 0.1 }[e.dataset.show];
+      e.hidden = !show;
+    }
+    const a = rows('accounts');
+    for (const s of document.querySelectorAll('#dash-root .accts')) s.hidden = !(a && a.length >= 2);
+  });
+
+  const field = (name, key, fmt) => dash.draw(name, (e) => { const m = e.dataset.metric; const row = rowOf('rates', m); e.textContent = row ? fmt(m, num(row[key])) : '—'; });
+  field('r-rate', 'per_hour', fmtRate);
+  field('r-since', 'per_hour_total', fmtRate);
+  field('r-done', 'done', fmtCount);
+  field('r-total', 'total', fmtCount);
+  field('r-perfn', 'per_function', fmtCount);
+  dash.draw('r-ago', (e) => { const r = rows('rates'); const at = r && r.map((x) => x.measured_at).filter(Boolean).sort().pop(); e.textContent = at ? ago(at) : '—'; });
+  dash.draw('r-every', (e) => { const row = rowOf('rate-every', e.dataset.metric); const h = row ? num(row.hours) : null; e.textContent = h == null ? '—' : d3.format(h < 10 ? '.1f' : ',.0f')(h); });
+
+  dash.draw('r-gauge', (el) => {
+    const row = rowOf('rates', el.dataset.metric);
+    const v = row ? num(row.per_hour) : null;
+    const w = Math.max(120, el.clientWidth || 240);
+    const R = Math.min(w / 2 - 2, 100); const h = R + 2;
+    el.replaceChildren();
+    const svg = d3.select(el).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${w} ${h}`).attr('aria-hidden', 'true');
+    const g = svg.append('g').attr('transform', `translate(${w / 2},${R})`);
+    const arc = d3.arc().innerRadius(R * 0.8).outerRadius(R).cornerRadius(2);
+    g.append('path').attr('d', arc({ startAngle: -Math.PI / 2, endAngle: Math.PI / 2 })).style('fill', 'var(--cds-chart-grid)');
+    if (v == null) return;
+    const max = Math.max(num(row.peak_per_hour) || 0, v) * 1.25;
+    const f = max > 0 ? Math.min(1, v / max) : 0;
+    if (f > 0) g.append('path').attr('d', arc({ startAngle: -Math.PI / 2, endAngle: -Math.PI / 2 + Math.PI * f })).style('fill', 'var(--color-ok)');
+  });
+
+  const minsUntil = (r, now) => {
+    let p;
+    try { p = new Intl.DateTimeFormat('en-US', { timeZone: r.tz || 'UTC', weekday: 'short', hour: 'numeric', minute: 'numeric', hourCycle: 'h23' }).formatToParts(now); }
+    catch { p = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short', hour: 'numeric', minute: 'numeric', hourCycle: 'h23' }).formatToParts(now); }
+    const part = (t) => (p.find((x) => x.type === t) || {}).value;
+    const cur = DAYS.indexOf(part('weekday')) * 1440 + (Number(part('hour')) % 24) * 60 + Number(part('minute'));
+    const target = Number(r.refresh_dow) * 1440 + Number(r.refresh_hour) * 60;
+    return ((target - cur) % 10080 + 10080) % 10080;
+  };
+  const span = (cls, text) => { const s = document.createElement('span'); if (cls) s.className = cls; s.textContent = text; return s; };
+  const hourText = (h) => (h % 12 || 12) + (h < 12 ? ' am' : ' pm');
+  const inText = (mins) => {
+    if (mins === 0) return 'now';
+    const d = Math.floor(mins / 1440); const h = Math.floor((mins % 1440) / 60); const m = mins % 60;
+    return 'in ' + (d ? d + 'd ' + h + 'h' : h ? h + 'h ' + m + 'm' : m + ' min');
+  };
+
+  dash.draw('accounts', (ul) => {
+    ul.replaceChildren();
+    const a = rows('accounts'); if (!a) return;
+    const now = new Date();
+    const list = a.map((r) => ({ r, mins: minsUntil(r, now) })).sort((x, y) => x.mins - y.mins);
+    for (const { r, mins } of list) {
+      const li = document.createElement('li');
+      const b = document.createElement('b'); b.textContent = String(r.account);
+      const state = yes(r.active) ? span('ok', 'in use') : yes(r.spent) ? span('muted', 'spent') : span('', 'available');
+      li.append(b, span('muted', ' · '), state, span('muted', ' · refreshes ' + DAYS[Number(r.refresh_dow)] + ' ' + hourText(Number(r.refresh_hour)) + ' (' + inText(mins) + ')'));
+      ul.append(li);
     }
   });
 })();
