@@ -1,0 +1,324 @@
+<meta name="dash-one-writer">
+<style>
+.df { display: grid; gap: var(--cds-gap-lg); font-family: var(--font-anthropic-sans); font-variant-numeric: tabular-nums; max-width: 64rem; }
+.df h1 { font-size: var(--cds-font-size-title); font-weight: 400; font-family: var(--font-anthropic-serif); margin: 0; }
+.df h2 { font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); margin: 0; }
+.df .take { margin: var(--cds-gap-xs) 0 0; color: var(--color-fg-muted); }
+.df .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); gap: var(--cds-gap-md); }
+.df .card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); display: grid; gap: var(--cds-gap-sm); align-content: start; min-width: 0; }
+.df .label { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); text-transform: uppercase; letter-spacing: .04em; }
+.df .big { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: 2.25rem; line-height: 1.1; }
+.df .ok { color: var(--color-ok); } .df .bad { color: var(--color-bad); } .df .warn { color: var(--color-warn); } .df .muted { color: var(--color-fg-muted); }
+.df .sub, .df .note { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.df .note { margin: 0; }
+.df .line { margin: 0; font-size: var(--cds-font-size-caption); overflow-wrap: anywhere; }
+.df .imps { margin: 0; padding-left: 1.1rem; display: grid; gap: var(--cds-gap-xs); font-size: var(--cds-font-size-caption); overflow-wrap: anywhere; }
+.df .bar { height: .5rem; background: var(--cds-chart-grid); border-radius: var(--cds-radius); overflow: hidden; min-width: 3rem; }
+.df .bar i { display: block; height: 100%; width: 0; background: var(--color-ok); border-radius: var(--cds-radius); }
+.df .stack { display: flex; height: .75rem; border-radius: var(--cds-radius); overflow: hidden; background: var(--cds-chart-grid); }
+.df .stack i { display: block; height: 100%; }
+.df .legend { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm) var(--cds-gap-md); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.df .legend span { display: inline-flex; align-items: center; gap: var(--cds-gap-xs); }
+.df .sw { display: inline-block; width: .65rem; height: .65rem; border-radius: 2px; }
+.df .chip { display: inline-block; min-width: 1.5rem; text-align: center; padding: 0 var(--cds-pad-sm); border-radius: var(--cds-radius); font-size: var(--cds-font-size-caption); border: 1px solid var(--color-border-line); color: var(--color-fg-muted); white-space: nowrap; }
+.df .chip.ok, .df .chip.bad, .df .chip.warn { border-color: currentColor; }
+.df .scroll { overflow: auto; max-height: 28rem; }
+.df table { width: 100%; border-collapse: collapse; font-size: var(--cds-font-size-caption); }
+.df th { text-align: left; font-weight: var(--cds-font-weight-medium); color: var(--color-fg-muted); position: sticky; top: 0; background: var(--color-panel); padding: var(--cds-pad-xs) var(--cds-pad-sm) var(--cds-pad-xs) 0; border-bottom: 1px solid var(--color-border-line); }
+.df td { padding: var(--cds-pad-xs) var(--cds-pad-sm) var(--cds-pad-xs) 0; border-bottom: 1px solid var(--color-border-line); vertical-align: top; overflow-wrap: anywhere; }
+.df th.n, .df td.n { text-align: right; white-space: nowrap; }
+.df td small { display: block; color: var(--color-fg-muted); }
+.df .metrics { display: grid; gap: var(--cds-gap-sm); }
+.df .mrow { display: grid; grid-template-columns: minmax(0, 13rem) minmax(0, 1fr); gap: var(--cds-gap-xs) var(--cds-gap-md); align-items: center; padding: var(--cds-pad-xs) 0; border-bottom: 1px solid var(--color-border-line); }
+.df .mname { font-size: var(--cds-font-size-caption); overflow-wrap: anywhere; }
+.df .mbars { display: grid; gap: 3px; min-width: 0; }
+.df .mb { display: grid; grid-template-columns: 2.5rem minmax(0, 1fr) 6.5rem; gap: var(--cds-gap-sm); align-items: center; font-size: var(--cds-font-size-caption); }
+.df .mb .t { height: .5rem; background: var(--cds-chart-grid); border-radius: var(--cds-radius); overflow: hidden; }
+.df .mb .t i { display: block; height: 100%; border-radius: var(--cds-radius); }
+.df .mb .v { text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.df input[type=search] { font: inherit; font-size: var(--cds-font-size-caption); padding: var(--cds-pad-xs) var(--cds-pad-sm); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); background: var(--color-bg); color: var(--color-fg); width: min(100%, 18rem); }
+.df .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: var(--cds-gap-md); }
+.df .failed { display: flex; align-items: center; justify-content: center; gap: var(--cds-gap-sm); color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); min-height: 2rem; }
+.df .failed::before { content: ""; width: .375rem; height: .375rem; border-radius: 50%; background: var(--color-bad); }
+.df [data-dash-source-state=empty] { color: transparent; }
+.df [data-dash-source-state=refreshing] { opacity: .5; transition: opacity var(--cds-dur-slow); }
+@media (max-width: 36rem) {
+  .df .wide { display: none; }
+  .df .mrow { grid-template-columns: minmax(0, 1fr); }
+  .df .mb { grid-template-columns: 2.25rem minmax(0, 1fr) 5.5rem; }
+}
+</style>
+
+<div class="df">
+  <header>
+    <h1 id="top">{{TITLE}}</h1>
+    <p class="take" data-draw="headline" data-source="verdict" data-field="headline">—</p>
+  </header>
+
+  <section class="tiles" aria-label="Verdict">
+    <div class="card">
+      <span class="label">Functions proven</span>
+      <span class="big" data-draw="pct" data-source="verdict" data-field="pct">—</span>
+      <span class="sub"><span data-draw="proven" data-source="verdict" data-field="proven">—</span> of <span data-draw="total" data-source="verdict" data-field="total">—</span> functions in NEW</span>
+      <div class="bar"><i data-draw="pct-bar" data-source="verdict" data-field="pct"></i></div>
+    </div>
+    <div class="card">
+      <span class="label">Dimensions better</span>
+      <span class="big" data-draw="better" data-source="verdict" data-field="dims_better">—</span>
+      <span class="sub"><span data-draw="worse" data-source="verdict" data-field="dims_worse">—</span> worse, of <span data-draw="measured" data-source="verdict" data-field="dims_measured">—</span> scored on both sides</span>
+    </div>
+    <div class="card">
+      <span class="label">Biggest improvements</span>
+      <ol class="imps">
+        <li data-draw="imp1" data-source="verdict" data-field="improvement_1">—</li>
+        <li data-draw="imp2" data-source="verdict" data-field="improvement_2">—</li>
+        <li data-draw="imp3" data-source="verdict" data-field="improvement_3">—</li>
+      </ol>
+    </div>
+    <div class="card">
+      <span class="label">Biggest regression</span>
+      <p class="line" data-draw="regression" data-source="verdict" data-field="regression">—</p>
+      <span class="label">OLD verdict</span>
+      <p class="line" data-draw="old-verdict" data-source="verdict" data-field="old_verdict">—</p>
+    </div>
+  </section>
+
+  <section class="card" id="scorecard">
+    <h2>Scorecard</h2>
+    <p class="note">Each overhaul-check dimension, 0 healthy to 3 critical. Lower is better. NEW is scored from its own measurements by the same table; a dimension the script cannot score shows not measured.</p>
+    <div class="scroll">
+      <table data-source="scorecard" data-row-key="dim">
+        <thead><tr><th data-field="dim">Dim</th><th data-field="name">Dimension</th><th class="n" data-field="old">OLD</th><th class="n" data-field="new">NEW</th><th data-field="change">Change</th><th class="wide" data-field="old_numbers">OLD numbers</th><th class="wide" data-field="new_numbers">NEW numbers</th></tr></thead>
+        <tbody data-draw="scorecard"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="metrics">
+    <h2>Code metrics</h2>
+    <p class="note">Each row on its own scale, the longer bar at full width. NEW is green where it is better and red where it is worse.</p>
+    <div class="legend"><span><i class="sw" style="background: var(--cds-chart-muted)"></i>OLD</span><span><i class="sw" style="background: var(--color-ok)"></i>NEW better</span><span><i class="sw" style="background: var(--color-bad)"></i>NEW worse</span><span><i class="sw" style="background: var(--cds-chart-reference)"></i>NEW same or neutral</span></div>
+    <div class="metrics" data-draw="metrics" data-source="metrics"></div>
+  </section>
+
+  <section class="card" id="parity">
+    <h2>Function parity</h2>
+    <p class="note">Every function in FUNCTIONS.md. Proven means its Acceptance passed on deployed main.</p>
+    <div class="stack" data-draw="parity-stack" data-source="parity"></div>
+    <div class="legend">
+      <span><i class="sw" style="background: var(--color-ok)"></i>Proven <b data-draw="n-proven" data-source="parity">—</b></span>
+      <span><i class="sw" style="background: var(--color-warn)"></i>Building <b data-draw="n-building" data-source="parity">—</b></span>
+      <span><i class="sw" style="background: var(--color-bad)"></i>Blocked <b data-draw="n-blocked" data-source="parity">—</b></span>
+      <span><i class="sw" style="background: var(--cds-chart-muted)"></i>Missing <b data-draw="n-missing" data-source="parity">—</b></span>
+    </div>
+    <div class="scroll">
+      <table data-source="parity" data-row-key="system">
+        <thead><tr><th data-field="system">System</th><th class="n" data-field="total">Total</th><th class="n" data-field="proven">Proven</th><th class="n wide" data-field="building">Building</th><th class="n wide" data-field="blocked">Blocked</th><th class="n" data-field="missing">Missing</th></tr></thead>
+        <tbody data-draw="parity"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="not-proven">
+    <h2>Functions not proven</h2>
+    <p class="note">Search by id, system, phase or name.</p>
+    <input type="search" class="fn-search" placeholder="Search functions" aria-label="Search functions not proven">
+    <div class="scroll">
+      <table data-source="functions" data-row-key="id">
+        <thead><tr><th data-field="id">Id</th><th class="wide" data-field="system">System</th><th data-field="phase">Phase</th><th data-field="function">Function</th><th data-field="status">Status</th></tr></thead>
+        <tbody data-draw="functions"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="patterns">
+    <h2>Bug patterns</h2>
+    <p class="note">Each old bug pattern, the STANDARDS rule that prevents it, whether its lint exists in NEW, and bugs filed against it during the build.</p>
+    <div class="scroll">
+      <table data-source="patterns" data-row-key="id">
+        <thead><tr><th data-field="id">Id</th><th data-field="pattern">Pattern</th><th class="wide" data-field="rules">Rules</th><th data-field="lint_status">Lint</th><th class="n" data-field="new_bugs">Bugs</th></tr></thead>
+        <tbody data-draw="patterns"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <section class="card" id="bugs">
+      <h2>Bugs, OLD against NEW</h2>
+      <p class="note">From each project's bug ledger and git history.</p>
+      <table data-source="bugs" data-row-key="measure">
+        <thead><tr><th data-field="measure">Measure</th><th class="n" data-field="old">OLD</th><th class="n" data-field="new">NEW</th></tr></thead>
+        <tbody data-draw="bugs"></tbody>
+      </table>
+    </section>
+    <section class="card" id="cost">
+      <h2>Fleet cost</h2>
+      <p class="note">NEW from the fleet dashboard files; OLD as the plan recorded it.</p>
+      <div class="scroll">
+        <table data-source="cost" data-row-key="metric">
+          <thead><tr><th data-field="metric">Measure</th><th data-field="old">OLD</th><th data-field="new">NEW</th></tr></thead>
+          <tbody data-draw="cost"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <section class="card" id="survived">
+    <h2>What survived</h2>
+    <p class="note">Salvaged files, kept data, owner capabilities, and old capabilities NEW has not proven yet.</p>
+    <div class="scroll">
+      <table data-source="survived" data-row-key="kind,item">
+        <thead><tr><th data-field="kind">Kind</th><th data-field="item">Item</th><th data-field="status">Status</th></tr></thead>
+        <tbody data-draw="survived"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="note">OLD measured from <span data-draw="old-src" data-source="verdict" data-field="old_measure">—</span>; NEW from <span data-draw="new-src" data-source="verdict" data-field="new_measure">—</span>. Generated <span data-draw="gen" data-source="verdict" data-field="generated_at">—</span>.</p>
+</div>
+
+<script>
+(() => {
+  const rows = (id) => { const d = dash.data(id); return d.status === 'ok' && Array.isArray(d.data) ? d.data : null; };
+  const failed = (id) => dash.data(id).status === 'error';
+  const one = () => { const r = rows('verdict'); return r && r[0] ? r[0] : null; };
+  const isNum = (v) => v !== null && v !== '' && v !== undefined && !isNaN(Number(v));
+  const fmt = (v) => {
+    if (!isNum(v)) return v == null || v === '' ? 'not measured' : String(v);
+    const n = Number(v);
+    return Number.isInteger(n) ? d3.format(',')(n) : d3.format(',.2~f')(n);
+  };
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const chip = (text, cls) => el('span', 'chip ' + (cls || ''), text);
+  const changeCls = (c) => c === 'better' ? 'ok' : c === 'worse' ? 'bad' : '';
+  const scoreCls = (s) => !isNum(s) ? '' : Number(s) >= 3 ? 'bad' : Number(s) === 2 ? 'warn' : Number(s) === 0 ? 'ok' : '';
+  const fail = (box, id, cols) => {
+    if (!failed(id)) return false;
+    if (cols) { const tr = el('tr'); const td = el('td'); td.colSpan = cols; td.append(el('div', 'failed', 'Failed to load')); tr.append(td); box.append(tr); }
+    else box.append(el('div', 'failed', 'Failed to load'));
+    return true;
+  };
+  const cell = (tr, value, cls, note) => {
+    const td = el('td', cls, isNum(value) || (value != null && value !== '') ? fmt(value) : null);
+    if (!(isNum(value) || (value != null && value !== ''))) td.append(el('span', 'muted', 'not measured'));
+    if (note) td.append(el('small', null, note));
+    tr.append(td); return td;
+  };
+
+  // verdict tiles
+  const text = (name, key, f) => dash.draw(name, (e) => { const v = one(); e.textContent = v ? (f ? f(v[key]) : fmt(v[key])) : '—'; });
+  text('headline', 'headline', String);
+  text('pct', 'pct', (p) => d3.format('.0%')(Number(p) / 100));
+  text('proven', 'proven'); text('total', 'total');
+  text('better', 'dims_better'); text('worse', 'dims_worse'); text('measured', 'dims_measured');
+  ['imp1', 'imp2', 'imp3'].forEach((n, i) => text(n, 'improvement_' + (i + 1), String));
+  text('regression', 'regression', String);
+  text('old-verdict', 'old_verdict', String);
+  text('old-src', 'old_measure', String); text('new-src', 'new_measure', String);
+  text('gen', 'generated_at', (t) => { const d = new Date(t); return isNaN(d) ? String(t) : d3.utcFormat('%b %-d, %Y %H:%M UTC')(d); });
+  dash.draw('pct-bar', (e) => { const v = one(); e.style.width = v ? Math.min(100, Number(v.pct) || 0) + '%' : '0'; });
+
+  // scorecard
+  dash.draw('scorecard', (tb) => {
+    tb.replaceChildren(); const r = rows('scorecard'); if (fail(tb, 'scorecard', 7) || !r) return;
+    for (const s of r) {
+      const tr = el('tr'); tr.append(el('td', null, s.dim)); tr.append(el('td', null, s.name));
+      const o = el('td', 'n'); o.append(isNum(s.old) ? chip(String(s.old), scoreCls(s.old)) : el('span', 'muted', 'not measured')); tr.append(o);
+      const n = el('td', 'n'); n.append(isNum(s.new) ? chip(String(s.new), scoreCls(s.new)) : el('span', 'muted', 'not measured')); tr.append(n);
+      const c = el('td'); c.append(chip(s.change, changeCls(s.change))); tr.append(c);
+      cell(tr, s.old_numbers || null, 'wide', s.old_source);
+      cell(tr, s.new_numbers || null, 'wide', s.note);
+      tb.append(tr);
+    }
+  });
+
+  // metric bars
+  dash.draw('metrics', (box) => {
+    box.replaceChildren(); const r = rows('metrics'); if (fail(box, 'metrics') || !r) return;
+    for (const m of r) {
+      const row = el('div', 'mrow');
+      const name = el('div', 'mname', m.metric); name.append(el('small', 'sub', ' ' + m.unit)); row.append(name);
+      const bars = el('div', 'mbars');
+      const max = Math.max(isNum(m.old) ? Math.abs(Number(m.old)) : 0, isNum(m.new) ? Math.abs(Number(m.new)) : 0) || 1;
+      const newColor = m.change === 'better' ? 'var(--color-ok)' : m.change === 'worse' ? 'var(--color-bad)' : 'var(--cds-chart-reference)';
+      for (const [side, v, color, note] of [['OLD', m.old, 'var(--cds-chart-muted)', ''], ['NEW', m.new, newColor, m.note]]) {
+        const b = el('div', 'mb'); b.append(el('span', 'muted', side));
+        const t = el('div', 't'); const i = el('i'); i.style.width = isNum(v) ? (100 * Math.abs(Number(v)) / max) + '%' : '0'; i.style.background = color; t.append(i); b.append(t);
+        const val = el('span', 'v' + (isNum(v) ? '' : ' muted'), isNum(v) ? fmt(v) : 'not measured');
+        if (!isNum(v) && note) val.title = note;
+        b.append(val); bars.append(b);
+      }
+      if (!isNum(m.new) && m.note) bars.append(el('small', 'sub', m.note));
+      row.append(bars); box.append(row);
+    }
+  });
+
+  // parity
+  const totals = () => { const r = rows('parity'); if (!r) return null; const t = { proven: 0, building: 0, blocked: 0, missing: 0, total: 0 }; for (const s of r) for (const k in t) t[k] += Number(s[k]) || 0; return t; };
+  ['proven', 'building', 'blocked', 'missing'].forEach((k) => dash.draw('n-' + k, (e) => { const t = totals(); e.textContent = t ? d3.format(',')(t[k]) : '—'; }));
+  dash.draw('parity-stack', (box) => {
+    box.replaceChildren(); const t = totals(); if (fail(box, 'parity') || !t || !t.total) return;
+    const colors = { proven: 'var(--color-ok)', building: 'var(--color-warn)', blocked: 'var(--color-bad)', missing: 'var(--cds-chart-muted)' };
+    for (const k of ['proven', 'building', 'blocked', 'missing']) { const i = el('i'); i.style.width = (100 * t[k] / t.total) + '%'; i.style.background = colors[k]; box.append(i); }
+  });
+  dash.draw('parity', (tb) => {
+    tb.replaceChildren(); const r = rows('parity'); if (fail(tb, 'parity', 6) || !r) return;
+    for (const s of r) {
+      const tr = el('tr'); tr.append(el('td', null, s.system));
+      for (const [k, cls] of [['total', 'n'], ['proven', 'n ok'], ['building', 'n wide'], ['blocked', 'n wide'], ['missing', 'n']]) tr.append(el('td', cls, fmt(s[k])));
+      tb.append(tr);
+    }
+  });
+
+  // functions not proven, with search
+  let query = '';
+  for (const box of document.querySelectorAll('.fn-search')) box.addEventListener('input', () => { query = box.value.trim().toLowerCase(); dash.draw('functions'); });
+  const stCls = (s) => s === 'proven' ? 'ok' : s === 'blocked' ? 'bad' : s === 'building' ? 'warn' : '';
+  dash.draw('functions', (tb) => {
+    tb.replaceChildren(); const r = rows('functions'); if (fail(tb, 'functions', 5) || !r) return;
+    for (const f of r) {
+      if (f.status === 'proven') continue;
+      if (query && ![f.id, f.system, f.phase, f.function].join(' ').toLowerCase().includes(query)) continue;
+      const tr = el('tr'); tr.append(el('td', null, f.id)); tr.append(el('td', 'wide', f.system)); tr.append(el('td', null, f.phase)); tr.append(el('td', null, f.function));
+      const c = el('td'); c.append(chip(f.status, stCls(f.status))); tr.append(c); tb.append(tr);
+    }
+  });
+
+  // patterns
+  dash.draw('patterns', (tb) => {
+    tb.replaceChildren(); const r = rows('patterns'); if (fail(tb, 'patterns', 5) || !r) return;
+    for (const p of r) {
+      const tr = el('tr'); tr.append(el('td', null, p.id)); tr.append(el('td', null, p.pattern)); tr.append(el('td', 'wide', p.rules));
+      const s = String(p.lint_status || ''); const c = el('td');
+      c.append(chip(s, /^lint present/.test(s) ? 'ok' : /^lint missing/.test(s) ? 'bad' : '')); tr.append(c);
+      cell(tr, p.new_bugs, 'n'); tb.append(tr);
+    }
+  });
+
+  // bugs and cost
+  const pairTable = (name, key, cols) => dash.draw(name, (tb) => {
+    tb.replaceChildren(); const r = rows(name); if (fail(tb, name, 3) || !r) return;
+    for (const b of r) {
+      const tr = el('tr'); const k = el('td', null, b[key]); if (b.source) k.append(el('small', null, b.source)); tr.append(k);
+      const oldNote = !isNum(b.old) && !b.old ? b.note : '';
+      cell(tr, b.old, cols, oldNote && name === 'bugs' ? oldNote : '');
+      cell(tr, b.new, cols, (b.new == null || b.new === '') ? b.note : '');
+      tb.append(tr);
+    }
+  });
+  pairTable('bugs', 'measure', 'n');
+  pairTable('cost', 'metric', '');
+
+  // survived
+  dash.draw('survived', (tb) => {
+    tb.replaceChildren(); const r = rows('survived'); if (fail(tb, 'survived', 3) || !r) return;
+    for (const s of r) {
+      const tr = el('tr'); tr.dataset.key = encodeURIComponent(s.kind) + ',' + encodeURIComponent(s.item);
+      tr.append(el('td', null, s.kind)); tr.append(el('td', null, s.item));
+      const st = String(s.status || ''); const c = el('td');
+      c.append(chip(st, /^in NEW|owner found|rewritten/.test(st) ? 'ok' : /missing|^0 of|not in NEW/.test(st) ? 'bad' : '')); tr.append(c);
+      tb.append(tr);
+    }
+  });
+})();
+</script>
