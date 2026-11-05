@@ -11,11 +11,12 @@ from pathlib import Path
 SPEC_FILES = ["CLAUDE.md", "spec/STANDARDS.md", "spec/ARCHITECTURE.md", "spec/PLAN.md",
               "spec/MASTER-AGENT.md", "spec/MACHINES.md"]
 TRIPWIRES = [f"H{i:02d}" for i in range(1, 25)]
-CHECKPOINT_HOURS = ["4", "12", "24", "48", "72"]
+GATES = ["Phase 0 gate", "stall gate"]
+DEADLINE = re.compile(r"by hour|deadline|within \d+ (min|minutes|hours?)\b|minute \d+|hour \d+", re.I)
 BRIEF_FIELDS = ["FUNCTIONS id", "Acceptance", "allowed files", "INDEX", "hook", "call cap", "hand-back",
                 "hand-off"]
 TEMPLATE_KINDS = ["m0-pr", "risky-pr", "post-merge-sample", "design-note", "management", "stub-check",
-                  "protected-batch", "replan", "rate-change", "final"]
+                  "protected-batch", "replan", "final"]
 CLAUDE_MD_MAX_WORDS = 400
 BANNED = re.compile(r"\b(weeks?|sprints?|person-days?|\d+(\.\d+)?\s*(-\s*\d+\s*)?days?)\b", re.I)
 TABLE_MAX_ROWS = 40
@@ -238,12 +239,15 @@ def main():
         if len(r) < 4 or not all(c for c in r[1:4]):
             miss(f"tripwire {h} needs threshold, source and action columns")
 
-    # Phase 0, kill checkpoints, brief fields.
+    # Phase 0, gates, no time words in brief text, brief fields.
     if not re.search(r"Phase 0", plan):
         miss("PLAN.md has no Phase 0")
-    for h in CHECKPOINT_HOURS:
-        if not re.search(rf"\b[Hh]our[s]?\b[^.\n]*\b{h}\b", ma):
-            miss(f"MASTER-AGENT has no kill checkpoint at hour {h}")
+    for g in GATES:
+        if g.lower() not in ma.lower():
+            miss(f"MASTER-AGENT does not name the {g}")
+    for n, line in enumerate(ma.splitlines(), 1):
+        if "brief" in line.lower() and (m := DEADLINE.search(line)):
+            miss(f"MASTER-AGENT:{n} brief text has a time word '{m.group(0)}'")
     for fld in BRIEF_FIELDS:
         if fld.lower() not in ma.lower():
             miss(f"brief template lacks '{fld}'")
@@ -257,6 +261,10 @@ def main():
             miss(f"FLEET/templates has no '{kind}' auditor template")
         elif "<TARGET>" not in (tdir / hit[0]).read_text(encoding="utf-8", errors="replace"):
             miss(f"FLEET/templates/{hit[0]} has no <TARGET> slot")
+    for n in names:
+        for i, line in enumerate((tdir / n).read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            if m := DEADLINE.search(line):
+                miss(f"FLEET/templates/{n}:{i} has a time word '{m.group(0)}'")
 
     print(f"SUMMARY misses={len(misses)} prose_words={total}/{cap} functions={nfun} rules={len(rule_ids)}")
     sys.exit(1 if misses else 0)

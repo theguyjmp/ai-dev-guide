@@ -7,7 +7,7 @@ description: Dissect an existing platform or project and write a short, strict, 
 
 You produce a rebuild plan that a master agent and 20 to 40 builders can execute fast without making the old mistakes. You plan; you never build product code here. Do not ask the owner questions: take the recommended option and note it in one line. **Exception:** anything that spends money, deletes, publishes publicly or changes an account other than the one the owner named still needs the owner's yes. Creating the private repo on the account the owner named is covered by the request.
 
-The builders are agents, not people. An agent writes a lint script in minutes and a module in an hour. Every duration in the plan is in hours and comes from the throughput math in Step 4. The words day-estimate, person-day, sprint and week are banned from the spec. The real limits are check runs per hour, merge-queue throughput, tokens and review latency, never typing speed.
+The builders are agents, not people. Every duration in the plan is in hours and comes from the throughput math in Step 4, as a projection health.py computes for the owner's dashboard only. No agent is given a time limit, target hour, rate or plan curve: agents get call caps, exit checks (the gate, Acceptance, lints) and ordering gates. The words day-estimate, person-day, sprint and week are banned from the spec. The real limits are check runs per hour, merge-queue throughput, tokens and review latency, never typing speed.
 
 If an overhaul-check report exists for OLD (`<OLD>/OVERHAUL-CHECK.md` or the path the owner gives), read it first. Its measurements replace Step 1's code half (use its OVERHAUL-CHECK-data/measure.json; do not re-measure), and its per-area verdicts (keep, refactor, rewrite) seed the salvage list.
 
@@ -63,39 +63,38 @@ Tables do not count toward the word cap, but no spec table may have more than 40
 4. **spec/PLAN.md:**
    - **Goal and the one number:** functions proven on main of the total.
    - **M0, in this order:** check CLI and slots, merge queue and gate bot, deploy of main, health.py, dispatcher; then traits and stubs, owners.toml, lints, red-team suite, salvage. Phase 0 cannot be proven without the first five, so they come first.
-   - **Phase 0, the risk slice:** the 3 to 5 highest technical risks (kernel, renderer, solver, file format, whatever this project's are), built as one thin end-to-end path, for example open, model, render, save. Its briefs are listed here, hand-written, because they go out before the dispatcher is trusted. Its deadline is the hour the throughput math gives for it, by hour 12 when the math allows and never later than the end of M0; PLAN names that hour as the Phase 0 hour. Missing it means the plan is wrong.
-   - **Phases** in hours, with exit tests.
+   - **Phase 0, the risk slice:** the 3 to 5 highest technical risks (kernel, renderer, solver, file format, whatever this project's are), built as one thin end-to-end path, for example open, model, render, save. Its briefs are listed here, hand-written, because they go out before the dispatcher is trusted. It is gated, not timed: no build packet of a later phase is dispatched until Phase 0 is proven on deployed main (the Phase 0 gate).
+   - **Phases** with exit tests and ordering gates; their hours are a projection (dashboard only).
    - **The systems table:** functions, phase, exactly one owner each, and write or integrate. Integrate a proven library before writing one; say which library and why.
    - **The throughput math:**
      - Finish hours = functions ÷ (functions per builder-hour × fleet size), capped by check runs per hour and merge-queue merges per hour.
      - Until the pilots measure the rate, use the old fleet's measured rate × 3, marked ASSUMED.
-     - At hour 4, the timeline is re-derived from the pilot rate by this formula only, and the result is logged in RULINGS.md. A change of more than 20% either way needs a fresh blind auditor's approval before the kill checkpoints use it.
+     - health.py re-derives the projection by this formula only, after the pilots' first PRs and then every 24 h of active fleet time, and logs it in RULINGS.md. No agent acts on it.
      - Any phase longer than the math names its bottleneck.
    - **The token budget:** a target number of tokens per proven function, and a total against the account's weekly limit.
    - **Also:** the shared-hub line, the salvage list pinned to a commit (at most 30 files; more files mean more rewrite), the team, and the definition of done (every function proven, full gate green, final blind audit passed).
    - Seams for future systems go into owners, not new systems.
 5. **spec/MASTER-AGENT.md:**
-   - **The main chat stays thin.** health.py runs every 10 minutes from an external scheduler (Windows Task Scheduler on the owner's PC, or a cloud routine), not from the main chat. It writes HEALTH.tsv, the dashboard data files and COORD-STATE's mechanical fields. One in-session Monitor prints only new HEALTH.tsv red lines and is the main chat's wake path. The main chat wakes only on a red, a kill-checkpoint hour, or a heartbeat at most hourly. Hand-back notices get no tool call and are handled together each loop. It reads MASTER-CARD and COORD-STATE only at session start and after a compaction. Rulings and design-note answers are written by a short-lived ruling agent (Opus for design, Sonnet otherwise), which returns 3 lines; the master never reads a log or diff itself.
+   - **The main chat stays thin.** health.py runs every 10 minutes from an external scheduler (Windows Task Scheduler on the owner's PC, or a cloud routine), not from the main chat. It writes HEALTH.tsv, the dashboard data files and COORD-STATE's mechanical fields. One in-session Monitor prints only new HEALTH.tsv red lines and is the main chat's wake path. The main chat wakes only on a red, a gate result, or a heartbeat at most hourly. It may read each agent's and packet's start, end and duration and progress over time in HEALTH.tsv and COORD-STATE, and acts on them only by process fixes (stop and WIP, a fresh pass, a smaller packet, a better brief, more slots, the stall gate), never by passing a time to an agent. Hand-back notices get no tool call and are handled together each loop. It reads MASTER-CARD and COORD-STATE only at session start and after a compaction. Rulings and design-note answers are written by a short-lived ruling agent (Opus for design, Sonnet otherwise), which returns 3 lines; the master never reads a log or diff itself.
    - **If the master stops:** there is no pager. The master uploads the dashboard hourly and its status dataset goes stale 2 hours after the last upload, so a stopped master shows on the dashboard. health.py keeps running from the scheduler, and a new session resumes from MASTER-CARD and COORD-STATE.
-   - **Soft launch:** 3 pilot builders, checked at first edit, first check and first PR. The external health run is every 10 minutes. Ramp 3, 10, 20, 40 only on green.
+   - **Soft launch:** 3 pilot builders, checked at first edit (by call 15), first check (by call 40) and first PR (within the call cap). The external health run is every 10 minutes. Ramp 3, 10, 20, 40 only when the pilot gate is green.
    - **The tripwire table:** columns `| Id | Red when | Source | Action |`, the fixed ids below, each with a numeric threshold, the source it is measured from (transcripts, git, the gate log or the machines), and the action.
-   - **Kill checkpoints:**
-     - Hours are active fleet hours from hour 0, the first M0 launch, stored in COORD-STATE. Paused and usage-limit time does not count.
-     - Hour 4: every pilot has a merged PR.
-     - Hour 12: merged PRs are at least 70% of the plan curve.
-     - The Phase 0 hour: M0 has landed, every red-team violation is refused, and Phase 0 is proven.
-     - Hours 24, 48, 72, then every 24: proven functions are at least 70% of plan, tokens per proven function are within budget, and no module has been frozen twice.
-     - A miss stops the phase and sends a digest to the owner. A fresh blind auditor approves the re-plan; the master never approves its own.
+   - **Gates** on progress and order, checked by health.py (no fixed-hour checkpoints):
+     - Pilot gate: every pilot's first PR merged green before any ramp step.
+     - Phase 0 gate: no build packet of a later phase is dispatched until Phase 0 is proven on deployed main, M0 has landed and every red-team violation is refused.
+     - Stall gate: the proven rate under 70% of the projection's rate for 2 runs in a row (H24), or tokens per proven function over budget for 2 runs (H03).
+     - Freeze gate: a module frozen twice.
+     - A red stall or freeze gate stops the phase and sends a digest to the owner. A fresh blind auditor approves the re-plan; the master never approves its own and never sees the target, only the red.
    - **Auditor briefs are fixed templates** in FLEET/templates/, written in Step 4b and on the protected list. The master fills only the target (a PR, batch or function list) and cannot change the instructions.
    - **Management check:** every 3 hours. Mechanical items are checked by script; a fresh agent samples briefs and rejections.
-   - **Design notes:** written per system early, with a blind review within 30 minutes.
+   - **Design notes:** written per system early, with a blind review before its system's first build packet.
    - **Scripted briefs:** self-contained, with fixed contents: the packet's FUNCTIONS id and Acceptance, its owner module and allowed files, the text of each STANDARDS rule it touches, the INDEX of every owner it calls inlined, the hook rule, the call cap, the wait rule, the hand-back format, and for a follow-on pass the previous pass's hand-off file (done, left, files touched, next step). Builders never read spec/ or FLEET logs, and a follow-on pass does not re-explore what its hand-off already says.
-   - **The wait rule:** an agent waits on a check as ONE foreground until-loop of at most 9 minutes, never a background wait that re-wakes it. No agent is launched just to wait.
+   - **The wait rule:** an agent waits on a check as ONE foreground wait, at most 9 minutes per call (a tool timeout), never a background wait that re-wakes it. No agent is launched just to wait.
    - **Review:** lints on every PR. An auditor before merge on risky PRs (new module, hook in another owner, unsafe code, security, dependency) and on a random sample after merge. A blind auditor also checks 10% of proven functions every 12 hours for stubs and thin fakes.
    - **Fixes and stalls:**
      - One fix pass, then a design change.
      - A waste hunt when the rate stalls: one analyst per red episode, never one per health run.
-     - Bugs travel as fix packets, one agent per bug through to its queued audit, inside the 60-minute limit (H15). The merge queue's batched gate is the build-once train for an overhaul: builders never run full builds, and a fix counts only when the gate proves it red on main before and green after.
+     - Bugs travel as fix packets, one agent per bug through to its queued audit, inside its call cap (H15 is a health.py measurement only). The merge queue's batched gate is the build-once train for an overhaul: builders never run full builds, and a fix counts only when the gate proves it red on main before and green after.
      - A frozen module (H23) gets one fresh Opus architect who redesigns or splits it, never more fix passes.
    - **The mechanic:** one Sonnet agent with a merge-only brief. It merges audited M0 PRs until the merge queue runs, then ends.
    - **What binds the master:**
@@ -117,13 +116,13 @@ Tables do not count toward the word cap, but no spec table may have more than 40
    - The red-team suite runs on every lint change and every 24 hours.
    - Old-fleet scripts (context watch, burn, outcome watch) are reused through a SALVAGE PR where they exist, not rewritten.
 
-Fixed tripwire ids (overhaul-build acts on these ids; the thresholds below are defaults the plan may tighten, never loosen):
+Fixed tripwire ids (overhaul-build acts on these ids; the thresholds below are defaults the plan may tighten, never loosen). health.py measures every row unless the row names another source; the agent measured is never told a time:
 
 | Id | Red when | Action |
 |---|---|---|
 | H01 | No function proven on main for 60 min while builders run | Analyst finds where time went; fix that step |
 | H02 | Agent context over 150k | WIP commit, stop, fresh pass |
-| H03 | Tokens per proven function over budget for 2 runs | Analyst; fix the costliest step |
+| H03 | Tokens per proven function over budget for 2 runs (stall gate) | Stop the phase; analyst fixes the costliest step |
 | H04 | Reader: 30 or more calls since the agent's last edit (mid-pass) | WIP commit, stop, fresh pass with a better brief |
 | H05 | Spinner: 3 or more wakes on waiting | WIP commit, stop, fresh pass |
 | H06 | Pass over 100 build calls or 60 review calls | WIP commit, stop, fresh pass with a smaller packet |
@@ -144,12 +143,12 @@ Fixed tripwire ids (overhaul-build acts on these ids; the thresholds below are d
 | H21 | Master idle: a red open 2 runs with no action, or no launch or ruling for 30 min while reds are open (health.py) | Red on the dashboard; the next session acts on it first |
 | H22 | Churn: over 30% of merged PRs move no function, or one file changed 3 or more times with no function moved | Stop those packets; ruling |
 | H23 | Module rot: over 2 fix PRs per proven function, or a gate-red rate over 20% | Freeze the module; one Opus architect redesigns |
-| H24 | Proven rate under 70% of the plan rate for 2 runs | Waste hunt; re-derive the timeline |
+| H24 | Proven rate under 70% of the projection's rate for 2 runs (stall gate) | Stop the phase; waste hunt; blind-audited re-plan |
 
 Writing rules: plain sentences, no diagrams, no summaries, no "why" paragraphs, no charts, every line something a person or agent acts on. Prefer cutting to adding. Respect the owner's machine limits (for example the owner's own PC at low priority with RAM and disk floors).
 
 ## Step 4b. Auditor templates
-Write one file per auditor kind into FLEET/templates/, named by kind: m0-pr, risky-pr, post-merge-sample, design-note, management, stub-check, protected-batch, replan, rate-change, final. Each holds:
+Write one file per auditor kind into FLEET/templates/, named by kind: m0-pr, risky-pr, post-merge-sample, design-note, management, stub-check, protected-batch, replan, final. No template holds a time limit, target hour or rate. Each holds:
 - the fixed instructions and a `<TARGET>` slot, which is the only thing the master fills;
 - exactly what to read: the target, the STANDARDS rules it cites (ids with their text), and the INDEX of the owners involved, never the whole spec;
 - its call cap, its model and the three-line hand-back.
@@ -174,7 +173,7 @@ Write FLEET/REVIEW-GOAL.md from this template and launch one Opus agent with "Re
 2. Holes: functions without a phase or owner, capabilities two owners could claim, phases that need later work, patterns without a rule.
 3. Management: do builders start with the right information, including the INDEX of every owner they call, and work with their neighbours? Would the tripwires stop the old failures in the first hour? Can anyone get around a rule, including the master rewriting its own limits, re-deriving its own plan rate, or steering its own auditors?
 4. Feasibility: which systems exceed what this fleet can build and verify? Does Phase 0 cover the real top risks? Where should a proven library be integrated instead of written?
-5. Timeline: is every duration in hours and backed by the throughput math? Flag any estimate that assumes human speed, and any ASSUMED number presented as measured.
+5. Timeline: is every projected duration in hours, backed by the throughput math and kept to health.py and the dashboard? Flag any time limit, target hour or rate given to an agent, any estimate that assumes human speed, and any ASSUMED number presented as measured.
 Write FLEET/REVIEW-r1.md: the verdict, then at most 30 findings ranked, one line each (file:line, defect, fix). Stop at 80 tool calls. Hand back three lines."
 
 When the salvage list has files, launch a second Opus agent at the same time, with FLEET/SALVAGE-GOAL.md: "Audit every file on the salvage list in spec/PLAN.md against spec/STANDARDS.md. Verdict per file: keep, salvage with named changes, or rewrite, with rule ids and file:line. Write FLEET/SALVAGE-r1.md. Stop at 80 tool calls. Hand back three lines."
@@ -204,7 +203,7 @@ Run `py -3 ~/.claude/skills/overhaul-plan/scripts/spec_check.py <NEW> <FLEET>`. 
 - every PATTERNS row maps to an existing rule;
 - every STANDARDS lint is in the M0 list, including the duplicate-capability lint;
 - H01 to H24 have a number, a source and an action;
-- Phase 0 exists and the kill checkpoints are at hours 4, 12, 24, 48 and 72;
+- Phase 0 exists, MASTER-AGENT names the Phase 0 gate and the stall gate, and no template or brief text in MASTER-AGENT holds a time limit;
 - no human-time words appear;
 - the brief template has every fixed field;
 - the word cap and the 40-row table cap hold.
