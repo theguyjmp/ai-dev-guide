@@ -210,6 +210,20 @@ def main():
     if not re.search(r"duplicate[- ]capabilit", std, re.I):
         miss("STANDARDS names no duplicate-capability lint")
 
+    # Ownership guards and plain words.
+    arch = texts.get("spec/ARCHITECTURE.md", "")
+    for key in ("forbidden_types", "callers"):
+        if key not in arch:
+            miss(f"ARCHITECTURE owners.toml schema lacks '{key}'")
+    guards = {"catch-all module-name ban (utils, helpers, common)": r"\butils\b.*\bhelpers\b|\bhelpers\b.*\butils\b",
+              "import allowlist": r"allow-?list",
+              "module header naming the owner": r"header",
+              "pasted search before new code": r"search",
+              "slop lint": r"Lint:\s*`?slop"}
+    for name, rx in guards.items():
+        if not re.search(rx, std, re.I):
+            miss(f"STANDARDS lacks the {name}")
+
     # Tripwires.
     ma = texts.get("spec/MASTER-AGENT.md", "")
     trows = {r[0]: r for r in table_rows(ma) if r and re.fullmatch(r"H\d\d", r[0])}

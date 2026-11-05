@@ -1,6 +1,6 @@
 ---
 name: overhaul-check
-description: Decide whether the current project needs a full overhaul (rebuild from the ground up), a partial rewrite of some areas, targeted refactors, or nothing. Measures and scores architecture, code organization, code quality, duplication, tests and the gate, dependencies, security, bug and change history, build and delivery, roadmap fit and the owner's own rules, then writes a scored report with a verdict and the repair-versus-rebuild hours. Use when the owner asks whether a project needs an overhaul or rewrite, or wants a full health or quality audit of a codebase.
+description: Decide whether the current project needs a full overhaul (rebuild from the ground up), a partial rewrite of some areas, targeted refactors, or nothing. Measures and scores architecture, code organization, code quality, duplication, tests and the gate, dependencies, security, bug and change history, build and delivery, roadmap fit, wordiness (AI slop in code, comments, docs and UI text) and the owner's own rules, then writes a scored report with a verdict and the repair-versus-rebuild hours. Use when the owner asks whether a project needs an overhaul or rewrite, or wants a full health or quality audit of a codebase.
 ---
 
 # overhaul-check
@@ -16,7 +16,7 @@ A rewrite is expensive and repeats old mistakes unless something forces it. So t
 - Old fleet history if it exists (burn, outcome or context-watch output; hand-back folders): items landed per hour, tokens per item, rework passes.
 
 ## Step 2. Measure by script
-Run `py -3 -I ~/.claude/skills/overhaul-check/scripts/measure.py <PROJECT> --out <scratchpad>/measure.json`. Add `--depth 3` when the top two folder levels are too coarse to separate modules. It prints 12 lines, which are the only part you read in chat. The JSON holds: lines of code by language and module, test ratio, files over 500/1000/2000 lines, functions over 75/150 lines, duplication % and the worst file pairs, module import cycles, fan-in and fan-out, duplicate-capability file names (several stores, registries, configs and so on), TODO and suppression density, secret hits (file:line only), LLM call sites without `cache_control`, raw colors versus tokens, manifests, and git churn, fix share, reverts and hotspots.
+Run `py -3 -I ~/.claude/skills/overhaul-check/scripts/measure.py <PROJECT> --out <scratchpad>/measure.json`. Add `--depth 3` when the top two folder levels are too coarse to separate modules. It prints 13 lines, which are the only part you read in chat. The JSON holds: lines of code by language and module, test ratio, files over 500/1000/2000 lines, functions over 75/150 lines, duplication % and the worst file pairs, module import cycles, fan-in and fan-out, duplicate-capability file names (several stores, registries, configs and so on), TODO and suppression density, secret hits (file:line only), LLM call sites without `cache_control`, raw colors versus tokens, wordiness (filler-phrase hits per kLOC, comment ratio, docs words per kLOC, emoji, the wordiest files and docs), manifests, and git churn, fix share, reverts and hotspots.
 
 ## Step 3. Run the project's own checks (read-only, at most 15 minutes each, low priority)
 Use only tools already installed and dependencies already present. Anything you cannot run is recorded as "not run: <reason>"; it is never a pass.
@@ -46,7 +46,8 @@ Write each brief to the scratchpad and launch the three agents in the background
   3. dead code;
   4. magic values;
   5. test quality (do tests wait on real results, or on proxies and sleeps; do they mock the thing they test);
-  6. how readable it is to a new agent.
+  6. how readable it is to a new agent;
+  7. wordiness (AI slop): comments that restate the code, filler in docs, READMEs, UI text and error messages, wrappers that only pass through, and docs nobody acts on. Start from measure.json's slop block, and quote the worst 5 with file:line.
   For security, check the secret hits without ever printing a value, injection (SQL, shell, path, HTML), authz holes, unsafe deserialization, and data leaving the machine. Write <scratchpad>/check-quality.md."
 - **History (Sonnet, 60 calls):** "From git (measure.json's git block), the bug ledger and the issue tracker (`gh issue list --state all --limit 500 --json number,title,labels,state,createdAt,closedAt` if a GitHub remote exists), measure:
   1. open and closed bug counts and bugs per kLOC;
@@ -74,9 +75,11 @@ Wait for all three with no polling; a "still waiting" notice gets no tool call. 
 | B | Bug history | fix share ≥25%, or 1–2 recurring patterns | ≥40%, 3–5 patterns, or bugs that came back | ≥60%, or over 5 patterns |
 | R | Build and delivery | build warnings | the build is flaky or slow (over 10 min for a check) | it cannot build from a clean checkout |
 | F | Roadmap fit | 1 roadmap item needs a local refactor | several need refactors across modules | the core roadmap needs a new architecture |
+| W | Wordiness (AI slop) | filler hits ≥2 per kLOC, or comment ratio ≥0.35 | ≥5 per kLOC, comment ratio ≥0.5, or docs over 2,000 words per kLOC | ≥10 per kLOC, or docs over 5,000 words per kLOC |
 | O | Owner rules | 1 violation class | an LLM call path without prompt caching, or raw styles where tokens exist | any modesty, data-consent or secrets violation |
 
 ## Step 6. Verdict (the smallest one that fits)
+W is fixed by a sweep and a slop lint, so it adds fix-list items but never counts toward PARTIAL REWRITE or OVERHAUL.
 - **NO ACTION:** no dimension at 2 or above.
 - **TARGETED REFACTOR:** any dimension at 2 or above, but A and F at 1 or below, and every fix stays inside one module.
 - **PARTIAL REWRITE:** A, G or F at 2 or above, but confined to modules holding under a third of the code. Name the modules. Rewrite them behind their interfaces; keep the rest.

@@ -1,7 +1,7 @@
 """Measure a project for overhaul-check. Read-only, standard library only.
 
 Usage: py -3 -I measure.py <repo> [--out report.json] [--depth 2] [--days 180]
-Writes the full JSON to --out (default <system temp>/measure.json, never inside the repo) and prints a 12-line summary.
+Writes the full JSON to --out (default <system temp>/measure.json, never inside the repo) and prints a 13-line summary.
 Heuristic: function sizes, duplication and import graphs are approximations, good to +-10%.
 """
 import json
@@ -59,6 +59,18 @@ CAP_WORDS = ("store", "registry", "picker", "undo", "history", "cache", "logger"
              "settings", "utils", "util", "helpers", "api", "client", "service", "manager",
              "router", "state", "theme", "auth", "db", "queue", "events", "bus")
 HEX = re.compile(r"#[0-9a-fA-F]{3,8}\b")
+# Wordiness ("AI slop"): filler phrases that add words and no meaning.
+SLOP = re.compile(
+    r"(?i)\b(?:it'?s (?:important|worth) (?:to note|noting)|it is (?:important|worth|crucial|essential) to|"
+    r"in order to|comprehensive|robust(?:ly)?|seamless(?:ly)?|leverag(?:e|es|ed|ing)|delv(?:e|es|ing)|"
+    r"utiliz(?:e|es|ed|ing)|facilitat\w*|streamlin\w*|cutting[- ]edge|state[- ]of[- ]the[- ]art|best practices|"
+    r"empower\w*|unlock(?:s|ing)? the|harness(?:es|ing)? the power|in today'?s|"
+    r"plays? an? (?:crucial|key|vital|pivotal|important) role|a testament to|furthermore|moreover|"
+    r"ensure that|meticulous\w*|elevat(?:e|es|ing) (?:your|the)|"
+    r"this (?:function|method|class|component|module) (?:is used to|will|handles|is responsible))\b")
+EMOJI = re.compile("[\U0001F300-\U0001FAFF☀-➿⭐]")
+DOC_EXT = {".md", ".mdx", ".rst"}
+HASH_COMMENT_LANGS = {"python", "ruby", "gdscript"}
 WINDOW = 8
 
 
@@ -240,7 +252,7 @@ def main():
     out_path = Path(opt("--out", os.path.join(tempfile.gettempdir(), "measure.json")))
     depth, days = int(opt("--depth", 2)), int(opt("--days", 180))
 
-    files, manifests = [], []
+    files, manifests, docs = [], [], []
     for root, dirs, names in os.walk(repo):
         # src/bin holds real code (Rust binaries); every other bin/ is build output.
         dirs[:] = [d for d in dirs if not d.startswith(".") and
@@ -250,6 +262,8 @@ def main():
             if nm in MANIFEST_NAMES and len(manifests) < 50:
                 manifests.append(str(p.relative_to(repo)))
             ext = p.suffix.lower()
+            if ext in DOC_EXT:
+                docs.append(p)
             if ext in LANG or ext in STYLE_EXT:
                 try:
                     if ".min." in nm or p.stat().st_size > 2_000_000:
@@ -262,6 +276,7 @@ def main():
     per_lang, per_mod, sizes, funcs = Counter(), defaultdict(lambda: [0, 0]), [], []
     markers, suppress, secrets, llm_nocache, llm_files = Counter(), Counter(), [], [], 0
     cache_files = []
+    slop_hits, slop_phrases, slop_files, emoji, comment_lines = 0, Counter(), Counter(), 0, 0
     hex_raw, var_tokens, test_loc, code_loc = 0, 0, 0, 0
     windows, line_count_for_dup = defaultdict(list), 0
     meaningful_by_file, edges = {}, defaultdict(set)
@@ -301,6 +316,16 @@ def main():
             for kind, rx in SECRETS:
                 if rx.search(l) and not re.search(r"example|placeholder|your[_-]|xxxx|<", l, re.I):
                     secrets.append(f"{rel}:{i} {kind}")
+            if lang != "style":
+                s = l.lstrip()
+                if s.startswith(("//", "/*", "* ", "*/")) or (lang in HASH_COMMENT_LANGS and s.startswith("#")
+                                                             and not s.startswith("#!")) or (lang == "lua" and s.startswith("--")):
+                    comment_lines += 1
+                for mt in SLOP.finditer(l):
+                    slop_hits += 1
+                    slop_phrases[mt.group(0).lower()] += 1
+                    slop_files[rel] += 1
+                emoji += len(EMOJI.findall(l))
         if lang in ("ts", "js", "style", "vue", "svelte"):
             hex_raw += len(HEX.findall(text))
             var_tokens += text.count("var(--")
@@ -329,6 +354,26 @@ def main():
         for k in range(len(norm) - WINDOW + 1):
             h = hash(tuple(s for _, s in norm[k:k + WINDOW]))
             windows[h].append((rel, k))
+
+    doc_words, doc_sizes = 0, []
+    for p in docs:
+        rel = str(p.relative_to(repo)).replace("\\", "/")
+        try:
+            if p.stat().st_size > 2_000_000:
+                continue
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        w = len(re.findall(r"[A-Za-z0-9][\w'-]*", text))
+        doc_words += w
+        doc_sizes.append((w, rel))
+        for i, l in enumerate(text.splitlines(), 1):
+            for mt in SLOP.finditer(l):
+                slop_hits += 1
+                slop_phrases[mt.group(0).lower()] += 1
+                slop_files[rel] += 1
+            emoji += len(EMOJI.findall(l))
+    doc_sizes.sort(reverse=True)
 
     covered, pair = set(), Counter()
     for occ in windows.values():
@@ -386,6 +431,13 @@ def main():
                 "files_setting_cache_control": cache_files[:30],
                 "note": "a call file without cache_control may rely on a shared helper listed in files_setting_cache_control; confirm before scoring"},
         "style": {"raw_hex_colors": hex_raw, "css_var_tokens": var_tokens},
+        "slop": {"filler_hits": slop_hits,
+                 "filler_per_kloc": round(slop_hits / (code_loc / 1000), 2) if code_loc else 0,
+                 "top_phrases": slop_phrases.most_common(15), "top_files": slop_files.most_common(15),
+                 "comment_ratio": round(comment_lines / code_loc, 3) if code_loc else 0,
+                 "emoji": emoji, "doc_files": len(doc_sizes), "doc_words": doc_words,
+                 "doc_words_per_kloc": round(doc_words / (code_loc / 1000)) if code_loc else 0,
+                 "largest_docs": doc_sizes[:15]},
         "manifests": manifests,
         "git": git_stats(repo, days),
     }
@@ -402,6 +454,8 @@ def main():
     print(f"markers/kLOC {report['markers_per_kloc']}, suppressions/kLOC {report['suppressions_per_kloc']}, secret hits {len(secrets)}")
     print(f"LLM call files {llm_files}, without cache_control {len(llm_nocache)}, files setting cache_control {len(cache_files)}")
     print(f"style: raw hex {hex_raw} vs var(--) {var_tokens}")
+    W = report["slop"]
+    print(f"slop: filler {W['filler_per_kloc']}/kLOC ({slop_hits}), comment ratio {W['comment_ratio']}, docs {doc_words} words in {len(doc_sizes)} files ({W['doc_words_per_kloc']}/kLOC), emoji {emoji}")
     if G:
         print(f"git: {G['commits']} commits in the {days} d before {G['last_commit']}, fix share {G['fix_share']:.0%}, reverts {G['reverts']}, total {G['commits_total']} since {G['first_commit']}")
     print(f"full report: {out_path.resolve()}")
