@@ -63,7 +63,7 @@ Tables do not count toward the word cap, but no spec table may have more than 40
 4. **spec/PLAN.md:**
    - **Goal and the one number:** functions proven on main of the total.
    - **M0, in this order:** check CLI and slots, merge queue and gate bot, deploy of main, health.py, dispatcher; then traits and stubs, owners.toml, lints, red-team suite, salvage. Phase 0 cannot be proven without the first five, so they come first.
-   - **Phase 0, the risk slice:** the 3 to 5 highest technical risks (kernel, renderer, solver, file format, whatever this project's are), built as one thin end-to-end path, for example open, model, render, save. Its briefs are listed here, hand-written, because they go out before the dispatcher is trusted. It must be proven on main by hour 12, or the plan is wrong.
+   - **Phase 0, the risk slice:** the 3 to 5 highest technical risks (kernel, renderer, solver, file format, whatever this project's are), built as one thin end-to-end path, for example open, model, render, save. Its briefs are listed here, hand-written, because they go out before the dispatcher is trusted. Its deadline is the hour the throughput math gives for it, by hour 12 when the math allows and never later than the end of M0; PLAN names that hour as the Phase 0 hour. Missing it means the plan is wrong.
    - **Phases** in hours, with exit tests.
    - **The systems table:** functions, phase, exactly one owner each, and write or integrate. Integrate a proven library before writing one; say which library and why.
    - **The throughput math:**
@@ -82,7 +82,8 @@ Tables do not count toward the word cap, but no spec table may have more than 40
    - **Kill checkpoints:**
      - Hours are active fleet hours from hour 0, the first M0 launch, stored in COORD-STATE. Paused and usage-limit time does not count.
      - Hour 4: every pilot has a merged PR.
-     - Hour 12: M0 has landed, every red-team violation is refused, and Phase 0 is proven.
+     - Hour 12: merged PRs are at least 70% of the plan curve.
+     - The Phase 0 hour: M0 has landed, every red-team violation is refused, and Phase 0 is proven.
      - Hours 24, 48, 72, then every 24: proven functions are at least 70% of plan, tokens per proven function are within budget, and no module has been frozen twice.
      - A miss stops the phase and sends a digest to the owner. A fresh blind auditor approves the re-plan; the master never approves its own.
    - **Auditor briefs are fixed templates** in FLEET/templates/, written in Step 4b and on the protected list. The master fills only the target (a PR, batch or function list) and cannot change the instructions.

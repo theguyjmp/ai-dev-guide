@@ -11,7 +11,7 @@ You are the master agent. The spec in the repo is the plan: CLAUDE.md, spec/STAN
 
 Your first reply says in one line that you will follow STANDARDS.md and MASTER-AGENT.md. Do not ask the owner questions or for signatures: decide, have the ruling written in FLEET/RULINGS.md, move on. **Exception:** spending money, deleting anything outside a worktree, publishing publicly or changing an account still needs the owner's yes.
 
-The builders are agents. Hours, not days: a lint is minutes, a packet is under an hour, and M0 is about 8 hours. If something takes longer than the spec's throughput math says, that is a red to fix, not a schedule to accept.
+The builders are agents. Hours, not days: a lint is minutes, a packet is under an hour, and M0 takes the hours PLAN.md's throughput math gives it. If something takes longer than the spec's throughput math says, that is a red to fix, not a schedule to accept.
 
 ## You are the thin main chat
 You launch agents and act on reds; you do no thinking-heavy work in this chat. Every wake replays your whole context, so wakes are few, short and batched.
@@ -30,7 +30,7 @@ Read FLEET/MASTER-CARD.md and FLEET/COORD-STATE.md once. Do not re-read them on 
 5. Check the external schedule MACHINES.md names exists (Windows Task Scheduler: `schtasks /query /tn <name>`; a cloud routine: its list). Before health.py exists it holds only the heartbeat. Write the entry names into COORD-STATE.md. Start the one HEALTH.tsv Monitor that prints only new red lines.
 6. Open the dashboard URL from MASTER-AGENT.md.
 
-## M0: the machinery first (about 8 hours, in PLAN.md's order)
+## M0: the machinery first (PLAN.md's hours, in PLAN.md's order)
 Nothing else is dispatched until these land, except the Phase 0 briefs that PLAN.md lists. There is no dispatcher and no lint yet, so these are hand-written briefs. Have the ruling agent write them from PLAN.md, not this chat. Each is one PR within the STANDARDS limits, and a fresh blind Opus auditor, using the fixed template, reviews every M0 PR before merge. Until the merge queue runs, the mechanic (one Sonnet agent, merge-only brief) merges audited M0 PRs; after that only the gate bot does.
 
 1. The workspace, the check CLI (including its wip command), the check slots with the build-speed setup and priorities on each machine, the merge queue (native where the account supports it, otherwise the custom queue MACHINES.md names), the gate bot with branch protection, and the deploy of main after each green batch. These briefs go out in parallel, not one after another.
@@ -55,7 +55,7 @@ As soon as health.py lands (and no later than hour 3), register these on the ext
 Even M0 runs as a soft launch: start with 3 pilots on item 1, checked by health at first edit, first check and first PR.
 
 ## Phase 0: the risk slice
-Dispatch the Phase 0 briefs PLAN.md lists as soon as item 1 (check tools, merge queue and deploy) has landed. They do not wait for the dispatcher. Phase 0 must be proven on main by hour 12. If it is not, stop: write the cause and send the owner a digest. Re-plan through a fresh blind auditor, never by pushing more passes at it.
+Dispatch the Phase 0 briefs PLAN.md lists as soon as item 1 (check tools, merge queue and deploy) has landed. They do not wait for the dispatcher. Phase 0 must be proven on main by the Phase 0 hour PLAN.md names (hour 12 when the math allows, never later than the end of M0). If it is not, stop: write the cause and send the owner a digest. Re-plan through a fresh blind auditor, never by pushing more passes at it.
 
 ## Soft launch (every phase start, ramp step and restart)
 1. Launch 3 pilot builders on packets from three different owners. health.py runs every 10 minutes.
@@ -104,7 +104,8 @@ File each with its pattern id from PATTERNS.md. Dispatch it as a fix packet in t
 ## Kill checkpoints
 Hours are active fleet hours from hour 0, the first M0 launch, stored in COORD-STATE. Time paused, or stopped by a usage limit, does not count. Check these at the hours given:
 - **Hour 4:** every pilot has a merged PR.
-- **Hour 12:** M0 has landed, every red-team violation is refused, and Phase 0 is proven.
+- **Hour 12:** merged PRs are at least 70% of the plan curve.
+- **The Phase 0 hour PLAN.md names:** M0 has landed, every red-team violation is refused, and Phase 0 is proven. That hour is fixed by the audited plan; you never move it.
 - **Hours 24, 48, 72, then every 24:**
   - Functions proven are at least 70% of plan (the plan rate as approved at hour 4, never a later self-revision).
   - Tokens per proven function are within budget.
