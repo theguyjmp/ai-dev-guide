@@ -1,0 +1,154 @@
+<meta name="dash-one-writer">
+<style>
+.vr { display: grid; gap: var(--cds-gap-md); font-family: var(--font-anthropic-sans); font-variant-numeric: tabular-nums; max-width: 60rem; }
+.vr h1 { font-size: var(--cds-font-size-title); font-weight: 400; font-family: var(--font-anthropic-serif); margin: 0; }
+.vr .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr)); gap: var(--cds-gap-md); }
+.vr .card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); display: grid; gap: var(--cds-gap-sm); align-content: start; min-width: 0; }
+.vr .label { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); text-transform: uppercase; letter-spacing: .04em; }
+.vr .big { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: 2.25rem; line-height: 1.1; }
+.vr .big.bad { color: var(--color-bad); } .vr .big.ok { color: var(--color-ok); }
+.vr .sub { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.vr .bar { height: .5rem; background: var(--cds-chart-grid); border-radius: var(--cds-radius); overflow: hidden; min-width: 4rem; }
+.vr .bar i { display: block; height: 100%; width: 0; background: var(--color-ok); border-radius: var(--cds-radius); }
+.vr .chip { display: inline-block; padding: 0 var(--cds-pad-sm); border-radius: var(--cds-radius); font-size: var(--cds-font-size-caption); border: 1px solid var(--color-border-line); color: var(--color-fg-muted); white-space: nowrap; }
+.vr .chip.ok { color: var(--color-ok); border-color: currentColor; }
+.vr .chip.bad { color: var(--color-bad); border-color: currentColor; }
+.vr .chip.live { color: var(--color-fg); border-color: var(--color-fg); }
+.vr .tree { display: grid; }
+.vr .row { display: grid; grid-template-columns: minmax(0, 1fr) 4.5rem 3.5rem minmax(4rem, 8rem) 5.5rem; gap: var(--cds-gap-sm); align-items: center; padding: var(--cds-pad-sm) 0; border-bottom: 1px solid var(--color-border-line); }
+.vr .row .n { text-align: right; }
+.vr .row .name { min-width: 0; overflow-wrap: anywhere; }
+.vr details > summary { list-style: none; cursor: pointer; }
+.vr details > summary::-webkit-details-marker { display: none; }
+.vr details > summary .name::before { content: "▸"; display: inline-block; width: 1.1em; color: var(--color-fg-muted); transition: transform var(--cds-dur-slow); }
+.vr details[open] > summary .name::before { transform: rotate(90deg); }
+.vr details > summary:focus-visible { outline: 2px solid var(--color-fg); outline-offset: 2px; border-radius: var(--cds-radius); }
+.vr .phase > summary .name { font-weight: var(--cds-font-weight-medium); }
+.vr .lvl2 { padding-left: 1.25rem; }
+.vr .lvl3 { padding-left: 2.5rem; }
+.vr .lvl3 .name { font-size: var(--cds-font-size-caption); }
+.vr .head { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+.vr [data-dash-source-state=empty] { color: transparent; }
+.vr [data-dash-source-state=refreshing] { opacity: .5; transition: opacity var(--cds-dur-slow); }
+@media (max-width: 36rem) { .vr .row { grid-template-columns: minmax(0, 1fr) 4rem 3rem 5rem; } .vr .row .st { display: none; } }
+</style>
+
+<div class="vr">
+  <h1>{{TITLE}}</h1>
+
+  <section class="tiles">
+    <div class="card">
+      <span class="label">Complete</span>
+      <span class="big" data-draw="pct" data-source="functions" data-field="pct">—</span>
+      <span class="sub"><span data-draw="landed" data-source="functions" data-field="status">—</span> of <span data-draw="total" data-source="functions" data-field="function">—</span> functions on main</span>
+      <div class="bar"><i data-draw="landed-bar" data-source="functions" data-field="pct"></i></div>
+    </div>
+    <div class="card">
+      <span class="label">Last health check</span>
+      <span class="big" data-draw="health-ago" data-source="status" data-field="health_at">—</span>
+      <span class="sub"><span data-draw="health-red" data-source="status" data-field="health_red">—</span> of <span data-draw="health-total" data-source="status" data-field="health_total">—</span> red</span>
+    </div>
+    <div class="card">
+      <span class="label">Last management check</span>
+      <span class="big" data-draw="mgmt-ago" data-source="status" data-field="mgmt_at">—</span>
+      <span class="sub"><span data-draw="mgmt-red" data-source="status" data-field="mgmt_red">—</span> of <span data-draw="mgmt-total" data-source="status" data-field="mgmt_total">—</span> red</span>
+    </div>
+    <div class="card">
+      <span class="label">Phase</span>
+      <span class="big" data-draw="phase" data-source="status" data-field="phase">—</span>
+      <span class="sub" data-draw="phase-state" data-source="status" data-field="phase_state">—</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row head"><span>Phase, system, function</span><span class="n">Landed</span><span class="n">Done</span><span></span><span class="st">State</span></div>
+    <div class="tree" data-draw="tree" data-source="phases functions"></div>
+  </section>
+</div>
+
+<script>
+(() => {
+  const open = new Set();
+  const one = (id) => { const d = dash.data(id); return d.status === 'ok' && d.data && d.data[0] ? d.data[0] : null; };
+  const fns = () => { const d = dash.data('functions'); return d.status === 'ok' ? d.data : null; };
+  const isLanded = (f) => String(f.status).toLowerCase() === 'landed';
+  const pctOf = (list) => list.length ? list.reduce((a, f) => a + Number(f.pct || 0), 0) / list.length : 0;
+  const ago = (iso) => {
+    if (!iso) return 'never';
+    const t = new Date(iso); if (isNaN(t)) return 'never';
+    const m = Math.round((Date.now() - t.getTime()) / 60000);
+    if (m < 1) return 'just now';
+    if (m < 60) return m + ' min ago';
+    const h = Math.round(m / 60); if (h < 48) return h + ' h ago';
+    return Math.round(h / 24) + ' d ago';
+  };
+  const stateOf = (list, given) => {
+    if (given && given !== 'planned') return given;
+    if (list.length && list.every(isLanded)) return 'landed';
+    if (list.some((f) => Number(f.pct) > 0 || f.status !== 'planned')) return 'building';
+    return 'planned';
+  };
+  const chipClass = (v) => {
+    const s = String(v || '').toLowerCase();
+    if (/landed|done/.test(s)) return 'ok';
+    if (/blocked|red|fail/.test(s)) return 'bad';
+    if (/building|review|running/.test(s)) return 'live';
+    return '';
+  };
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const cells = (row, name, list, state) => {
+    row.append(el('span', 'name', name));
+    row.append(el('span', 'n', d3.format(',')(list.filter(isLanded).length) + ' / ' + d3.format(',')(list.length)));
+    const p = pctOf(list);
+    row.append(el('span', 'n', d3.format('.0%')(p / 100)));
+    const bar = el('div', 'bar'); const i = el('i'); i.style.width = p + '%'; bar.append(i); row.append(bar);
+    const st = el('span', 'st'); st.append(el('span', 'chip ' + chipClass(state), state)); row.append(st);
+  };
+  const fold = (key, cls, name, list, state, fill) => {
+    const d = el('details', cls); if (open.has(key)) d.open = true;
+    d.addEventListener('toggle', () => { if (d.open) open.add(key); else open.delete(key); });
+    const s = el('summary', 'row'); cells(s, name, list, state); d.append(s);
+    d.addEventListener('toggle', () => { if (d.open && d.childElementCount === 1) fill(d); }, { once: false });
+    if (d.open) fill(d);
+    return d;
+  };
+
+  dash.draw('pct', (e) => { const f = fns(); e.textContent = f ? d3.format('.0%')(pctOf(f) / 100) : '—'; });
+  dash.draw('landed', (e) => { const f = fns(); e.textContent = f ? d3.format(',')(f.filter(isLanded).length) : '—'; });
+  dash.draw('total', (e) => { const f = fns(); e.textContent = f ? d3.format(',')(f.length) : '—'; });
+  dash.draw('landed-bar', (e) => { const f = fns(); e.style.width = f ? pctOf(f) + '%' : '0'; });
+  const text = (name, fn) => dash.draw(name, (e) => { const s = one('status'); e.textContent = s ? fn(s) : '—'; });
+  const num = (v) => v == null ? '—' : String(v);
+  text('phase', (s) => s.phase);
+  text('phase-state', (s) => s.phase_state);
+  text('health-red', (s) => num(s.health_red));
+  text('health-total', (s) => num(s.health_total));
+  text('mgmt-red', (s) => num(s.mgmt_red));
+  text('mgmt-total', (s) => num(s.mgmt_total));
+  const agoTile = (name, atKey, redKey) => dash.draw(name, (e) => {
+    const s = one('status'); e.textContent = s ? ago(s[atKey]) : '—';
+    e.className = 'big ' + (!s ? '' : !s[atKey] || s[redKey] > 0 ? 'bad' : 'ok');
+  });
+  agoTile('health-ago', 'health_at', 'health_red');
+  agoTile('mgmt-ago', 'mgmt_at', 'mgmt_red');
+
+  dash.draw('tree', (box) => {
+    box.replaceChildren();
+    const ph = dash.data('phases'); const f = fns();
+    if (ph.status !== 'ok' || !f) return;
+    for (const p of ph.data) {
+      const inPhase = f.filter((x) => x.phase === p.phase);
+      box.append(fold(p.phase, 'phase', p.phase + '  ' + p.name, inPhase, stateOf(inPhase, p.state), (d) => {
+        const systems = d3.groups(inPhase, (x) => x.system);
+        for (const [sys, list] of systems) {
+          d.append(fold(p.phase + '/' + sys, 'lvl2', sys, list, stateOf(list), (sd) => {
+            for (const fn of list) {
+              const r = el('div', 'row lvl3'); cells(r, fn.function, [fn], fn.status); sd.append(r);
+            }
+          }));
+        }
+      }));
+    }
+  });
+})();
+</script>
