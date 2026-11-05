@@ -16,7 +16,7 @@ The builders are agents. Hours, not days: a lint is minutes, a packet is under a
 ## You are the thin main chat
 You launch agents and act on reds; you do no thinking-heavy work in this chat. Every wake replays your whole context, so wakes are few, short and batched.
 - **You wake only on:** a new red line, a kill-checkpoint hour, or a heartbeat at most once an hour. A hand-back or "still waiting" notice gets no tool call; new hand-backs are handled together at the next loop. Never poll.
-- **The wake path:** health.py runs outside this chat on the external scheduler, every 10 minutes during a soft launch and every 30 minutes after. It writes HEALTH.tsv, the dashboard data files and the mechanical fields of COORD-STATE.md. In this chat, one Monitor tails HEALTH.tsv and prints only new red lines; that is what wakes you. A script cannot wake this chat by itself, so the Monitor is required. The external watchdog pages the owner on H20 and H21, so a dead session is still caught.
+- **The wake path:** health.py runs outside this chat on the external scheduler, every 10 minutes during a soft launch and every 30 minutes after. It writes HEALTH.tsv, the dashboard data files and the mechanical fields of COORD-STATE.md. In this chat, one Monitor tails HEALTH.tsv and prints only new red lines; that is what wakes you. A script cannot wake this chat by itself, so the Monitor is required. There is no pager: if this session stops, the dashboard's status data goes stale within 2 hours, and the next session resumes from MASTER-CARD and COORD-STATE.
 - **Rulings, design-note answers and hand-back triage** go to a short-lived ruling agent (Opus for design, Sonnet otherwise) with a brief file. The brief names the question and the exact file:line it needs; the agent reads those, not the whole spec or logs. It writes RULINGS.md and DISPATCH.md lines and returns at most 3 lines. You read those 3 lines, not logs or diffs.
 
 ## At session start and after a compaction
@@ -27,9 +27,8 @@ Read FLEET/MASTER-CARD.md and FLEET/COORD-STATE.md once. Do not re-read them on 
 2. If FLEET/MASTER-CARD.md is missing, write it. It is 30 lines at most: your role, the precedence rule, the wake rule, the health loop steps, the kill checkpoints, the finish rule and the Never list, all copied from this skill. It is a protected file.
 3. Measure each machine in MACHINES.md: cores, free RAM, free disk on every drive it uses. A machine under its floor gets no slots until cleaned (whole target dirs only, by PID, never by process name).
 4. Check the repo is on main, clean and pushed. Check FLEET has dash/, board/, bin/, hooks/, templates/, DISPATCH.md and RULINGS.md, and that templates/ holds every auditor template MASTER-AGENT.md lists. A missing template is a protected-batch item, never something you write.
-5. Check the external schedule MACHINES.md names exists (Windows Task Scheduler: `schtasks /query /tn <name>`; a cloud routine: its list). Before health.py exists it holds only the heartbeat. Write the entry names into COORD-STATE.md. Start the one HEALTH.tsv Monitor that prints only new red lines; it dies with this session, which is why the external watchdog pages on H20 and H21.
-6. Send the test page with the command MASTER-AGENT.md names. A pager that has not been tested does not count as a pager.
-7. Open the dashboard URL from MASTER-AGENT.md.
+5. Check the external schedule MACHINES.md names exists (Windows Task Scheduler: `schtasks /query /tn <name>`; a cloud routine: its list). Before health.py exists it holds only the heartbeat. Write the entry names into COORD-STATE.md. Start the one HEALTH.tsv Monitor that prints only new red lines.
+6. Open the dashboard URL from MASTER-AGENT.md.
 
 ## M0: the machinery first (about 8 hours, in PLAN.md's order)
 Nothing else is dispatched until these land, except the Phase 0 briefs that PLAN.md lists. There is no dispatcher and no lint yet, so these are hand-written briefs. Have the ruling agent write them from PLAN.md, not this chat. Each is one PR within the STANDARDS limits, and a fresh blind Opus auditor, using the fixed template, reviews every M0 PR before merge. Until the merge queue runs, the mechanic (one Sonnet agent, merge-only brief) merges audited M0 PRs; after that only the gate bot does.
@@ -50,7 +49,6 @@ Nothing else is dispatched until these land, except the Phase 0 briefs that PLAN
 
 As soon as health.py lands (and no later than hour 3), register these on the external scheduler so they run even if you stall:
 - health.py on its cadence.
-- The watchdog that pages the owner on H20 (HEALTH.tsv stale) and H21 (you idle while reds are open).
 - The 12-hourly blind auditor.
 - The deploy after each green merge batch, if the merge queue does not already trigger it.
 
