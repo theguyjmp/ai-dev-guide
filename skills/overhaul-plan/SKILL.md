@@ -75,8 +75,8 @@ Tables do not count toward the word cap, but no spec table may have more than 40
    - **Also:** the shared-hub line, the salvage list pinned to a commit (at most 30 files; more files mean more rewrite), the team, and the definition of done (every function proven, full gate green, final blind audit passed).
    - Seams for future systems go into owners, not new systems.
 5. **spec/MASTER-AGENT.md:**
-   - **The main chat stays thin.** health.py runs every 10 minutes from an external scheduler (Windows Task Scheduler on the owner's PC, or a cloud routine), not from the main chat. It writes HEALTH.tsv, the dashboard data files and COORD-STATE's mechanical fields. One in-session Monitor prints only new HEALTH.tsv red lines and is the main chat's wake path; the external watchdog pages on H20 and H21. The main chat wakes only on a red, a kill-checkpoint hour, or a heartbeat at most hourly. Hand-back notices get no tool call and are handled together each loop. It reads MASTER-CARD and COORD-STATE only at session start and after a compaction. Rulings and design-note answers are written by a short-lived ruling agent (Opus for design, Sonnet otherwise), which returns 3 lines; the master never reads a log or diff itself.
-   - **Pager:** name the exact mechanism (push notification, email or Slack webhook) and the command that sends a test page.
+   - **The main chat stays thin.** health.py runs every 10 minutes from an external scheduler (Windows Task Scheduler on the owner's PC, or a cloud routine), not from the main chat. It writes HEALTH.tsv, the dashboard data files and COORD-STATE's mechanical fields. One in-session Monitor prints only new HEALTH.tsv red lines and is the main chat's wake path. The main chat wakes only on a red, a kill-checkpoint hour, or a heartbeat at most hourly. Hand-back notices get no tool call and are handled together each loop. It reads MASTER-CARD and COORD-STATE only at session start and after a compaction. Rulings and design-note answers are written by a short-lived ruling agent (Opus for design, Sonnet otherwise), which returns 3 lines; the master never reads a log or diff itself.
+   - **If the master stops:** there is no pager. The master uploads the dashboard hourly and its status dataset goes stale 2 hours after the last upload, so a stopped master shows on the dashboard. health.py keeps running from the scheduler, and a new session resumes from MASTER-CARD and COORD-STATE.
    - **Soft launch:** 3 pilot builders, checked at first edit, first check and first PR. The external health run is every 10 minutes. Ramp 3, 10, 20, 40 only on green.
    - **The tripwire table:** columns `| Id | Red when | Source | Action |`, the fixed ids below, each with a numeric threshold, the source it is measured from (transcripts, git, the gate log or the machines), and the action.
    - **Kill checkpoints:**
@@ -112,7 +112,7 @@ Tables do not count toward the word cap, but no spec table may have more than 40
    - The merge queue (native or custom, from the Inputs check) is batched. It ejects only the PRs owning a failure, never bisects, runs the full gate on every batch, and deploys main to the rebuild port after each green batch.
    - Fleet size = check runs per hour × 0.85 ÷ runs per builder-hour, with the disk math checked against free space.
    - Dispatch is scripted: packets whose owner modules overlap nothing in flight. Hook requests jump the queue.
-   - The external scheduler entries: health.py, the H20/H21 watchdog, the 12-hourly blind auditor and the deploy, each with its scheduler and command.
+   - The external scheduler entries: health.py, the 12-hourly blind auditor and the deploy, each with its scheduler and command.
    - The red-team suite runs on every lint change and every 24 hours.
    - Old-fleet scripts (context watch, burn, outcome watch) are reused through a SALVAGE PR where they exist, not rewritten.
 
@@ -139,8 +139,8 @@ Fixed tripwire ids (overhaul-build acts on these ids; the thresholds below are d
 | H17 | Protected file changed outside the batch | Revert |
 | H18 | Machine under a RAM or disk floor | Remove its slots; clean whole target dirs |
 | H19 | Any work waiting on the owner that is not spend, delete, public publish or account change | Decide it yourself; write a ruling |
-| H20 | HEALTH.tsv stale past 2 cadences (external watchdog) | Page the owner |
-| H21 | Master idle: a red open 2 runs with no action, or no launch or ruling for 30 min while reds are open (external watchdog) | Page the owner |
+| H20 | HEALTH.tsv stale past 2 cadences (checked by the master at the hourly heartbeat) | Re-register the scheduler entry; run health.py once |
+| H21 | Master idle: a red open 2 runs with no action, or no launch or ruling for 30 min while reds are open (health.py) | Red on the dashboard; the next session acts on it first |
 | H22 | Churn: over 30% of merged PRs move no function, or one file changed 3 or more times with no function moved | Stop those packets; ruling |
 | H23 | Module rot: over 2 fix PRs per proven function, or a gate-red rate over 20% | Freeze the module; one Opus architect redesigns |
 | H24 | Proven rate under 70% of the plan rate for 2 runs | Waste hunt; re-derive the timeline |
