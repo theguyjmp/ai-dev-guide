@@ -221,6 +221,9 @@ def main():
               "module header naming the owner": r"header",
               "pasted search before new code": r"search",
               "slop lint": r"Lint:\s*`?slop"}
+    mach = texts.get("spec/MACHINES.md", "")
+    if not re.search(r"find", mach) or not re.search(r"in-?flight", mach, re.I):
+        miss("MACHINES lacks the find command and its in-flight index (exists, planned, in flight)")
     for name, rx in guards.items():
         if not re.search(rx, std, re.I):
             miss(f"STANDARDS lacks the {name}")

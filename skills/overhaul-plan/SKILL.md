@@ -53,7 +53,7 @@ Tables do not count toward the word cap, but no spec table may have more than 40
      - A look-alike lint flags any new public function, component or type whose name tokens or normalized body shape match another owner's INDEX entry or code; the PR goes to the risky-PR auditor, who merges it only with a hook request to that owner or a written reason it differs.
      - Only the callers an owner row lists may import that owner (an import-allowlist lint), and layers depend only downward.
      - Every module starts with a header naming its purpose and owner id.
-     - Before new public code, the PR pastes the search of the INDEX files and the repo that shows the capability does not exist yet.
+     - Before new public code, the builder runs the check CLI's `find <words>` and pastes its output in the PR. In seconds it searches what exists (every owner's INDEX), what is planned (owners.toml rows, forbidden_types and FUNCTIONS rows, with owner and id) and what is in flight (open DISPATCH packets and new public items on open PR branches, which the check slots write to FLEET/inflight-index.tsv on every check). An unclear result is a hook request answered by the ruling agent; builders never ask the master.
      - Plain words in code, comments, docs, UI text and hand-backs: no filler phrases, no comment that restates the next line, no emoji. A slop lint checks it, using the phrase list in overhaul-check's measure.py.
 3. **spec/ARCHITECTURE.md:**
    - The layer table (owns, depends on).
@@ -106,7 +106,7 @@ Tables do not count toward the word cap, but no spec table may have more than 40
    - **Model per job:** sonnet for merge, paperwork, checks, analysts and rulings that are not design; opus for build, debug, audits, design and design rulings. No agent exists only to wait.
 6. **spec/MACHINES.md:**
    - Each machine's measured resources and its role. The owner's own PC runs at low priority under RAM and disk floors.
-   - The check CLI's name and its commands (lint, check, fix, handback, wip), for NEW's toolchain. `wip` saves a stopped agent's worktree as a pushed WIP commit plus a hand-off file (done, left, files touched, next step), so the next pass starts from it instead of re-reading.
+   - The check CLI's name and its commands (lint, check, fix, handback, wip, find), for NEW's toolchain. `wip` saves a stopped agent's worktree as a pushed WIP commit plus a hand-off file (done, left, files touched, next step), so the next pass starts from it instead of re-reading.
    - Agents never run the compiler themselves. They get a local lint in seconds, shared warm check slots, affected-only checks plus reverse dependencies, and browser specs of the affected surfaces.
    - Build speed setup for NEW's toolchain (for example compile cache, dependency unification, fast linker, test runner), plus a nightly cache sweep.
    - Generated files (INDEX.md included) are written by the slots, never committed by builders, and there are no hand-edited central lists.
