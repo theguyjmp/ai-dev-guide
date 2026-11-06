@@ -68,6 +68,22 @@
 .vr .htip { position: absolute; top: 0; pointer-events: none; background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-sm); font-size: var(--cds-font-size-caption); white-space: nowrap; z-index: 2; box-shadow: 0 2px 8px rgba(0, 0, 0, .12); }
 .vr .htip b { font-weight: 600; color: var(--color-fg); }
 .vr .htip span { color: var(--color-fg-muted); }
+.vr .pipe { display: grid; gap: var(--cds-gap-sm); }
+.vr .pbar { display: flex; height: .9rem; background: var(--cds-chart-grid); border-radius: var(--cds-radius); overflow: hidden; }
+.vr .pbar.small { height: .5rem; }
+.vr .pbar i { display: block; height: 100%; flex: none; }
+.vr .pbar i + i { box-shadow: inset 1px 0 0 var(--color-panel); }
+.vr .pk-proven { background: var(--color-ok); }
+.vr .pk-landed { background: var(--color-ok); opacity: .5; }
+.vr .pk-waiting { background: var(--color-fg-muted); }
+.vr .pk-review { background: var(--color-fg-muted); opacity: .6; }
+.vr .pk-building { background: var(--color-fg-muted); opacity: .35; }
+.vr .pk-none { background: transparent; }
+.vr .plegend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--cds-gap-xs) var(--cds-gap-md); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+.vr .plegend li { display: inline-flex; align-items: center; gap: .35em; white-space: nowrap; }
+.vr .plegend li b { color: var(--color-fg); font-weight: 600; }
+.vr .plegend .sw { display: inline-block; flex: none; width: .7em; height: .7em; border-radius: 2px; }
+.vr .plegend .sw.pk-none { border: 1px solid var(--color-border-line); background: var(--cds-chart-grid); }
 .vr [hidden] { display: none !important; }
 @container (max-width: 40rem) {
   .vr .row { grid-template-columns: minmax(0, 1fr) 3.75rem 2.75rem minmax(4.5rem, 6rem); }
@@ -80,6 +96,17 @@
 
 <div class="vr">
   <h1>{{TITLE}}</h1>
+
+  <section class="card pipe" id="pipeline">
+    <div class="sect-head">
+      <span class="label">Pipeline</span>
+      <span class="sub" data-draw="p-ago" data-source="pipeline">—</span>
+    </div>
+    <span class="sub">Functions by stage. Green is on main; grey is done work not on main yet.</span>
+    <div data-draw="p-bar" data-bar="functions" data-source="pipeline"></div>
+    <span class="sub">Packets and PRs</span>
+    <div data-draw="p-bar" data-bar="packets" data-source="pipeline"></div>
+  </section>
 
   <section class="tiles">
     <div class="card">
@@ -538,6 +565,53 @@ dash.calc('phase-now', {
       const c = el('div', 'hchart'); card.append(c); box.append(card);
       if (last != null) chart(c, s, p);
     }
+  });
+})();
+</script>
+
+<script>
+(() => {
+  // Pipeline: one stacked bar over all functions and one over packets/PRs, from the `pipeline`
+  // dataset (FLEET/dash/pipeline.json). Green is on main; greys are done but not on main yet.
+  const STAGES = {
+    functions: [
+      ['proven', 'proven', 'Proven'], ['landed', 'landed', 'Landed on main'], ['waiting_land', 'waiting', 'Passed review, waiting to land'],
+      ['in_review', 'review', 'Built, in review'], ['building', 'building', 'Building now'], ['not_started', 'none', 'Not started'],
+    ],
+    packets: [
+      ['merged', 'proven', 'Merged'], ['waiting_land', 'waiting', 'Passed review, waiting'], ['in_review', 'review', 'In review'], ['building', 'building', 'Building'],
+    ],
+  };
+  const num = (v) => (v == null || v === '' || isNaN(Number(v)) ? null : Number(v));
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const rows = () => { const d = dash.data('pipeline'); return d.status === 'ok' && Array.isArray(d.data) && d.data.length ? d.data : null; };
+  const pct = (n, t) => t > 0 ? d3.format('.0%')(n / t) : '—';
+
+  dash.draw('p-ago', (e) => {
+    const r = rows(); const at = r && r.map((x) => x.measured_at).filter(Boolean).sort().pop();
+    const m = at ? Math.round((Date.now() - new Date(at).getTime()) / 60000) : NaN;
+    e.textContent = isNaN(m) ? 'not measured yet' : 'measured ' + (m < 1 ? 'just now' : m < 60 ? m + ' min ago' : Math.round(m / 60) + ' h ago');
+  });
+
+  dash.draw('p-bar', (box) => {
+    box.replaceChildren();
+    const kind = box.dataset.bar; const r = (rows() || []).filter((x) => x.bar === kind);
+    if (!r.length) { box.append(el('span', 'none', 'not measured yet: dash/pipeline.json has not been uploaded')); return; }
+    const by = Object.fromEntries(r.map((x) => [x.stage, num(x.count) || 0]));
+    const sum = STAGES[kind].reduce((a, [k]) => a + (by[k] || 0), 0);
+    const total = num(r[0].total) != null ? num(r[0].total) : sum;
+    const bar = el('div', 'pbar' + (kind === 'packets' ? ' small' : ''));
+    bar.setAttribute('role', 'img');
+    const legend = el('ul', 'plegend'); const said = [];
+    for (const [k, cls, label] of STAGES[kind]) {
+      const n = by[k] || 0;
+      said.push(label + ' ' + n);
+      if (n > 0 && total > 0) { const i = el('i', 'pk-' + cls); i.style.width = (100 * n / total) + '%'; i.title = label + ': ' + d3.format(',')(n) + ' (' + pct(n, total) + ')'; bar.append(i); }
+      const li = el('li'); li.append(el('span', 'sw pk-' + cls), document.createTextNode(label + ' '), el('b', '', d3.format(',')(n)), document.createTextNode(' · ' + pct(n, total)));
+      legend.append(li);
+    }
+    bar.setAttribute('aria-label', said.join(', ') + ', of ' + total);
+    box.append(bar, legend);
   });
 })();
 </script>

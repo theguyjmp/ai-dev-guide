@@ -25,7 +25,7 @@ Wake only on a new red, a gate result or the 20-minute heartbeat. The heartbeat 
 7. COORD-STATE.md: you add only soft-launch stage, decisions, next launches and analyst episodes, one edit per loop; every count copied from a measurement, never estimated.
 8. Account switch or limit: update `active` and `spent` in FLEET/accounts.json at once; check the dashboard opens on that account (`references/loop.md`).
 9. Every wait.sh exit launches the dash-refresh agent first (FLEET/briefs/dash-refresh.md, `references/loop.md`), then re-arms the wait, never skipped because the last one is recent; it stays a master launch, since headless `claude -p` runs have no Artifact tool to upload. Fix a dashboard red at its cause, never by a hand upload alone.
-10. End the turn only with the wait re-armed and agents in flight. Status to the owner: four lines at most (functions proven of total, last gate, open gate reds, the one deciding item).
+10. End the turn only with the wait re-armed and agents in flight. Status to the owner: four lines at most (the pipeline from FLEET/dash/pipeline.json as `proven X, landed Y, waiting-land Z, in review W of N functions`, never proven alone; last gate and open gate reds; the one deciding item).
 
 **Rulings** go to a short-lived ruling agent (Opus for design, Sonnet otherwise) whose brief names the question and the exact file:line to read and includes `references/rulings.md`; you allocate its number when you write the brief. It returns at most 3 lines; you read those, never logs or diffs. A ruling that names machinery (a scheduled task, a bot, a hook) counts only when the next heartbeat proves it live: the task exists and its last run log shows it did its job; until then it is an open red.
 
