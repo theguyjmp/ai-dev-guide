@@ -1,6 +1,7 @@
 """Token burn check (run by heartbeat.py every 10 min; no LLM). Measures from the Claude transcripts:
   tokens_per_hour    all usage (input + cache read + cache write + output) in the last 60 min, main chat and agents
   main_ctx           context size of the main chat's latest turn
+  main_turns_per_hour main-chat model turns in the last 60 min (every agent notice is a turn)
   agents_per_hour    agent transcripts started in the last 60 min
   tokens_no_land     tokens spent since the last merge into origin/main, when that merge is older than 6 h
 Thresholds live in FLEET/BUDGET.json. Any red writes FLEET/BURN-STOP (reason inside); the PreToolUse guard
@@ -9,7 +10,7 @@ import glob, json, os, subprocess, time
 
 FLEET = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # BUDGET.json also names the project: {"repo": "<repo path>", "transcripts": "<~/.claude/projects/<slug>>", ...}
-DEFAULTS = {"tokens_per_hour": 30_000_000, "main_ctx": 200_000, "agents_per_hour": 30, "tokens_no_land": 300_000_000,
+DEFAULTS = {"tokens_per_hour": 30_000_000, "main_ctx": 300_000, "main_turns_per_hour": 60, "agents_per_hour": 30, "tokens_no_land": 300_000_000,
             "repo": "", "transcripts": ""}
 
 
@@ -61,17 +62,20 @@ def measure(b):
     subs = [f for f in glob.glob(os.path.join(proj, "*", "subagents", "*.jsonl")) if os.path.getmtime(f) > since_land]
     tph = tnl = 0
     main_ctx = 0
+    mtph = 0
     main_t = 0
     for f in mains + subs:
         for t, tok, ctx in usage_rows(f, since_land):
             tnl += tok
             if t >= hour:
                 tph += tok
+                if f in mains:
+                    mtph += 1
             if f in mains and t > main_t:
                 main_t, main_ctx = t, ctx
     aph = sum(1 for f in subs if os.path.getctime(f) >= hour)
     stale_land = land and now - land > 6 * 3600
-    return {"tokens_per_hour": tph, "main_ctx": main_ctx, "agents_per_hour": aph,
+    return {"tokens_per_hour": tph, "main_ctx": main_ctx, "main_turns_per_hour": mtph, "agents_per_hour": aph,
             "tokens_no_land": tnl if stale_land else 0}
 
 
@@ -79,7 +83,7 @@ def rows(stamp):
     b = budget()
     m = measure(b)
     out, reds = [], []
-    for k in ("tokens_per_hour", "main_ctx", "agents_per_hour", "tokens_no_land"):
+    for k in ("tokens_per_hour", "main_ctx", "main_turns_per_hour", "agents_per_hour", "tokens_no_land"):
         red = m[k] > b[k]
         out.append((stamp, "burn", k, str(m[k]), str(b[k]), "red" if red else "green"))
         if red:
