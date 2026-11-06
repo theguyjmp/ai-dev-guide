@@ -51,6 +51,7 @@ Write the block below into the owner's global agent file: ~/.claude/CLAUDE.md fo
 - Keep a state file current so a long chat can be compacted without losing anything. Compaction is automatic: don't ask me to run it.
 - Turn on prompt caching for any app code that calls an AI model repeatedly.
 - Close programs only by process ID, never by name.
+- Ask for every permission a project will need in one paste at its start (dev-setup permissions.py), never one at a time mid-build.
 <!-- ai-dev-guide rules: end -->
 ```
 
@@ -59,7 +60,8 @@ Write the block below into the owner's global agent file: ~/.claude/CLAUDE.md fo
 2. Find the real Documents folder (on Windows it may sit inside OneDrive): `powershell -NoProfile -Command "[Environment]::GetFolderPath('MyDocuments')"`. Elsewhere use ~/Documents.
 3. Create `<Documents>/AppDevelopment/<name>`. If it already exists and is not empty, ask whether to use it or pick another name.
 4. Inside it: `git init -b main`, a .gitattributes with `* text=auto eol=lf`, and a short CLAUDE.md: "Project <name>. Follow the global agent rules. Paper goes in prep/ and the fleet folder the plan names." Commit it.
-5. Tell the owner the folder path in one line.
+5. Permissions, once, now: run `py -3 ~/.claude/skills/dev-setup/scripts/permissions.py` `--repo <folder>` (add `--dir`, `--host` and `--cli` for any other folder, ssh machine or project tool already known). It prints one line. Give the owner the folder path and that line in the same message: "Paste this once in PowerShell; it prints `permissions set`." You cannot write your own permission settings (the classifier refuses it as self-modification), so never try, and never discover permissions one at a time later.
+6. Tell the owner the folder path in one line.
 
 ## Step 6. Walk them through
 1. Say: "Next we'll work out everything your app should do." Invoke dev-prep with the project folder as PROJECT. dev-prep asks its own questions and ends by asking whether to keep brainstorming or start planning.
