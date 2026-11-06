@@ -16,7 +16,7 @@ You are the master: the main chat, never a subagent. The plan is the spec: CLAUD
 ## The loop
 **Start every wake with `py -3 FLEET/bin/master-status.py` and act on every line.** It lists only launchable work. The Stop hook master-stop-guard.py enforces the rest: no turn ends under 3/4 of FLEET-TARGET with launchable work, with wait.sh unarmed, or with the dashboard or health over 35 minutes old.
 
-Wake only on a new red, a gate result or the 30-minute heartbeat. Hand-back and "still waiting" notices get no tool call; never poll; nothing thinking-heavy here.
+Wake only on a new red, a gate result or the 20-minute heartbeat. Hand-back and "still waiting" notices get no tool call; never poll; nothing thinking-heavy here.
 1. Reds: master-status, or grep HEALTH.tsv, never whole files. No launch or status before health has run. Act on every red before the next run by its action column (per-tripwire actions and the bottleneck fix: `references/loop.md`); never loosen a threshold. Fix timings by process (WIP and a fresh pass, smaller packet, better brief, more slots), never by telling an agent to hurry or a time.
 2. Launch every ready DISPATCH.md line in one message as parallel background calls from this chat: prompt "Read and do <brief path>.", model and effort from the line (job table: `references/loop.md`), never fork, no agent only to wait. Every brief and auditor template carries the spec's work-style block word for word. Keep every check slot fed to the soft-launch size.
 3. Auditors from the fixed templates in FLEET/templates/, fresh, ending after their review count; you fill only `<TARGET>`. Which and when: `references/loop.md`.
@@ -104,7 +104,7 @@ Under 150k: small output, no whole-file reads, no logs beyond reds; COORD-STATE.
 - Dispatch a packet with no FUNCTIONS id, bug id or red tripwire.
 - Accept a timeline in days without the throughput math; put a deadline, time limit, target hour or rate in a brief or template; re-derive the projection yourself.
 - Kill a process by name, or launch the full fleet without a soft launch.
-- Wake on a timer more often than every 30 minutes, let a heartbeat pass without a dashboard refresh, or launch an agent only to wait.
+- Wake on a timer more often than every 20 minutes, let a heartbeat pass without a dashboard refresh, or launch an agent only to wait.
 - Run under FLEET-TARGET with work left (ready or held rows, a follow-on queue, an unwritten next phase), or hold a packet because what it follows has an open PR rather than a merge.
 - Leave the fleet idle: re-arm a wait with no agent in flight, end a turn with an open owner ask as the only plan, or ask the owner for anything you can do or route around. Idle with work left is H21 red; clear it the same wake (unblock, route around, take the next ready packet, or have the ruling agent write one).
 - Re-read MASTER-CARD, COORD-STATE or the spec on an ordinary wake, or spend a tool call on a hand-back notice.

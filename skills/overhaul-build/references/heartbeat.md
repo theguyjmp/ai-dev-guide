@@ -17,6 +17,6 @@ Read this only when writing or fixing FLEET/bin/heartbeat.py, wait.sh, dashdata.
 
 **wait.sh** (FLEET/bin, the one wait every session uses, run in the background):
 - Writes `FLEET/.wait-armed` (`<pid> <epoch>`) at start and every minute, and removes it on exit (`trap 'rm -f "$F/.wait-armed"' EXIT`); master-status.py reads it.
-- Exits on: a new red row in HEALTH.tsv or HEARTBEAT.tsv; a heartbeat file older than 2.5 cadences; FLEET IDLE (no subagent transcript written for 10 minutes, unless PAUSE.md); agents running under 3/4 of FLEET-TARGET for 10 minutes; else after 30 minutes as the heartbeat.
+- Exits on: a new red row in HEALTH.tsv or HEARTBEAT.tsv; a heartbeat file older than 2.5 cadences; FLEET IDLE (no subagent transcript written for 10 minutes, unless PAUSE.md); agents running under 3/4 of FLEET-TARGET for 10 minutes; else after 20 minutes as the heartbeat.
 
 **Burn check install (step 5a):** copy `burn.py`, `burn-guard.py`, `master-status.py` and `master-stop-guard.py` from `~/.claude/skills/overhaul-build/scripts/` into FLEET/bin. Write FLEET/BUDGET.json: `repo`, `transcripts` (`~/.claude/projects/<project slug>`), optional `health_task` (default `<repo name>-health`) and the waste thresholds (defaults unless the owner sets them; spend is never a threshold). Run burn.py once and confirm the burn rows appear (two info, four waste) and that the guard blocks a dry-run Agent call while a test BURN-STOP exists (then delete the test file).
