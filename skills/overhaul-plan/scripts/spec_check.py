@@ -10,7 +10,7 @@ from pathlib import Path
 
 SPEC_FILES = ["CLAUDE.md", "spec/STANDARDS.md", "spec/ARCHITECTURE.md", "spec/PLAN.md",
               "spec/MASTER-AGENT.md", "spec/MACHINES.md"]
-TRIPWIRES = [f"H{i:02d}" for i in range(1, 25)]
+TRIPWIRES = [f"H{i:02d}" for i in range(1, 26)]
 GATES = ["Phase 0 gate", "stall gate"]
 DEADLINE = re.compile(r"by hour|deadline|within \d+ (min|minutes|hours?)\b|minute \d+|hour \d+", re.I)
 BRIEF_FIELDS = ["FUNCTIONS id", "Acceptance", "allowed files", "INDEX", "hook", "call cap", "hand-back",
@@ -18,6 +18,7 @@ BRIEF_FIELDS = ["FUNCTIONS id", "Acceptance", "allowed files", "INDEX", "hook", 
 TEMPLATE_KINDS = ["m0-pr", "risky-pr", "post-merge-sample", "design-note", "management", "stub-check",
                   "protected-batch", "replan", "final"]
 CLAUDE_MD_MAX_WORDS = 400
+WORK_STYLE = "(1) The brief is the plan."  # first line of the work-style block every brief and auditor template carries
 BANNED = re.compile(r"\b(weeks?|sprints?|person-days?|\d+(\.\d+)?\s*(-\s*\d+\s*)?days?)\b", re.I)
 TABLE_MAX_ROWS = 40
 
@@ -257,6 +258,24 @@ def main():
         if not re.search(rx, ma, re.I):
             miss(f"MASTER-AGENT lacks the {name}")
 
+    allspec = "\n".join(texts.values())
+    for name, rx in {"holds recording the main tests that cover an item and landing only uncovered pins": r"holds[^\n]*cover",
+                     "field-only record skip (init-only, properties, dataclass or record syntax)": r"field-only record[^\n]*(dataclass|propert|getter|record syntax)",
+                     "full-word find hit on an owner is a hook unless its purpose is quoted": r"full-word[^\n]*purpose",
+                     "check refusing a def change whose hand-back has no find output": r"no find output",
+                     "ruling number allocated when its brief is written": r"number[^\n]*allocated",
+                     "rule that the owner takes logic two callers would each wrap": r"own wrapper",
+                     "rule that a new owner's purpose names its subject": r"purpose names its subject",
+                     "effort per job next to the model": r"\beffort\b",
+                     "verbose-pass tripwire": r"verbose pass"}.items():
+        if not re.search(rx, allspec, re.I):
+            miss(f"spec lacks the {name}")
+    if not re.search(r"main chat[^\n]*(never|not)[^\n]*subagent|subagent[^\n]*never[^\n]*master", ma, re.I):
+        miss("MASTER-AGENT does not say the master is the main chat, never a subagent")
+    fleet_brief = "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in fleet.glob("**/*brief*template*") if p.is_file())
+    if WORK_STYLE not in ma + fleet_brief:
+        miss("the brief template lacks the work-style block (word for word)")
+
     # Phase 0, gates, no time words in brief text, brief fields.
     if not re.search(r"Phase 0", plan):
         miss("PLAN.md has no Phase 0")
@@ -279,6 +298,8 @@ def main():
             miss(f"FLEET/templates has no '{kind}' auditor template")
         elif "<TARGET>" not in (tdir / hit[0]).read_text(encoding="utf-8", errors="replace"):
             miss(f"FLEET/templates/{hit[0]} has no <TARGET> slot")
+        elif WORK_STYLE not in (tdir / hit[0]).read_text(encoding="utf-8", errors="replace"):
+            miss(f"FLEET/templates/{hit[0]} lacks the work-style block (word for word)")
     for n in names:
         for i, line in enumerate((tdir / n).read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             if m := DEADLINE.search(line):
