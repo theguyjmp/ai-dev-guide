@@ -113,6 +113,7 @@ Tables do not count toward the word cap, but no spec table may have more than 40
      - A waste hunt when the rate stalls: one analyst per red episode, never one per health run.
      - Bugs travel as fix packets, one agent per bug through to its queued audit, inside its call cap (H15 is a health.py measurement only). The merge queue's batched gate is the build-once train for an overhaul: builders never run full builds, and a fix counts only when the gate proves it red on main before and green after.
      - A frozen module (H23) gets one fresh Opus architect who redesigns or splits it, never more fix passes.
+   - **Bottleneck watch:** every health run, health.py measures the wait at each stage of the bottleneck table below, from the transcripts, git, the gate log and the fleet files, and writes FLEET/dash/bottleneck.json: per stage its queue length, median and p90 wait, its share of the total waiting, and `top` on the stage with the largest share, named as the current bottleneck. The master applies that stage's fix from the table and logs one line in RULINGS.md: stage, measured wait, fix, expected wait. On the next run health.py compares that stage's median wait with the logged one. If it did not drop, the fix is reverted or changed, and one Sonnet analyst per episode measures why. The same top stage for 3 runs, or a fix that did not reduce its wait, is H26: a capacity re-plan (fleet size, slots, packet size), approved by a fresh blind auditor like any re-plan. MASTER-AGENT carries the table and the duty; PLAN's M0 health.py item names bottleneck.json.
    - **Inbox triage:** health.py lists new inbox reports each run, and one untriaged after a run is red (a tripwire row). One Sonnet ruling agent triages them in a batch: a bug becomes a fix packet (red pin first), feedback becomes a FUNCTIONS row with an Acceptance (by ruling) or an owner ruling, with owner feedback ahead of new functions. It fills each report's pattern-id field and writes the status the panel shows.
    - **The mechanic:** one Sonnet agent with a merge-only brief. It merges audited M0 PRs until the merge queue runs, then ends.
    - **What binds the master:**
@@ -178,6 +179,22 @@ Fixed tripwire ids (overhaul-build acts on these ids; the thresholds below are d
 | H23 | Module rot: over 2 fix PRs per proven function, or a gate-red rate over 20% | Freeze the module; one Opus architect redesigns |
 | H24 | Proven rate under 70% of the projection's rate for 2 runs (stall gate) | Stop the phase; waste hunt; blind-audited re-plan |
 | H25 | Verbose pass: a pass's output tokens (thinking plus text) over twice the median for its job type, from the transcripts | Fix that job's brief template |
+| H26 | Bottleneck unresolved: the same top stage in bottleneck.json for 3 runs, or a fix that did not reduce its wait | Capacity re-plan (fleet size, slots, packet size), approved by a fresh blind auditor |
+
+Fixed bottleneck table (MASTER-AGENT carries it as `| Stage | Red when | Fix |`; the plan may add stages or tighten numbers, never drop a stage). health.py measures every stage each run; the master applies the fix for the top stage:
+
+| Stage | Red when | Fix |
+|---|---|---|
+| Dispatch queue | A packet ready but not launched for 10 min while a slot is free | Launch up to the slot count |
+| Check slots | Median check-slot queue wait over 5 min | Add a slot under the machine floors, or shrink the affected-test sets |
+| Merge queue | Median merge wait over 30 min (H10) | Smaller batches or more gate runners |
+| Audits | A pre-merge, design-note or protected-batch audit waiting over 30 min | More auditors; Sonnet for samples |
+| Rulings and hooks | A ruling or hook waiting over 30 min | A second ruling agent, or rulings batched per owner |
+| `follows` | Over 20% of ready packets blocked on `follows` | Dispatch the shared piece first |
+| Machine floors | A machine under its RAM or disk floor for 1 run (H18) | Clean whole target dirs, or move slots to the other machine |
+| Master latency | A red open over 1 run with no master action | Smaller wake batches |
+| Builder reading | Reading over 50% of a job type's median pass (calls before the first edit) | Fix the brief template |
+| Builder check wait | Waiting on checks over 30% of a job type's median pass | Add check slots or shrink the affected-test sets |
 
 Writing rules: plain sentences, no diagrams, no summaries, no "why" paragraphs, no charts, every line something a person or agent acts on. Prefer cutting to adding. Respect the owner's machine limits (for example the owner's own PC at low priority with RAM and disk floors).
 
@@ -191,16 +208,17 @@ They are FLEET paper, outside the word cap, and on the protected list.
 ## Step 5. Dashboard (the same page every overhaul uses)
 The dashboard is a Dashboard-type artifact whose page is `~/.claude/skills/overhaul-plan/assets/dashboard-index.html`. Do not design a new one.
 1. Run Artifact `quickstart` with intent `other` to get the Dashboard type's `type_url`. Create the dashboard with that `type_url`, title "<NEW> Rebuild" and `auto_open: "after_first_write"`, then follow the type's instructions it returns.
-2. Write five JSON files into FLEET/dash, generated by a script from FUNCTIONS.md, PLAN.md and FLEET/accounts.json:
+2. Write six JSON files into FLEET/dash, generated by a script from FUNCTIONS.md, PLAN.md and FLEET/accounts.json:
    - functions.json: `[{id, phase, system, function, status, pct}]`, one row per FUNCTIONS row. `status` is planned, building, review, blocked or landed; landed means Acceptance passed on deployed main.
    - phases.json: `[{phase, name, hours, state}]`, from M0 and Phase 0 to the last phase.
-   - status.json: one row `[{phase, phase_state, health_at, health_red, health_total, mgmt_at, mgmt_red, mgmt_total, proven, total, rate_per_hour, finish_hour, plan_finish_hour, sha, agents}]`. `health_total` is 24 (the tripwires); `mgmt_total` is the management check's item count.
+   - status.json: one row `[{phase, phase_state, health_at, health_red, health_total, mgmt_at, mgmt_red, mgmt_total, proven, total, rate_per_hour, finish_hour, plan_finish_hour, sha, agents}]`. `health_total` is 26 (the tripwires); `mgmt_total` is the management check's item count.
    - rates.json: `[{metric, per_hour, per_hour_total, done, total, peak_per_hour, measured_at}]`, one row each for functions, systems, phases and tokens; the tokens row also has `per_function` and a null `total`. `per_hour` is the count completed in the last 24 active fleet hours divided by the active hours in that window; `per_hour_total` is the count since hour 0 divided by active hours since hour 0; `peak_per_hour` is the highest 24-hour value seen; `measured_at` is ISO. A system or phase is done when all its functions are proven. Tokens are input + cache_read + cache_write + output from the transcripts, and `per_function` is tokens so far divided by functions proven. health.py measures them; the baseline has nulls, which the page shows as "not measured yet". Never write a plan or projection number here.
    - accounts.json: `[{account, active, spent, refresh_dow, refresh_hour, tz}]`, copied from FLEET/accounts.json (`[]` if it is missing). `account` is the email's local part and "@" only (such as `name@`), never the full email; `refresh_dow` is 0 (Sunday) to 6, `refresh_hour` 0 to 23 in `tz`. FLEET/accounts.json stays local and is never committed to the spec repo.
-3. Upload each as an asset of the dashboard. In one batch, write `dash/meta` `{title}`, then `datasets/functions`, `datasets/phases`, `datasets/status`, `datasets/rates` and `datasets/accounts` as `kind: "file"` sources with `updated`, `edit` and `staleAfterHours` (24 for functions, 2 for the others). Then write `files/index.html` with the template's text and `{{TITLE}}` replaced. Run the type's check read.
+   - bottleneck.json: `[{stage, queue, median_min, p90_min, share, top, fix, fix_at, measured_at}]`, one row per bottleneck-table stage; `top` is true on the stage with the largest share of the total waiting, `fix` and `fix_at` are the last fix logged for it in RULINGS.md (null if none). health.py measures it; the baseline has one row per stage with nulls.
+3. Upload each as an asset of the dashboard. In one batch, write `dash/meta` `{title}`, then `datasets/functions`, `datasets/phases`, `datasets/status`, `datasets/rates`, `datasets/accounts` and `datasets/bottleneck` as `kind: "file"` sources with `updated`, `edit` and `staleAfterHours` (24 for functions, 2 for the others). Then write `files/index.html` with the template's text and `{{TITLE}}` replaced. Run the type's check read.
 4. Put the dashboard URL and the refresh recipe in MASTER-AGENT.md: upload the new file, then one `update` of the dataset's `url`, `name`, `updated` and `edit`.
 
-The page shows four tiles (percent complete with landed of total, last health check with reds, last management check with reds, phase); the measured rates as four gauges (functions, systems, phases and tokens per hour, each with its rate since start and its done count); the account list, one line per account with its state and refresh countdown, shown only with 2 or more accounts; and one table, in which each phase opens to its systems and each system to its functions. Nothing else.
+The page shows five tiles (percent complete with landed of total, last health check with reds, last management check with reds, phase, and the bottleneck: the top stage, its median and p90 wait and the fix applied); the measured rates as four gauges (functions, systems, phases and tokens per hour, each with its rate since start and its done count); the account list, one line per account with its state and refresh countdown, shown only with 2 or more accounts; and one table, in which each phase opens to its systems and each system to its functions. Nothing else.
 
 ## Step 6. Audit round (Opus, report only)
 Write FLEET/REVIEW-GOAL.md from this template and launch one Opus agent with "Read and do <path>":
@@ -241,7 +259,8 @@ Run `py -3 ~/.claude/skills/overhaul-plan/scripts/spec_check.py <NEW> <FLEET>`. 
 - FUNCTIONS rows, the PLAN total and the dashboard agree, and every row has an Acceptance;
 - every PATTERNS row maps to an existing rule;
 - every STANDARDS lint is in the M0 list, including the duplicate-capability lint;
-- H01 to H25 have a number, a source and an action;
+- H01 to H26 have a number, a source and an action, and the bottleneck tripwire row exists;
+- MASTER-AGENT has the `| Stage | Red when | Fix |` table with every fixed stage, each with a number and a fix, the RULINGS line for each fix, and bottleneck.json in the health.py duties;
 - Phase 0 exists, MASTER-AGENT names the Phase 0 gate and the stall gate, and no template or brief text in MASTER-AGENT holds a time limit;
 - no human-time words appear;
 - the brief template has every fixed field, the work-style block and effort per job;

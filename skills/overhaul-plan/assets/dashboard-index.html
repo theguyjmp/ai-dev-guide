@@ -72,6 +72,12 @@
       <span class="big" data-draw="phase" data-source="status" data-field="phase">—</span>
       <span class="sub" data-draw="phase-state" data-source="status" data-field="phase_state">—</span>
     </div>
+    <div class="card">
+      <span class="label">Bottleneck</span>
+      <span class="big" data-draw="bn-stage" data-source="bottleneck" data-field="stage">—</span>
+      <span class="sub">median wait <span data-draw="bn-wait" data-source="bottleneck" data-field="median_min">—</span> min, p90 <span data-draw="bn-p90" data-source="bottleneck" data-field="p90_min">—</span> min</span>
+      <span class="sub">fix: <span data-draw="bn-fix" data-source="bottleneck" data-field="fix">—</span></span>
+    </div>
   </section>
 
   <section class="rates" id="rates">
@@ -192,6 +198,12 @@
   });
   agoTile('health-ago', 'health_at', 'health_red');
   agoTile('mgmt-ago', 'mgmt_at', 'mgmt_red');
+  const top = () => { const d = dash.data('bottleneck'); return d.status === 'ok' && Array.isArray(d.data) ? d.data.find((r) => r.top) || null : null; };
+  const bn = (name, fn) => dash.draw(name, (e) => { const b = top(); e.textContent = b ? fn(b) : '—'; });
+  bn('bn-stage', (b) => b.stage);
+  bn('bn-wait', (b) => num(b.median_min));
+  bn('bn-p90', (b) => num(b.p90_min));
+  bn('bn-fix', (b) => b.fix || 'none yet');
 
   dash.draw('tree', (box) => {
     box.replaceChildren();
