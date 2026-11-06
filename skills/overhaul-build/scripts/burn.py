@@ -8,12 +8,13 @@ Measured from the Claude transcripts. Info rows (never red, never a brake):
 Waste rows (red over FLEET/BUDGET.json):
   main_ctx             context of the main chat's latest turn (every later turn replays it)
   main_turns_per_hour  main-chat turns in the last 60 min (each notice answered is a full replay that builds nothing)
-  waste_share          share of last-hour tokens spent by the main chat plus agents that have made reader_calls or more
-                       tool calls since their last edit or commit (reading, waiting or spinning, not building);
-                       judged only when the hour's tokens are over waste_floor
+  waste_share          share of the agents' last-hour tokens spent by agents that have made reader_calls or more tool
+                       calls since their last edit or commit (reading, waiting or spinning, not building); judged only
+                       when the agents' tokens for the hour are over waste_floor
   tokens_no_land       tokens spent since the last merge into origin/main, when that merge is older than 6 h
-Any waste red writes FLEET/BURN-STOP (reasons inside); the PreToolUse guard bin/burn-guard.py then refuses new agent
-launches. This script deletes BURN-STOP itself on the first run where every waste row is green, so a brake never
+Only agent waste brakes launches: a waste_share or tokens_no_land red writes FLEET/BURN-STOP (reasons inside) and the
+PreToolUse guard bin/burn-guard.py refuses new agent launches. main_ctx and main_turns_per_hour reds are the master's to
+fix (hand off, batch notices); withholding agents cannot fix them and would only idle the fleet, so they never brake. This script deletes BURN-STOP itself on the first run where every waste row is green, so a brake never
 outlives its cause and a burst of real work never trips it."""
 import glob, json, os, subprocess, time
 
@@ -23,6 +24,7 @@ DEFAULTS = {"main_ctx": 300_000, "main_turns_per_hour": 60, "waste_share": 0.5, 
             "reader_calls": 30, "tokens_no_land": 300_000_000, "repo": "", "transcripts": ""}
 INFO = ("tokens_per_hour", "agents_per_hour")
 WASTE = ("main_ctx", "main_turns_per_hour", "waste_share", "tokens_no_land")
+BRAKE = ("waste_share", "tokens_no_land")
 EDITS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 COMMIT_WORDS = ("git commit", "git push", "vc wip", "gh pr create")
 
@@ -87,7 +89,7 @@ def measure(b):
     since = min(max(land, now - 48 * 3600), hour)
     mains = [f for f in glob.glob(os.path.join(proj, "*.jsonl")) if os.path.getmtime(f) > since]
     subs = [f for f in glob.glob(os.path.join(proj, "*", "subagents", "*.jsonl")) if os.path.getmtime(f) > since]
-    tph = tnl = waste = mtph = main_ctx = main_t = 0
+    tph = tnl = waste = agent = mtph = main_ctx = main_t = 0
     for f in mains + subs:
         main = f in mains
         for t, tok, ctx, calls in scan(f, since):
@@ -97,12 +99,14 @@ def measure(b):
                 tph += tok
                 if main:
                     mtph += 1
-                if main or calls >= b["reader_calls"]:
-                    waste += tok
+                else:
+                    agent += tok
+                    if calls >= b["reader_calls"]:
+                        waste += tok
             if main and t > main_t:
                 main_t, main_ctx = t, ctx
     stale_land = land and now - land > 6 * 3600
-    share = round(waste / tph, 2) if tph > b["waste_floor"] else 0
+    share = round(waste / agent, 2) if agent > b["waste_floor"] else 0
     return {"tokens_per_hour": tph, "agents_per_hour": sum(1 for f in subs if os.path.getctime(f) >= hour),
             "main_ctx": main_ctx, "main_turns_per_hour": mtph, "waste_share": share,
             "tokens_no_land": tnl if stale_land else 0}
@@ -117,7 +121,7 @@ def rows(stamp):
     for k in WASTE:
         red = m[k] > b[k]
         out.append((stamp, "burn", k, str(m[k]), str(b[k]), "red" if red else "green"))
-        if red:
+        if red and k in BRAKE:
             reds.append(f"{k} {m[k]:,} over {b[k]:,}")
     stop = os.path.join(FLEET, "BURN-STOP")
     if reds:
