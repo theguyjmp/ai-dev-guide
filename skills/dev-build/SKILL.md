@@ -5,6 +5,8 @@ description: Start, run or resume the master agent on a new project planned by d
 
 # dev-build
 
+**Skills check (once a day, first step):** run `python3 ~/.claude/skills/dev-setup/scripts/check_skills.py` (Windows: `py -3 %USERPROFILE%/.claude/skills/dev-setup/scripts/check_skills.py`). It prints one line and checks the ai-dev-guide repo at most once a day; every later call that day only reads its note, so do not run it again in this session. If it says UPDATED, re-read this SKILL.md before going on. If the script is missing or fails, carry on.
+
 Read `~/.claude/skills/overhaul-build/SKILL.md` in full and follow it, with the differences below. Everything else is identical: you are the master and the main chat only (never a subagent), builders run in parallel in the background, hook-first, the tripwires and gates, no deadlines, time limits or rates given to any agent, and its precedence, Agents, Gates, Finish, Never and Pause sections.
 
 ## Differences

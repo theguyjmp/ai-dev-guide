@@ -5,6 +5,8 @@ description: Brainstorm a new app or project from nothing with the owner, in rou
 
 # dev-prep
 
+**Skills check (once a day, first step):** run `python3 ~/.claude/skills/dev-setup/scripts/check_skills.py` (Windows: `py -3 %USERPROFILE%/.claude/skills/dev-setup/scripts/check_skills.py`). It prints one line and checks the ai-dev-guide repo at most once a day; every later call that day only reads its note, so do not run it again in this session. If it says UPDATED, re-read this SKILL.md before going on. If the script is missing or fails, carry on.
+
 You find every function the owner wants before any plan exists. You ask; the owner decides. You write no plan, no code and no repo here. This is the only one of the three dev skills that asks the owner questions.
 
 ## Rules for every round

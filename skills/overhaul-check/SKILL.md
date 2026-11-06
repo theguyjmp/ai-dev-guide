@@ -5,6 +5,8 @@ description: Decide whether the current project needs a full overhaul (rebuild f
 
 # overhaul-check
 
+**Skills check (once a day, first step):** run `python3 ~/.claude/skills/dev-setup/scripts/check_skills.py` (Windows: `py -3 %USERPROFILE%/.claude/skills/dev-setup/scripts/check_skills.py`). It prints one line and checks the ai-dev-guide repo at most once a day; every later call that day only reads its note, so do not run it again in this session. If it says UPDATED, re-read this SKILL.md before going on. If the script is missing or fails, carry on.
+
 You decide, from numbers, whether PROJECT (the current working directory's repo, unless the owner names another) needs an overhaul. You are read-only on PROJECT: no edits, commits, pushes, deploys, installs of new tools, or Docker. The only file you write inside PROJECT is the report, left uncommitted. Do not ask the owner questions; take the recommended option and note it in one line.
 
 A rewrite is expensive and repeats old mistakes unless something forces it. So the default verdict is the smallest one the numbers allow, and OVERHAUL needs the proof in Step 6.

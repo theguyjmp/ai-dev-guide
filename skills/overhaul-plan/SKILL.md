@@ -5,6 +5,8 @@ description: Dissect an existing platform or project and write a short, strict, 
 
 # overhaul-plan
 
+**Skills check (once a day, first step):** run `python3 ~/.claude/skills/dev-setup/scripts/check_skills.py` (Windows: `py -3 %USERPROFILE%/.claude/skills/dev-setup/scripts/check_skills.py`). It prints one line and checks the ai-dev-guide repo at most once a day; every later call that day only reads its note, so do not run it again in this session. If it says UPDATED, re-read this SKILL.md before going on. If the script is missing or fails, carry on.
+
 You produce a rebuild plan that a master agent and 20 to 40 builders can execute fast without making the old mistakes. You plan; you never build product code here. Do not ask the owner questions: take the recommended option and note it in one line. **Exception:** anything that spends money, deletes, publishes publicly or changes an account other than the one the owner named still needs the owner's yes. Creating the private repo on the account the owner named is covered by the request.
 
 The builders are agents, not people. Every duration in the plan is in hours and comes from the throughput math in Step 4, as a projection health.py computes for the owner's dashboard only. No agent is given a time limit, target hour, rate or plan curve: agents get call caps, exit checks (the gate, Acceptance, lints) and ordering gates. The words day-estimate, person-day, sprint and week are banned from the spec. The real limits are check runs per hour, merge-queue throughput, tokens and review latency, never typing speed.

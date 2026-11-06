@@ -5,6 +5,8 @@ description: Plan the build of a new project from nothing, from the feature map 
 
 # dev-plan
 
+**Skills check (once a day, first step):** run `python3 ~/.claude/skills/dev-setup/scripts/check_skills.py` (Windows: `py -3 %USERPROFILE%/.claude/skills/dev-setup/scripts/check_skills.py`). It prints one line and checks the ai-dev-guide repo at most once a day; every later call that day only reads its note, so do not run it again in this session. If it says UPDATED, re-read this SKILL.md before going on. If the script is missing or fails, carry on.
+
 Read `~/.claude/skills/overhaul-plan/SKILL.md` in full and follow it, with the differences below. Where this file says nothing, overhaul-plan holds: the operation map, single owners with stem globs, owners_check, find, the look-alike lint, hook-first, the work style, model and effort per job, the tripwires, the progress gates, the dashboard, the audit, verify and bottleneck rounds, the consistency check, your own context and its Never list. Do not ask the owner questions while planning, except the one at the end and anything that spends money, deletes, publishes publicly or changes an account.
 
 There is no OLD. NEW is the project folder that holds `prep/`. FLEET is `<NEW>-fleet` beside it.
