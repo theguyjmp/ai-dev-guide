@@ -41,7 +41,7 @@ There is no OLD. NEW is the project folder that holds `prep/`. FLEET is `<NEW>-f
 - The spec files list gains spec/LATER.md as data (outside the word cap, like FUNCTIONS.md).
 
 ### Step 5 (dashboard)
-- The dashboard title is "<NEW> Build".
+- The dashboard title is "<NEW> Build". The page is the same template every project uses, `~/.claude/skills/overhaul-plan/assets/dashboard-index.html`, published exactly as overhaul-plan Step 5 says; never a new design.
 
 ### Step 6 (audit)
 - In the audit prompt, replace "The old platform failed because <the measured failures from Step 1>" with "Past fleets failed because <the measured fleet failures in the owner's CLAUDE.md and memory>".
