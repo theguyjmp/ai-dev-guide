@@ -121,10 +121,10 @@
       <span class="label">Pipeline</span>
       <span class="sub" data-draw="p-ago" data-source="pipeline">—</span>
     </div>
-    <div class="ptitle" data-draw="p-title" data-bar="functions" data-source="pipeline">Product functions</div>
+    <div class="ptitle">Product functions <span data-draw="p-total" data-bar="functions" data-source="pipeline">—</span></div>
     <span class="sub">Counts the product's functions in spec/FUNCTIONS.md. A function is proven only when its acceptance test passes on the deployed build. Green is on main; grey is done work not on main yet.</span>
     <div data-draw="p-bar" data-bar="functions" data-source="pipeline"></div>
-    <div class="ptitle" data-draw="p-title" data-bar="packets" data-source="pipeline">Work packets</div>
+    <div class="ptitle">Work packets <span data-draw="p-total" data-bar="packets" data-source="pipeline">—</span></div>
     <span class="sub">Counts every PR and queue row, tooling, lints and gate work included. Work that names no function moves only this bar.</span>
     <div data-draw="p-bar" data-bar="packets" data-source="pipeline"></div>
   </section>
@@ -614,11 +614,10 @@ dash.calc('phase-now', {
     e.textContent = isNaN(m) ? 'not measured yet' : 'measured ' + (m < 1 ? 'just now' : m < 60 ? m + ' min ago' : Math.round(m / 60) + ' h ago');
   });
 
-  dash.draw('p-title', (e) => {
-    const kind = e.dataset.bar; const r = (rows() || []).filter((x) => x.bar === kind);
-    const base = kind === 'functions' ? 'Product functions' : 'Work packets';
+  dash.draw('p-total', (e) => {
+    const r = (rows() || []).filter((x) => x.bar === e.dataset.bar);
     const t = r.length ? (num(r[0].total) != null ? num(r[0].total) : r.reduce((a, x) => a + (num(x.count) || 0), 0)) : null;
-    e.textContent = t == null ? base : base + ' (' + d3.format(',')(t) + ')';
+    e.textContent = t == null ? '—' : '(' + d3.format(',')(t) + ')';
   });
 
   dash.draw('p-bar', (box) => {
