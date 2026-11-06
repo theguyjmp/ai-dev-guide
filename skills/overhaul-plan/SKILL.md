@@ -174,7 +174,7 @@ Fixed tripwire ids (overhaul-build acts on these ids; the thresholds below are d
 | H18 | Machine under a RAM or disk floor | Remove its slots; clean whole target dirs |
 | H19 | Any work waiting on the owner that is not spend, delete, public publish or account change | Decide it yourself; write a ruling |
 | H20 | HEALTH.tsv stale past 2 cadences (checked by the master at the hourly heartbeat) | Re-register the scheduler entry; run health.py once |
-| H21 | Master idle: a red open 2 runs with no action, or no launch or ruling for 30 min while reds are open (health.py) | Red on the dashboard; the next session acts on it first |
+| H21 | Master idle: a red open 2 runs with no action, no launch or ruling for 30 min while reds are open, or no agent in flight for 20 min while work is left (no PAUSE.md, Finish not reached); an open owner ask does not excuse it (health.py, and the pre-health heartbeat) | Red on the dashboard; the master routes around the blocker and launches the same wake; the next session acts on it first |
 | H22 | Churn: over 30% of merged PRs move no function, or one file changed 3 or more times with no function moved | Stop those packets; ruling |
 | H23 | Module rot: over 2 fix PRs per proven function, or a gate-red rate over 20% | Freeze the module; one Opus architect redesigns |
 | H24 | Proven rate under 70% of the projection's rate for 2 runs (stall gate) | Stop the phase; waste hunt; blind-audited re-plan |
