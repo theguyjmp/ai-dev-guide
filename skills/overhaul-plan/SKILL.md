@@ -20,6 +20,9 @@ If an overhaul-check report exists for OLD (`<OLD>/OVERHAUL-CHECK.md` or the pat
 - Owner rules: read the owner's CLAUDE.md files and memory; every owner rule becomes a standard or a tripwire.
 - Language and toolchain of OLD and NEW. Every size limit, lint and check command below is stated for that toolchain, not copied from another project.
 
+## Permissions first
+Before Step 1, and again when MACHINES.md is written: run `py -3 ~/.claude/skills/dev-setup/scripts/permissions.py` with `--repo <NEW repo>`, `--dir` for the fleet folder, worktree folder and test data folder, `--host` for every ssh machine, `--cli` for the check CLI, and `--guard <fleet>/bin/burn-guard.py`. If it prints a line, that line is the first thing in your next message to the owner: one paste, nothing else asked. Keep working while it waits; nothing that needs those rules is attempted before it prints `all set`.
+
 ## Step 1. Measure the old project and the old fleet (read-only, numbers only)
 - Code: lines per module and package, the largest files, file and function sizes over limits, duplicate capabilities (two stores, registries, pickers, undo paths), style tokens versus raw values, test counts and gate steps, the bug history (count by status), the feature map or ledger. `py -3 -I ~/.claude/skills/overhaul-check/scripts/measure.py <OLD> --out <scratchpad>/measure.json` gives most of this in one run (skip it when overhaul-check data exists). Read the JSON by key, never whole.
 - Fleet: items landed per hour, tokens per landed item, rework passes per item, share of agent calls that only read or waited, launch-to-PR time. Take them from the old fleet's burn, outcome and context-watch scripts and transcripts where they exist. These are "the measured failures" the audit prompt quotes.
