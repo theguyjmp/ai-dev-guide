@@ -2,7 +2,7 @@
 
 Read this only when writing or fixing FLEET/bin/heartbeat.py, wait.sh, dashdata.py or a scheduler entry.
 
-**Scheduler entries** (heartbeat, health.py, auditors, deploy) run windowless on Windows: `wscript.exe //B //Nologo <FLEET>/bin/hidden.vbs py -3 <script>` (scripts/hidden.vbs; pyw alone still pops a console for every git or child process it starts) (never `py -3` or `cmd /c start`, which flash a console every run), created with `schtasks /create ... /it /f` so no password prompt is needed.
+**Scheduler entries** (heartbeat, health.py, auditors, deploy) run windowless on Windows: `wscript.exe //B //Nologo <FLEET>/bin/hidden.vbs py -3 <script>` (scripts/hidden.vbs; pyw alone still pops a console for every git or child process it starts) (never `py -3` or `cmd /c start`, which flash a console every run), created with `schtasks /create ... /it /f` so no password prompt is needed. A task runs with a bare PATH: every task script sets PATH explicitly to the tools it calls (gh, git, py, the check CLI); verify from the task's own last-run log, never a hand run in an agent shell ("gh: not found" shows only under Task Scheduler). A registered entry counts only once its log shows it did its job.
 
 **heartbeat.py**, every 10 minutes at low priority, appends `time machine metric value floor green|red` rows to FLEET/HEARTBEAT.tsv:
 - Every machine in MACHINES.md against its floors, each by the access MACHINES.md gives; an unreachable machine is a red row.
