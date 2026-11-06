@@ -290,7 +290,7 @@ def lines(s, fleet, mark=True):
     sched_missing = s["health_sched"] is False
     if s["health_stale"] or sched_missing:
         name = "HEALTH.tsv" if s["has_health"] else "HEARTBEAT.tsv (no HEALTH.tsv yet)"
-        fix = (f"register it: schtasks /create /tn {s['health_task']} /tr \"pyw -3 <FLEET>/bin/health.py\" /sc minute /mo 10 /it /f"
+        fix = (f"register it: schtasks /create /tn {s['health_task']} /tr \"wscript //B hidden.vbs py -3 <FLEET>/bin/health.py\" /sc minute /mo 10 /it /f"
                if sched_missing else "run health.py once and fix its scheduler entry")
         out.append(f"HEALTH {name} {fmt(s['health_age'])} old, scheduler entry {s['health_task']} "
                    f"{'MISSING' if sched_missing else 'present' if s['health_sched'] else 'unchecked'}: {fix}")
