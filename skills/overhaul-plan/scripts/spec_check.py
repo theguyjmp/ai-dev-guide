@@ -223,6 +223,7 @@ def main():
               "slop lint": r"Lint:\s*`?slop",
               "hook-first rule (stop and hook before writing the code)": r"hook-first",
               "look-alike lint over private helpers": r"look-?alike[^\n]*private|private[^\n]*look-?alike",
+              "no reshaping code to get past a lint (hook it; a wrong lint is fixed, never waived)": r"reshap",
               "LF line endings (.gitattributes)": r"gitattributes"}
     mach = texts.get("spec/MACHINES.md", "")
     if not re.search(r"\bfind\b", mach) or not re.search(r"in-?flight", mach, re.I):
@@ -250,6 +251,8 @@ def main():
             miss(f"tripwire {h} needs threshold, source and action columns")
 
     for name, rx in {"ruling holds on in-flight packets": r"\bhold", "superseded-packet path": r"supersed",
+                     "owner glob added by a ruling that creates a public name": r"owner-add",
+                     "brief of a ruling-created packet quotes the ruling": r"quot\w* (the|its|that) ruling",
                      "measured counts in COORD-STATE": r"measured", "clean end state (no stale rows, branches, worktrees)": r"stale|end state"}.items():
         if not re.search(rx, ma, re.I):
             miss(f"MASTER-AGENT lacks the {name}")
