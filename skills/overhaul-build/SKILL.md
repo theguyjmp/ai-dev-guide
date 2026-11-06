@@ -75,6 +75,7 @@ Nothing else is dispatched until these land, except the Phase 0 briefs that PLAN
 9. The bug and feedback button and its inbox (overhaul-plan Step 4): the capture UI in the UI kit, on top of every realm, and the inbox writer with redaction, ids and status. Its briefs go out as soon as items 1 to 3 have landed, so reports flow from the first deploy.
 
 As soon as health.py lands, register these on the external scheduler so they run even if you stall:
+- Every check, every 30 minutes, with no gap: the heartbeat itself writes a `health age <min> 35 green|red` row from HEALTH.tsv's newest row, and once health.py exists on main and its scheduler entry does not, the heartbeat runs health.py itself and writes a `health scheduled 0 1 red` row until the entry is registered. wait.sh exits on either red, and the master registers the entry that same wake. Registering is the same wake health.py merges, never a later step.
 - health.py on its cadence.
 - The 12-hourly blind auditor.
 - The deploy after each green merge batch, if the merge queue does not already trigger it.
