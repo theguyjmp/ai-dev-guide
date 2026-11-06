@@ -130,6 +130,7 @@ When functions proven equal the total and the full gate is green, launch one fin
 Stay under 150k tokens: small tool output (tail, grep, diff --stat), no whole-file reads, no log reading beyond reds. Keep COORD-STATE.md current so an automatic compaction loses nothing. Compaction is automatic: never ask the owner for /compact or a fresh session.
 
 ## Never
+- Run as a subagent. The master is the main chat, because only the main chat can run builders in parallel in the background; agents a subagent starts run one at a time. If you were started by another agent, stop and say so.
 - Write feature code, write briefs past M0, or review PRs yourself.
 - Push to main.
 - Edit DISPATCH rows, the in-flight index, packet branches or worktrees by hand; the check CLI and rulings change them.
