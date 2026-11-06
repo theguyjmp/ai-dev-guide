@@ -1,4 +1,4 @@
-"""Every permission a project's agents will need, granted once at the start by one owner paste.
+"""Every permission (and a non-auto default mode) a project's agents will need, granted once at the start by one owner paste.
 
 The agent cannot write its own permission settings (Claude Code's auto-mode classifier refuses it as
 self-modification), and a fleet that discovers a missing permission mid-build stalls for hours. So at the start of a
@@ -42,6 +42,7 @@ def load(path):
 def merged(a):
     s = load(settings_path(a.repo))
     perm = s.setdefault("permissions", {})
+    perm["defaultMode"] = a.mode  # never "auto": its classifier overrides allow rules (merges, own settings)
     allow = perm.setdefault("allow", [])
     allow += [r for r in rules(a) if r not in allow]
     dirs = perm.setdefault("additionalDirectories", [])
@@ -70,6 +71,8 @@ def has_hook(entries, cmd):
 def missing(a):
     s = load(settings_path(a.repo))
     perm = s.get("permissions", {})
+    if perm.get("defaultMode") != a.mode:
+        return ["defaultMode=" + a.mode]
     have = set(perm.get("allow", [])) | {d.replace("\\", "/") for d in perm.get("additionalDirectories", [])}
     want = rules(a) + [d.replace("\\", "/") for d in a.dir]
     gone = [w for w in want if w not in have]
@@ -97,6 +100,7 @@ def main():
     p.add_argument("--cli", action="append", default=[])
     p.add_argument("--guard")
     p.add_argument("--stop-guard")
+    p.add_argument("--mode", default="acceptEdits", choices=["acceptEdits", "default"])
     p.add_argument("--apply", action="store_true")
     a = p.parse_args()
     if a.apply:
