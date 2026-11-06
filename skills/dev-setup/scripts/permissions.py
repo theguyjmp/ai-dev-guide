@@ -5,6 +5,9 @@ self-modification), and a fleet that discovers a missing permission mid-build st
 project the agent prints ONE line for the owner to paste, and the owner pastes it once.
 
   py -3 permissions.py --repo <repo> [--dir <folder>]... [--host <ssh host>]... [--cli <tool>]... [--guard <script>]
+                       [--stop-guard <script>]
+      --guard adds <script> as a PreToolUse hook on Agent|Task|Workflow (overhaul-build's burn-guard.py);
+      --stop-guard adds <script> as a Stop hook (overhaul-build's master-stop-guard.py)
       prints the line to paste (the same command with --apply) and exits 1 when rules are missing, 0 when all are set
   ... --apply
       merges the rules into <repo>/.claude/settings.local.json (keeps every existing rule and hook) and prints
@@ -43,12 +46,25 @@ def merged(a):
     allow += [r for r in rules(a) if r not in allow]
     dirs = perm.setdefault("additionalDirectories", [])
     dirs += [d.replace("\\", "/") for d in a.dir if d.replace("\\", "/") not in dirs]
-    if a.guard:
-        cmd = f'py -3 "{a.guard}"'
-        pre = s.setdefault("hooks", {}).setdefault("PreToolUse", [])
-        if not any(h.get("command") == cmd for e in pre for h in e.get("hooks", [])):
-            pre.append({"matcher": "Agent|Task|Workflow", "hooks": [{"type": "command", "command": cmd}]})
+    for event, matcher, cmd in hooks(a):
+        entries = s.setdefault("hooks", {}).setdefault(event, [])
+        if not has_hook(entries, cmd):
+            entry = {"matcher": matcher} if matcher else {}
+            entries.append({**entry, "hooks": [{"type": "command", "command": cmd}]})
     return s
+
+
+def hooks(a):
+    out = []
+    if a.guard:
+        out.append(("PreToolUse", "Agent|Task|Workflow", f'py -3 "{a.guard}"'))
+    if a.stop_guard:
+        out.append(("Stop", None, f'py -3 "{a.stop_guard}"'))
+    return out
+
+
+def has_hook(entries, cmd):
+    return any(h.get("command") == cmd for e in entries for h in e.get("hooks", []))
 
 
 def missing(a):
@@ -56,7 +72,8 @@ def missing(a):
     perm = s.get("permissions", {})
     have = set(perm.get("allow", [])) | {d.replace("\\", "/") for d in perm.get("additionalDirectories", [])}
     want = rules(a) + [d.replace("\\", "/") for d in a.dir]
-    return [w for w in want if w not in have]
+    gone = [w for w in want if w not in have]
+    return gone + [f"{ev} hook {cmd}" for ev, _, cmd in hooks(a) if not has_hook(s.get("hooks", {}).get(ev, []), cmd)]
 
 
 def paste_line(a):
@@ -67,6 +84,8 @@ def paste_line(a):
             parts += [flag, q(v)]
     if a.guard:
         parts += ["--guard", q(a.guard)]
+    if a.stop_guard:
+        parts += ["--stop-guard", q(a.stop_guard)]
     return " ".join(parts + ["--apply"])
 
 
@@ -77,6 +96,7 @@ def main():
     p.add_argument("--host", action="append", default=[])
     p.add_argument("--cli", action="append", default=[])
     p.add_argument("--guard")
+    p.add_argument("--stop-guard")
     p.add_argument("--apply", action="store_true")
     a = p.parse_args()
     if a.apply:
@@ -86,7 +106,8 @@ def main():
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             json.dump(s, f, indent=2)
         perm = s["permissions"]
-        print(f"permissions set: {len(perm['allow'])} allow rules, {len(perm['additionalDirectories'])} folders in {path}")
+        nh = sum(len(e.get("hooks", [])) for v in s.get("hooks", {}).values() for e in v)
+        print(f"permissions set: {len(perm['allow'])} allow rules, {len(perm['additionalDirectories'])} folders, {nh} hooks in {path}")
         return 0
     gone = missing(a)
     if not gone:

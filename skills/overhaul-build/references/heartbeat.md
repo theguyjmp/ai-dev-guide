@@ -1,0 +1,22 @@
+# Heartbeat, wait and dashboard data (overhaul-build preflight step 5)
+
+Read this only when writing or fixing FLEET/bin/heartbeat.py, wait.sh, dashdata.py or a scheduler entry.
+
+**Scheduler entries** (heartbeat, health.py, auditors, deploy) run windowless on Windows: `pyw -3 <script>` (never `py -3` or `cmd /c start`, which flash a console every run), created with `schtasks /create ... /it /f` so no password prompt is needed.
+
+**heartbeat.py**, every 10 minutes at low priority, appends `time machine metric value floor green|red` rows to FLEET/HEARTBEAT.tsv:
+- Every machine in MACHINES.md against its floors, each by the access MACHINES.md gives; an unreachable machine is a red row.
+- The burn rows: it imports burn.py (two info rows, four waste rows).
+- `fleet agents_active <n> 1`: subagent transcripts of this project modified in the last 20 minutes; red at 0 unless FLEET/PAUSE.md exists or the Finish is reached.
+- `fleet agents_running <n> <target>`: subagent transcripts written in the last 5 minutes against FLEET/FLEET-TARGET; red below three quarters of it.
+- `fleet merge_waiting <n> <PR list> 0`: open PRs whose review is PASS at the PR head for 30 minutes or more; red above 0.
+- `dash data_age <min> 20` from the newest FLEET/dash data file and `dash upload_age <min> 35` from FLEET/dash/.uploaded, which the dash-refresh agent writes as its last step.
+- `health age <min> 35` from HEALTH.tsv's newest row, and, once health.py is on main and its scheduler entry is not, it runs health.py itself and writes `health scheduled 0 1 red` until the entry exists.
+- It runs `check_skills.py` (its stamp limits it to once a day); on a fresh UPDATED it copies the skill's `scripts/*.py` into FLEET/bin and writes a `skills updated` red row, and the master re-reads SKILL.md and MASTER-CARD that wake.
+- Until health.py lands it also runs FLEET/bin/dashdata.py, then FLEET/bin/dashhistory.py (copied from `~/.claude/skills/overhaul-build/scripts/`; it reads the repo and transcripts paths from BUDGET.json like burn.py). dashdata.py writes the FLEET/dash files from DISPATCH.md, open and merged PRs, review files and heartbeat rows (each function planned, building, review, blocked or landed; agents running; PRs passed and waiting; what waits on the owner). Both rebuild every series from the source logs (git history of main and FLEET, HEARTBEAT.tsv, HEALTH.tsv, queue history, transcripts) on every run, never by appending a snapshot, so a missed run leaves no gap. Landed means Acceptance passed on deployed main.
+
+**wait.sh** (FLEET/bin, the one wait every session uses, run in the background):
+- Writes `FLEET/.wait-armed` (`<pid> <epoch>`) at start and every minute, and removes it on exit (`trap 'rm -f "$F/.wait-armed"' EXIT`); master-status.py reads it.
+- Exits on: a new red row in HEALTH.tsv or HEARTBEAT.tsv; a heartbeat file older than 2.5 cadences; FLEET IDLE (no subagent transcript written for 10 minutes, unless PAUSE.md); agents running under 3/4 of FLEET-TARGET for 10 minutes; else after 30 minutes as the heartbeat.
+
+**Burn check install (step 5a):** copy `burn.py`, `burn-guard.py`, `master-status.py` and `master-stop-guard.py` from `~/.claude/skills/overhaul-build/scripts/` into FLEET/bin. Write FLEET/BUDGET.json: `repo`, `transcripts` (`~/.claude/projects/<project slug>`), optional `health_task` (default `<repo name>-health`) and the waste thresholds (defaults unless the owner sets them; spend is never a threshold). Run burn.py once and confirm the burn rows appear (two info, four waste) and that the guard blocks a dry-run Agent call while a test BURN-STOP exists (then delete the test file).
