@@ -5,6 +5,8 @@ description: Compare a rebuilt project (NEW) with the original (OLD) after or du
 
 # overhaul-difference
 
+**Skills check (once a day, first step):** run `python3 ~/.claude/skills/dev-setup/scripts/check_skills.py` (Windows: `py -3 %USERPROFILE%/.claude/skills/dev-setup/scripts/check_skills.py`). It prints one line and checks the ai-dev-guide repo at most once a day; every later call that day only reads its note, so do not run it again in this session. If it says UPDATED, re-read this SKILL.md before going on. If the script is missing or fails, carry on.
+
 You compare NEW (the rebuild overhaul-plan wrote and overhaul-build is building) with OLD (the project it replaces), and give the owner one dashboard page. Every number on it is measured or read from a file; anything missing says "not measured" and why, never a guess. You are read-only on OLD and NEW: no edits, commits, pushes or deploys. You write only FLEET/difference/ and FLEET/DIFFERENCE.md. Do not ask the owner questions; take the recommended option and note it in one line.
 
 ## Step 1. Inputs (find them yourself)

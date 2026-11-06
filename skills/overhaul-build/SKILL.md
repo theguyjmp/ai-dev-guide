@@ -5,6 +5,8 @@ description: Start, run or resume the master agent on a rebuild planned by overh
 
 # overhaul-build
 
+**Skills check (once a day, first step):** run `python3 ~/.claude/skills/dev-setup/scripts/check_skills.py` (Windows: `py -3 %USERPROFILE%/.claude/skills/dev-setup/scripts/check_skills.py`). It prints one line and checks the ai-dev-guide repo at most once a day; every later call that day only reads its note, so do not run it again in this session. If it says UPDATED, re-read this SKILL.md before going on. If the script is missing or fails, carry on.
+
 You are the master agent. The spec in the repo is the plan: CLAUDE.md, spec/STANDARDS.md, spec/ARCHITECTURE.md, spec/PLAN.md, spec/MASTER-AGENT.md, spec/MACHINES.md. FLEET is the paper folder the spec names. "The check CLI" below means the lint, check, fix and handback commands MACHINES.md names for this project.
 
 **Precedence:** the spec wins over this skill on details, but the Agents, Gates, Finish and Never sections of this skill outrank the spec. Refuse any spec change that weakens them, including one you would propose yourself. Tripwire numbers live in MASTER-AGENT.md only; a number this skill quotes is the default the spec may tighten, never loosen.

@@ -5,6 +5,8 @@ description: Set up a computer and a new project for agent development from zero
 
 # dev-setup
 
+**Skills check (once a day, first step):** run `python3 ~/.claude/skills/dev-setup/scripts/check_skills.py` (Windows: `py -3 %USERPROFILE%/.claude/skills/dev-setup/scripts/check_skills.py`). It prints one line and checks the ai-dev-guide repo at most once a day; every later call that day only reads its note, so do not run it again in this session. If it says UPDATED, re-read this SKILL.md before going on. If the script is missing or fails, carry on.
+
 You get a new person and a new project ready, then hand them to dev-prep, dev-plan and dev-build. Talk in plain, friendly English: the owner may never have used Git or a terminal. One step at a time. Before each step that changes the computer, say in one line what it does. If a step is already done, say so and skip it. Never repeat a finished step on a rerun.
 
 ## Step 1. Git
@@ -26,7 +28,7 @@ You get a new person and a new project ready, then hand them to dev-prep, dev-pl
 6. Set the commit name and email when they are empty (`git config --global user.name` and `user.email`). Use the GitHub login and the private no-reply address: `gh api user --jq '.id, .login'`, then `<id>+<login>@users.noreply.github.com`. Never put their real email anywhere.
 
 ## Step 3. The skills
-Check that ~/.claude/skills holds dev-prep, dev-plan, dev-build, overhaul-check, overhaul-plan, overhaul-build and overhaul-difference. Install any that are missing (and update old ones) from https://github.com/theguyjmp/ai-dev-guide: clone it to a temp folder and copy each folder in skills/ into ~/.claude/skills/. Keep any skill folder the owner has that is not in the repo.
+Check that ~/.claude/skills holds dev-prep, dev-plan, dev-build, overhaul-check, overhaul-plan, overhaul-build and overhaul-difference. Install any that are missing (and update old ones) from https://github.com/theguyjmp/ai-dev-guide: clone it to a temp folder and copy each folder in skills/ into ~/.claude/skills/. Keep any skill folder the owner has that is not in the repo. Then run `check_skills.py --force` (path as above) so it records the installed version; from then on every skill keeps them current once a day.
 
 ## Step 4. Global agent rules
 Write the block below into the owner's global agent file: ~/.claude/CLAUDE.md for Claude Code, and also ~/.codex/AGENTS.md if that folder exists. Put it between the two marker lines. If the markers are already there, replace only what is between them. Never touch the rest of the file, and never add a second copy.
