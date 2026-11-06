@@ -84,6 +84,16 @@
 .vr .plegend li b { color: var(--color-fg); font-weight: 600; }
 .vr .plegend .sw { display: inline-block; flex: none; width: .7em; height: .7em; border-radius: 2px; }
 .vr .plegend .sw.pk-none { border: 1px solid var(--color-border-line); background: var(--cds-chart-grid); }
+.vr .ptitle { font-size: var(--cds-font-size-body); font-weight: 600; color: var(--color-fg); margin-top: var(--cds-gap-xs); }
+.vr .gate { display: grid; gap: var(--cds-gap-sm); }
+.vr .gchk { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--cds-gap-xs); font-size: var(--cds-font-size-body); }
+.vr .gchk li { display: grid; grid-template-columns: 1.25em minmax(0, 1fr) auto; gap: var(--cds-gap-sm); align-items: baseline; overflow-wrap: anywhere; }
+.vr .gchk .mk { color: var(--color-fg-muted); text-align: center; }
+.vr .gchk .done .mk { color: var(--color-ok); }
+.vr .gchk .v { font-family: var(--vr-mono); font-size: .92em; color: var(--color-fg); text-align: right; }
+.vr .gchk .todo .v { color: var(--color-fg-muted); }
+.vr .gnext { font-size: var(--cds-font-size-body); overflow-wrap: anywhere; }
+.vr .gnext b { font-weight: 600; }
 .vr [hidden] { display: none !important; }
 @container (max-width: 40rem) {
   .vr .row { grid-template-columns: minmax(0, 1fr) 3.75rem 2.75rem minmax(4.5rem, 6rem); }
@@ -97,14 +107,25 @@
 <div class="vr">
   <h1>{{TITLE}}</h1>
 
+  <section class="card gate" id="gate">
+    <div class="sect-head">
+      <span class="label">Current gate</span>
+      <span class="sub" data-draw="g-name" data-source="gate">—</span>
+    </div>
+    <span class="sub">What must be true before the build moves to the next phase, checked from the fleet's own records.</span>
+    <div data-draw="g-list" data-source="gate"></div>
+  </section>
+
   <section class="card pipe" id="pipeline">
     <div class="sect-head">
       <span class="label">Pipeline</span>
       <span class="sub" data-draw="p-ago" data-source="pipeline">—</span>
     </div>
-    <span class="sub">Functions by stage. Green is on main; grey is done work not on main yet.</span>
+    <div class="ptitle" data-draw="p-title" data-bar="functions" data-source="pipeline">Product functions</div>
+    <span class="sub">Counts the product's functions in spec/FUNCTIONS.md. A function is proven only when its acceptance test passes on the deployed build. Green is on main; grey is done work not on main yet.</span>
     <div data-draw="p-bar" data-bar="functions" data-source="pipeline"></div>
-    <span class="sub">Packets and PRs</span>
+    <div class="ptitle" data-draw="p-title" data-bar="packets" data-source="pipeline">Work packets</div>
+    <span class="sub">Counts every PR and queue row, tooling, lints and gate work included. Work that names no function moves only this bar.</span>
     <div data-draw="p-bar" data-bar="packets" data-source="pipeline"></div>
   </section>
 
@@ -593,6 +614,13 @@ dash.calc('phase-now', {
     e.textContent = isNaN(m) ? 'not measured yet' : 'measured ' + (m < 1 ? 'just now' : m < 60 ? m + ' min ago' : Math.round(m / 60) + ' h ago');
   });
 
+  dash.draw('p-title', (e) => {
+    const kind = e.dataset.bar; const r = (rows() || []).filter((x) => x.bar === kind);
+    const base = kind === 'functions' ? 'Product functions' : 'Work packets';
+    const t = r.length ? (num(r[0].total) != null ? num(r[0].total) : r.reduce((a, x) => a + (num(x.count) || 0), 0)) : null;
+    e.textContent = t == null ? base : base + ' (' + d3.format(',')(t) + ')';
+  });
+
   dash.draw('p-bar', (box) => {
     box.replaceChildren();
     const kind = box.dataset.bar; const r = (rows() || []).filter((x) => x.bar === kind);
@@ -612,6 +640,46 @@ dash.calc('phase-now', {
     }
     bar.setAttribute('aria-label', said.join(', ') + ', of ' + total);
     box.append(bar, legend);
+  });
+})();
+</script>
+
+<script>
+(() => {
+  // Current gate: the phase gate as a checklist, from the `gate` dataset (FLEET/dash/gate.json),
+  // one row per condition in gate order. The first not-done row is the next blocking item.
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const rows = () => { const d = dash.data('gate'); return d.status === 'ok' && Array.isArray(d.data) && d.data.length ? d.data : null; };
+  const isDone = (x) => x.done === true || String(x.done).toLowerCase() === 'true';
+  const has = (v) => v != null && v !== '';
+
+  dash.draw('g-name', (e) => {
+    const r = rows(); if (!r) { e.textContent = 'not measured yet'; return; }
+    const ok = r.filter(isDone).length; const at = r.map((x) => x.measured_at).filter(Boolean).sort().pop();
+    const m = at ? Math.round((Date.now() - new Date(at).getTime()) / 60000) : NaN;
+    const when = isNaN(m) ? '' : ' · measured ' + (m < 1 ? 'just now' : m < 60 ? m + ' min ago' : Math.round(m / 60) + ' h ago');
+    e.textContent = (has(r[0].gate) ? r[0].gate + ': ' : '') + ok + ' of ' + r.length + ' done' + when;
+  });
+
+  dash.draw('g-list', (box) => {
+    box.replaceChildren();
+    const r = rows();
+    if (!r) { box.append(el('span', 'none', 'not measured yet: dash/gate.json has not been uploaded')); return; }
+    const ul = el('ul', 'gchk');
+    for (const x of r) {
+      const d = isDone(x); const li = el('li', d ? 'done' : 'todo');
+      li.append(el('span', 'mk', d ? '✓' : '○'), el('span', '', has(x.condition) ? x.condition : 'unnamed condition'), el('span', 'v', has(x.value) ? String(x.value) : 'not measured'));
+      li.title = (d ? 'Done' : 'Not done') + (has(x.packet) ? ' · ' + x.packet : '');
+      ul.append(li);
+    }
+    const first = r.find((x) => !isDone(x));
+    const next = el('div', 'gnext');
+    if (!first) next.append(el('b', '', 'Gate passed. '), document.createTextNode('Every condition is done.'));
+    else {
+      next.append(el('b', '', 'Next blocking: '), document.createTextNode(has(first.next) ? first.next : first.condition));
+      if (has(first.packet)) next.append(document.createTextNode(' · '), el('span', 'mono', first.packet));
+    }
+    box.append(ul, next);
   });
 })();
 </script>
