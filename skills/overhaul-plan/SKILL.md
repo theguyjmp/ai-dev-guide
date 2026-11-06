@@ -166,7 +166,7 @@ Fixed tripwire ids (overhaul-build acts on these ids; the thresholds below are d
 | H08 | Same red twice | Change the plan, not the agent |
 | H09 | Paper offered as proof | Reject; the gate is the proof |
 | H10 | Merge wait over 30 min | Add slots or shrink batches |
-| H11 | Idle check or builder slots | Dispatch |
+| H11 | Idle check slots, or builders under three quarters of FLEET/FLEET-TARGET for 10 min while work is left (ready or held rows, the follow-on queue, the next phase unwritten) | A dispatcher pass fills the fleet to the target the same wake; follows on open PRs are land gates, so those packets start stacked |
 | H12 | PR over the size limit | Split |
 | H13 | Duplicate-capability lint red | Reject; route to the owner as a hook packet |
 | H14 | Slow start: first edit later than call 15 of a pass (the brief left the builder searching) | Fix the brief template |
