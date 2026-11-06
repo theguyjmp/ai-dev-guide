@@ -3,7 +3,9 @@
 Installed as FLEET/bin/master-status.py. Reads only FLEET files and the transcripts folder named in FLEET/BUDGET.json
 (like burn.py) and prints at most 8 lines, each a concrete action or an ok summary:
   AGENTS  subagent transcripts written in the last 5 min vs FLEET/FLEET-TARGET, and the launch lines still waiting
-          (newest LAUNCH-*.md lines and DISPATCH ready rows whose brief no recent transcript names)
+          (newest LAUNCH-*.md lines and DISPATCH ready rows whose brief no recent transcript names;
+          only launchable ones: never a held row, nor a later-phase build packet while the Phase 0 gate
+          is unproven (FLEET/PHASE `<phase> [phase0_proven]` from health.py, else DISPATCH ids and statuses))
   WAIT    bin/wait.sh armed: FLEET/.wait-armed (pid and time, written by wait.sh each minute) under 3 min old
   DASH    dash/.uploaded age (red over 35 min) and the newest dash data file's age (red over 20 min)
   HEALTH  HEALTH.tsv age (red over 35 min) and whether the health scheduler entry exists
@@ -91,20 +93,78 @@ def brief_name(cell):
     return m.group(1) if m else None
 
 
-def launch_lines(fleet):
+# A row or LAUNCH line is launchable only if it is not held (or otherwise not startable) and, while the
+# Phase 0 gate is not proven, it is not a build packet of a later phase (Acceptance, design-note, review,
+# audit, ruling and land packets written ahead still count). The Phase 0 gate is a start gate.
+NOT_STARTABLE = ("held", "hold", "blocked", "superseded", "landed", "merged", "done", "closed", "running",
+                 "paused", "abandoned", "already holds", "proven")
+FINISHED = ("landed", "merged", "done", "superseded", "closed", "already holds", "proven", "abandoned")
+AHEAD_OK = re.compile(r"accept|note|\bdn\b|review|audit|ruling|merge|\bland|mechanic|dash-refresh", re.I)
+
+
+def row_phase(row_id, row=None):
+    """Phase number of a packet: its DISPATCH `phase` column, else its id prefix (m0-, m1-, p2-, phase0-)."""
+    ph = str((row or {}).get("phase", "")).strip()
+    if ph[:1].isdigit():
+        return int(re.match(r"\d+", ph).group())
+    m = re.match(r"(?:m|p|phase)[-_]?(\d+)(?:[-_.]|$)", (row_id or "").strip().lower())
+    return int(m.group(1)) if m else None
+
+
+def dispatch_rows(fleet):
+    return table_rows(read(os.path.join(fleet, "DISPATCH.md")))
+
+
+def phase_state(fleet, rows):
+    """(current phase, Phase 0 gate proven). FLEET/PHASE, written by health.py, is `<phase> [phase0_proven]`;
+    without it the current phase is the lowest phase with an unfinished DISPATCH row, and the gate counts as
+    proven only when no phase-0 row is unfinished."""
+    text = read(os.path.join(fleet, "PHASE")).strip().lower()
+    m = re.match(r"\s*(?:phase\s*)?(\d+)", text)
+    if m:
+        return int(m.group(1)), "phase0_proven" in text
+    open_phases = [row_phase(r.get("id"), r) for r in rows
+                   if not r.get("status", "").strip().lower().startswith(FINISHED)]
+    open_phases = [p for p in open_phases if p is not None]
+    return min(open_phases, default=0), 0 not in open_phases
+
+
+def not_launchable(row_id, text, row, phase0_proven):
+    """Why a line may not be launched now, or None if it may."""
+    st = (row or {}).get("status", "").strip().lower()
+    if st.startswith(NOT_STARTABLE):
+        return f"status {st[:30]}"
+    ph = row_phase(row_id, row)
+    if not phase0_proven and ph is not None and ph > 0 and not AHEAD_OK.search(f"{row_id} {text}"):
+        return f"phase {ph} build packet behind the Phase 0 gate"
+    return None
+
+
+def launch_lines(fleet, rows=None, phase0_proven=True):
+    """(file, launchable brief names, count of lines not launchable) for the newest LAUNCH-*.md."""
     files = sorted(glob.glob(os.path.join(fleet, "LAUNCH-*.md")), key=os.path.getmtime)
     if not files:
-        return None, []
-    out = []
+        return None, [], 0
+    by_brief = {brief_name(" ".join(r.values())): r for r in (rows or [])}
+    by_id = {r.get("id", ""): r for r in (rows or [])}
+    out, held = [], 0
     for line in read(files[-1]).splitlines():
         if line.count("|") >= 2 and brief_name(line):
-            out.append(brief_name(line))
-    return os.path.basename(files[-1]), out
+            name = brief_name(line)
+            first = line.strip().strip("|").split("|")[0].strip()
+            row = by_brief.get(name) or by_id.get(first)
+            if not_launchable((row or {}).get("id") or first, line, row, phase0_proven):
+                held += 1
+            else:
+                out.append(name)
+    return os.path.basename(files[-1]), out, held
 
 
-def dispatch_ready(fleet):
-    rows = table_rows(read(os.path.join(fleet, "DISPATCH.md")))
-    return [brief_name(" ".join(r.values())) or r.get("id", "?") for r in rows if r.get("status", "").lower() == "ready"]
+def dispatch_ready(fleet, rows=None, phase0_proven=True):
+    rows = dispatch_rows(fleet) if rows is None else rows
+    return [brief_name(" ".join(r.values())) or r.get("id", "?") for r in rows
+            if r.get("status", "").strip().lower() == "ready"
+            and not not_launchable(r.get("id", ""), " ".join(r.values()), r, phase0_proven)]
 
 
 def latest_run(path, state_col):
@@ -157,10 +217,13 @@ def status(fleet, check_scheduler=True):
         target = 0
     running = len(subagent_files(tr, 5))
     launched = launched_briefs(tr)
-    lfile, llines = launch_lines(fleet)
+    rows = dispatch_rows(fleet)
+    phase, phase0_proven = phase_state(fleet, rows)
+    lfile, llines, held = launch_lines(fleet, rows, phase0_proven)
     waiting = [n for n in llines if n not in launched]
-    ready = [n for n in dispatch_ready(fleet) if n not in launched]
-    s.update(target=target, running=running, waiting=waiting, ready=ready, launch_file=lfile)
+    ready = [n for n in dispatch_ready(fleet, rows, phase0_proven) if n not in launched]
+    s.update(target=target, running=running, waiting=waiting, ready=ready, launch_file=lfile, held=held,
+             phase=phase, phase0_proven=phase0_proven)
     s["under"] = target > 0 and running * 4 < target * 3
     s["launchable"] = bool(waiting or ready)
 
@@ -210,6 +273,10 @@ def lines(s, fleet, mark=True):
         out.append(f"{head}, under 3/4: launch {need} now: " + " then ".join(what))
     elif s["under"]:
         out.append(f"{head}, under 3/4 and nothing launchable: have the ruling agent write the next packets now")
+    if s.get("held"):
+        gate = "proven" if s.get("phase0_proven") else "not proven"
+        out.append(f"HELD {s['held']} lines of {s['launch_file']} are not launchable (held status, or a later-phase "
+                   f"build packet while the Phase 0 gate is {gate}): never launch them")
     ok = [] if any(l.startswith("AGENTS") for l in out) else [head]
     if s["wait_armed"]:
         ok.append("wait armed")
