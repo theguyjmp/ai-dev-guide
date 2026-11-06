@@ -10,7 +10,9 @@ from pathlib import Path
 
 SPEC_FILES = ["CLAUDE.md", "spec/STANDARDS.md", "spec/ARCHITECTURE.md", "spec/PLAN.md",
               "spec/MASTER-AGENT.md", "spec/MACHINES.md"]
-TRIPWIRES = [f"H{i:02d}" for i in range(1, 26)]
+TRIPWIRES = [f"H{i:02d}" for i in range(1, 27)]
+# Fixed bottleneck-table stages (overhaul-plan Step 4), matched against the Stage column.
+BOTTLENECK_STAGES = ["dispatch", "check slot", "merge", "audit", "ruling", "follows", "floor", "master", "reading", "check wait"]
 GATES = ["Phase 0 gate", "stall gate"]
 DEADLINE = re.compile(r"by hour|deadline|within \d+ (min|minutes|hours?)\b|minute \d+|hour \d+", re.I)
 BRIEF_FIELDS = ["FUNCTIONS id", "Acceptance", "allowed files", "INDEX", "hook", "call cap", "hand-back",
@@ -250,6 +252,25 @@ def main():
             miss(f"tripwire {h} has no number")
         if len(r) < 4 or not all(c for c in r[1:4]):
             miss(f"tripwire {h} needs threshold, source and action columns")
+
+    # Bottleneck watch: the stage table, its tripwire row, bottleneck.json and the RULINGS line per fix.
+    btab = next((t for t in tables_in(ma) if re.match(r"^\|\s*Stage\s*\|\s*Red when\s*\|\s*Fix\s*\|", t[0].strip(), re.I)), None)
+    if not btab:
+        miss("MASTER-AGENT lacks the bottleneck table | Stage | Red when | Fix |")
+    else:
+        brows = table_rows(chr(10).join(btab[1:]))
+        for st in BOTTLENECK_STAGES:
+            if not any(re.search(st, r[0], re.I) for r in brows):
+                miss(f"bottleneck table lacks the '{st}' stage")
+        for r in brows:
+            if len(r) < 3 or not re.search(r"\d", r[1]) or not r[2]:
+                miss(f"bottleneck stage '{r[0]}' needs a numeric Red when and a Fix")
+    if not any(re.search(r"bottleneck unresolved", " ".join(r[1:]), re.I) for r in trows.values()):
+        miss("MASTER-AGENT tripwire table lacks the 'Bottleneck unresolved' row")
+    if not re.search(r"bottleneck\.json", ma + plan):
+        miss("health.py duties lack FLEET/dash/bottleneck.json")
+    if not re.search(r"RULINGS[^\n]*expected wait|expected wait[^\n]*RULINGS", ma, re.I):
+        miss("MASTER-AGENT lacks the RULINGS line per bottleneck fix (stage, measured wait, fix, expected wait)")
 
     for name, rx in {"ruling holds on in-flight packets": r"\bhold", "superseded-packet path": r"supersed",
                      "owner glob added by a ruling that creates a public name": r"owner-add",
