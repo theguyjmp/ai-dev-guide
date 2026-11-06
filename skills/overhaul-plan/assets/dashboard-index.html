@@ -61,6 +61,13 @@
 .vr .acct b { font-family: var(--vr-mono); font-weight: 500; }
 .vr .acct .ok { color: var(--color-ok); }
 .vr .acct .muted { color: var(--color-fg-muted); }
+.vr .hist { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: var(--cds-gap-md); }
+.vr .hchart { position: relative; }
+.vr .hchart svg { display: block; overflow: visible; }
+.vr .hchart text { fill: var(--color-fg-muted); font-size: 10px; font-family: var(--vr-sans); }
+.vr .htip { position: absolute; top: 0; pointer-events: none; background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-sm); font-size: var(--cds-font-size-caption); white-space: nowrap; z-index: 2; box-shadow: 0 2px 8px rgba(0, 0, 0, .12); }
+.vr .htip b { font-weight: 600; color: var(--color-fg); }
+.vr .htip span { color: var(--color-fg-muted); }
 .vr [hidden] { display: none !important; }
 @container (max-width: 40rem) {
   .vr .row { grid-template-columns: minmax(0, 1fr) 3.75rem 2.75rem minmax(4.5rem, 6rem); }
@@ -158,6 +165,14 @@
         <span class="sub" data-show="rate.per_function" data-metric="tokens"><b data-draw="r-perfn" data-metric="tokens" data-source="rates" data-field="per_function" data-where="metric=tokens">—</b> per proven function</span>
       </div>
     </div>
+  </section>
+
+  <section class="history" id="history">
+    <div class="sect-head">
+      <h2>History</h2>
+      <span class="sub" data-draw="h-range" data-source="history">—</span>
+    </div>
+    <div class="hist" data-draw="history" data-source="history"></div>
   </section>
 
   <section class="card accts" id="accounts" hidden>
@@ -414,6 +429,114 @@ dash.calc('phase-now', {
       const state = yes(r.active) ? span('ok', 'in use') : yes(r.spent) ? span('muted', 'spent') : span('', 'available');
       li.append(b, span('muted', ' · '), state, span('muted', ' · refreshes ' + DAYS[Number(r.refresh_dow)] + ' ' + hourText(Number(r.refresh_hour)) + ' (' + inText(mins) + ')'));
       ul.append(li);
+    }
+  });
+})();
+</script>
+
+<script>
+(() => {
+  // History: one small chart per hourly series from the `history` dataset (FLEET/dash/history.json),
+  // each on its own y-axis (never two scales on one chart), sharing the hour axis.
+  const SERIES = [
+    { key: 'functions_proven', label: 'Functions proven', note: 'total on main', keys: ['functions_proven'] },
+    { key: 'merged_in_hour', label: 'Merges per hour', note: 'into main', keys: ['merged_in_hour'] },
+    { key: 'agents', label: 'Agents running', note: 'peak in the hour', keys: ['agents_running', 'agents_active'] },
+    { key: 'tokens', label: 'Tokens per hour', note: 'all usage', keys: ['tokens', 'tokens_per_hour'] },
+  ];
+  const num = (v) => (v == null || v === '' || isNaN(Number(v)) ? null : Number(v));
+  const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+  const fmt = (v) => v == null ? '—' : Math.abs(v) >= 10000 ? compact.format(v) : d3.format(',.0f')(v);
+  const hourFmt = d3.utcFormat('%b %-d %H:00');
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const ink = () => { const c = dash.colors && dash.colors[0]; return typeof c === 'string' && c ? c : 'var(--color-fg)'; };
+  const pts = () => {
+    const d = dash.data('history');
+    if (d.status !== 'ok' || !Array.isArray(d.data)) return null;
+    const r = d.data.map((x) => ({ t: new Date(String(x.hour || '')), row: x }))
+      .filter((p) => !isNaN(p.t)).sort((a, b) => a.t - b.t);
+    return r.length ? r : null;
+  };
+  const val = (s, row) => { for (const k of s.keys) { const v = num(row[k]); if (v != null) return v; } return null; };
+
+  dash.draw('h-range', (e) => {
+    const p = pts();
+    e.textContent = p ? d3.format(',')(p.length) + ' hours, ' + hourFmt(p[0].t) + ' to ' + hourFmt(p[p.length - 1].t) + ' UTC' : 'no history yet';
+  });
+
+  const chart = (box, s, p) => {
+    const W = Math.max(220, box.clientWidth || 320); const H = 140;
+    const m = { t: 8, r: 8, b: 20, l: 40 };
+    const data = p.map((x) => ({ t: x.t, v: val(s, x.row), phase: x.row.phase }));
+    const vals = data.map((d) => d.v).filter((v) => v != null);
+    const x = d3.scaleUtc().domain(d3.extent(data, (d) => d.t)).range([m.l, W - m.r]);
+    if (data.length === 1) x.domain([new Date(+data[0].t - 1800000), new Date(+data[0].t + 1800000)]);
+    const y = d3.scaleLinear().domain([0, Math.max(1, d3.max(vals) || 0)]).nice(3).range([H - m.b, m.t]);
+    const svg = d3.select(box).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img').attr('aria-label', s.label + ' by hour');
+    svg.append('g').selectAll('line').data(y.ticks(3)).join('line')
+      .attr('x1', m.l).attr('x2', W - m.r).attr('y1', (d) => y(d)).attr('y2', (d) => y(d))
+      .style('stroke', 'var(--cds-chart-grid)').style('stroke-width', 1);
+    svg.append('g').selectAll('text').data(y.ticks(3)).join('text')
+      .attr('x', m.l - 6).attr('y', (d) => y(d)).attr('dy', '0.32em').attr('text-anchor', 'end').text((d) => fmt(d));
+    const xt = x.ticks(Math.max(2, Math.min(5, Math.floor(W / 90))));
+    svg.append('g').selectAll('text').data(xt).join('text')
+      .attr('x', (d) => x(d)).attr('y', H - 4).attr('text-anchor', 'middle')
+      .text((d) => d.getUTCHours() === 0 ? d3.utcFormat('%b %-d')(d) : d3.utcFormat('%H:00')(d));
+    // Phase changes: a thin dashed rule with the new phase's name.
+    for (let i = 1; i < data.length; i++) {
+      if (data[i].phase && data[i].phase !== data[i - 1].phase) {
+        const px = x(data[i].t);
+        svg.append('line').attr('x1', px).attr('x2', px).attr('y1', m.t).attr('y2', H - m.b)
+          .style('stroke', 'var(--color-fg-muted)').style('stroke-dasharray', '3 3').style('stroke-width', 1);
+        svg.append('text').attr('x', px + 3).attr('y', m.t + 8).text(String(data[i].phase));
+      }
+    }
+    const c = ink();
+    const line = d3.line().defined((d) => d.v != null).x((d) => x(d.t)).y((d) => y(d.v));
+    const area = d3.area().defined((d) => d.v != null).x((d) => x(d.t)).y0(y(0)).y1((d) => y(d.v));
+    svg.append('path').datum(data).attr('d', area).style('fill', c).style('fill-opacity', 0.12);
+    svg.append('path').datum(data).attr('d', line).style('fill', 'none').style('stroke', c).style('stroke-width', 2).style('stroke-linejoin', 'round').style('stroke-linecap', 'round');
+    if (data.filter((d) => d.v != null).length === 1) {
+      const d0 = data.find((d) => d.v != null);
+      svg.append('circle').attr('cx', x(d0.t)).attr('cy', y(d0.v)).attr('r', 4).style('fill', c);
+    }
+    // Hover: crosshair, dot and a tooltip kept inside the chart box.
+    const cross = svg.append('line').attr('y1', m.t).attr('y2', H - m.b).style('stroke', 'var(--color-fg-muted)').style('stroke-width', 1).style('display', 'none');
+    const dot = svg.append('circle').attr('r', 4).style('fill', c).style('stroke', 'var(--color-panel)').style('stroke-width', 2).style('display', 'none');
+    const tip = el('div', 'htip'); tip.hidden = true; box.append(tip);
+    const hide = () => { cross.style('display', 'none'); dot.style('display', 'none'); tip.hidden = true; };
+    const bis = d3.bisector((d) => d.t).center;
+    svg.append('rect').attr('x', m.l).attr('y', 0).attr('width', Math.max(1, W - m.l - m.r)).attr('height', H)
+      .style('fill', 'transparent').style('cursor', 'crosshair')
+      .on('pointermove', (ev) => {
+        const [mx] = d3.pointer(ev); const d = data[bis(data, x.invert(mx))]; if (!d) return hide();
+        const px = x(d.t);
+        cross.attr('x1', px).attr('x2', px).style('display', null);
+        if (d.v != null) dot.attr('cx', px).attr('cy', y(d.v)).style('display', null); else dot.style('display', 'none');
+        tip.replaceChildren(el('b', '', fmt(d.v)), el('span', '', ' ' + s.label.toLowerCase()), el('br'), el('span', '', hourFmt(d.t) + ' UTC' + (d.phase ? ' · ' + d.phase : '')));
+        tip.hidden = false;
+        const scale = (box.clientWidth || W) / W; const tw = tip.offsetWidth;
+        let left = px * scale + 10; if (left + tw > box.clientWidth) left = px * scale - tw - 10;
+        tip.style.left = Math.max(0, left) + 'px';
+      })
+      .on('pointerleave', hide);
+  };
+
+  dash.draw('history', (box) => {
+    box.replaceChildren();
+    const p = pts();
+    if (!p) { box.append(el('span', 'none', 'no history yet: dash/history.json has not been uploaded')); return; }
+    for (const s of SERIES) {
+      const card = el('div', 'card');
+      card.append(el('span', 'label', s.label));
+      const last = [...p].reverse().map((x) => val(s, x.row)).find((v) => v != null);
+      const peak = d3.max(p, (x) => val(s, x.row));
+      const sub = el('span', 'sub');
+      if (last == null) sub.textContent = 'not measured yet';
+      else sub.append(document.createTextNode('latest '), el('b', '', fmt(last)), document.createTextNode(' · peak '), el('b', '', fmt(peak)), document.createTextNode(' · ' + s.note));
+      card.append(sub);
+      const c = el('div', 'hchart'); card.append(c); box.append(card);
+      if (last != null) chart(c, s, p);
     }
   });
 })();
