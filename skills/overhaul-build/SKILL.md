@@ -56,6 +56,7 @@ Nothing else is dispatched until these land, except the Phase 0 briefs that PLAN
 6. Every lint STANDARDS.md names, including the quarantine fingerprint index of the old project, the duplicate-capability lint (with owners.toml's forbidden type names), the import allowlist, the catch-all module-name ban, the module-header lint, the look-alike lint (a field-only record, a class whose methods only store or return fields: a field-assigning `__init__`, simple properties, dataclass or record syntax, or one trivial method, gets no body hash; a class with real logic is hashed on its methods alone, so only a matching body of real logic flags) and the slop lint.
 7. The red-team suite: one deliberate violation per lint (a deliberate duplicate capability included). It runs on every lint change and every 24 hours, and each violation must be refused.
 8. Salvage PRs by the mechanic, from the commit PLAN.md pins, each with its SALVAGE record; the design notes PLAN.md lists for M0.
+9. The bug and feedback button and its inbox (overhaul-plan Step 4): the capture UI in the UI kit, on top of every realm, and the inbox writer with redaction, ids and status. Its briefs go out as soon as items 1 to 3 have landed, so reports flow from the first deploy.
 
 As soon as health.py lands, register these on the external scheduler so they run even if you stall:
 - health.py on its cadence.
@@ -99,10 +100,11 @@ You may read each agent's and packet's start, end and duration and progress over
    A builder that filed a hook request is a pass, not a failure. When a hook's fix lands, run `unskip <hook>`; never launch a pass only to delete skips. Copying another owner's capability is a reject (H13), even when it works.
    The superseded-packet path: when a ruling replaces a packet (one that never started, or one whose land is held), start the replacement first if it starts from the old branch, then run the check CLI's supersede command, then launch the replacement in the old packet's place. Never launch the replaced packet, and log the swap as a decision.
 6. Open design notes and disagreements on the board go to the ruling agent before the next run.
-7. A red full gate on main: dispatch its fix packet first. Merges into the failing packages wait; others continue.
-8. COORD-STATE.md: health.py writes the mechanical fields. You add only what it cannot know: the soft-launch stage, decisions, next launches and analyst episodes, in one edit per loop. Every count you write (calls, passes, packets, stale rows) is copied from a measurement (health.py, the check CLI, git), never estimated.
-9. When you switch Claude accounts or one hits its limit, update `active` and `spent` in FLEET/accounts.json at once; health.py copies it to the dashboard data.
-10. At the hourly heartbeat only, refresh the dashboard (health.py cannot call the Artifact tool): upload the changed files in FLEET/dash as assets, then one `update` per changed dataset of its `url`, `name`, `updated` and `edit`, all in one message. Status to the owner is four lines at most: functions proven of the total, last gate, open gate reds, the one deciding item; the projection is on the dashboard.
+7. Inbox triage: when health.py shows new inbox reports, launch one Sonnet ruling agent for all of them. A bug becomes a fix packet (red pin first); feedback becomes a FUNCTIONS row with an Acceptance or an owner ruling, with owner feedback ahead of new functions. It fills each pattern-id and the status the panel shows.
+8. A red full gate on main: dispatch its fix packet first. Merges into the failing packages wait; others continue.
+9. COORD-STATE.md: health.py writes the mechanical fields. You add only what it cannot know: the soft-launch stage, decisions, next launches and analyst episodes, in one edit per loop. Every count you write (calls, passes, packets, stale rows) is copied from a measurement (health.py, the check CLI, git), never estimated.
+10. When you switch Claude accounts or one hits its limit, update `active` and `spent` in FLEET/accounts.json at once; health.py copies it to the dashboard data.
+11. At the hourly heartbeat only, refresh the dashboard (health.py cannot call the Artifact tool): upload the changed files in FLEET/dash as assets, then one `update` per changed dataset of its `url`, `name`, `updated` and `edit`, all in one message. Status to the owner is four lines at most: functions proven of the total, last gate, open gate reds, the one deciding item; the projection is on the dashboard.
 
 ## Agents
 - Short-lived: about 100 calls to build, 60 to review, then hand back. The next pass is a fresh agent with a short brief, never a resume.

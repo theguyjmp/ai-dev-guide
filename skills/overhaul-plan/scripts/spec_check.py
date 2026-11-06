@@ -258,6 +258,17 @@ def main():
         if not re.search(rx, ma, re.I):
             miss(f"MASTER-AGENT lacks the {name}")
 
+    # Bug and feedback button: FUNCTIONS rows in M0 or Phase 0, the STANDARDS rule, the inbox triage.
+    fb = [r for r in frows if len(r) > 2 and re.search(r"bug and feedback", r[1], re.I)]
+    if not fb:
+        miss("FUNCTIONS has no 'Bug and feedback capture' rows")
+    elif any(not re.match(r"(M0|Phase 0)\b", r[2]) for r in fb):
+        miss("FUNCTIONS bug and feedback rows are not all in M0 or Phase 0")
+    if not re.search(r"^\s*(?:[-*]\s*)?\**S\d+\b[^\n]*bug and feedback", std, re.I | re.M):
+        miss("STANDARDS lacks the bug and feedback button rule")
+    if not re.search(r"inbox", ma, re.I) or not re.search(r"triag", ma, re.I):
+        miss("MASTER-AGENT lacks the bug and feedback inbox triage")
+
     allspec = "\n".join(texts.values())
     for name, rx in {"holds recording the main tests that cover an item and landing only uncovered pins": r"holds[^\n]*cover",
                      "field-only record skip (init-only, properties, dataclass or record syntax)": r"field-only record[^\n]*(dataclass|propert|getter|record syntax)",
