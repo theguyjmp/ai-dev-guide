@@ -60,6 +60,7 @@ Items: 1 workspace, check CLI, slots, merge queue, gate bot, deploy (in parallel
 When health.py lands, register it, the 12-hourly blind auditor and the post-batch deploy on the scheduler that same wake, never later; until then the heartbeat runs health.py itself and writes a `health scheduled` red.
 
 ## Phase 0 and soft launch
+**Every phase start, first:** every function cell of the phase names its Acceptance test in the format health.py reads, as a protected batch BEFORE any build packet launches, and every packet names the function it completes. On 2026-11-07 the pilot project landed about 60 M1 packets in 7 hours with proven flat, because 43 of 44 cells named no test, so health could count nothing.
 Phase 0 briefs go out once M0 item 1 lands, without waiting for the dispatcher. A stall red in Phase 0: stop, write the cause, send the owner a digest, re-plan through a fresh blind auditor, never more passes.
 Soft launch, at every phase start, ramp step and restart:
 1. 3 pilot builders on packets of three different owners; health.py every 10 minutes.
