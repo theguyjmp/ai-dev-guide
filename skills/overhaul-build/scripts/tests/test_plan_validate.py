@@ -396,6 +396,25 @@ class QualityPolicies(Base):
         found = self.problems(self.make(arch=ARCH.replace("difference is a - b", "sum is a + b")))
         self.only(found, "domain rule 'sum is a + b' is listed twice")
 
+    # Trial 3, F10 and F15: the plan told orders and reports to reuse an inventory helper (whole, the stock value sum)
+    # that inventory's Public line did not list; each caller may not edit inventory, so two passes each were lost.
+    def test_reuse_target_must_be_on_its_owners_public_line(self):
+        arch = ARCH.replace("Depends on: -\n", "Depends on: -\nPublic: tiny.add\n", 1)
+        self.only(self.problems(self.make(arch=arch)),
+                  "domain rule 'difference is a - b': calc.sub is not on module calc's Public line, so report cannot")
+        self.assertEqual(self.problems(self.make(arch=arch.replace("Public: tiny.add", "Public: tiny.add, tiny.sub"))),
+                         [])
+
+    def test_reuse_bullet_naming_a_dependent_module_must_be_public(self):
+        bullet = "- `stock.whole(text) -> int` raises `qty must be a whole number`; report parses with it [F001]\n"
+        arch = ARCH.replace("Depends on: -\n", "Depends on: -\nPublic: tiny.add, tiny.sub\n" + bullet, 1)
+        self.only(self.problems(self.make(arch=arch)), "module calc: stock.whole is for report to call but is not on")
+        for public in ("tiny.stock.whole", "tiny.stock"):
+            ok = arch.replace("Public: tiny.add, tiny.sub", f"Public: tiny.add, tiny.sub, {public}")
+            self.assertEqual(self.problems(self.make(arch=ok)), [], public)
+        no_public = ARCH.replace("Depends on: -\n", "Depends on: -\n" + bullet, 1)
+        self.assertEqual(self.problems(self.make(arch=no_public)), [])  # no Public line: the face decides later
+
 
 if __name__ == "__main__":
     unittest.main()

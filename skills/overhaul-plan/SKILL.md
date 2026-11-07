@@ -89,6 +89,7 @@ Owns: the cart table.
   `test_<f>_concurrent`), `Boundaries:` (every function reading untrusted input; each needs a negative acceptance test,
   e.g. `test_<f>_rejects_malformed`) and `Domain rules: <rule> -> <module>.<function>; ...`: each calculation or
   validation rule (value = qty * price, qty must be positive) lives in that one function and all others call it.
+  `Public:` lists each domain rule home and each API bullet naming a dependent module [by plan_validate.py].
 - Unit tests for module m go in `tests/unit/m/`. Each data store has one owning module; the others use its API.
 - Every module owns at least one function. The graph is acyclic: code two modules need lives in the lower one, as
   an API item tagged with the function that builds it, and each user lists that function in its deps.

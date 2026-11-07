@@ -13,7 +13,8 @@ ARCHITECTURE.md: `## Module <name>` sections, each with `Paths:` and `Depends on
   `<owner module> - <policy>`; a `Concurrent writers:` line naming every function that writes shared state reachable
   concurrently and a `Boundaries:` line naming every function that reads untrusted input (HTTP bodies, files, imports),
   both `-` for none; and a `Domain rules:` line, `<rule> -> <module>.<function>` joined by `;` (`-` for none), so
-  each calculation or validation rule has exactly one home.
+  each calculation or validation rule has exactly one home. A module with a `Public:` line must list on it each
+  domain rule home and each API bullet that names a module depending on it ("orders parses quantities with it").
 overhaul.toml [commands] must hold test, acceptance (with a `{test}` placeholder), lint, dup, literals, shape, cycles
   and entry_lint. A ruff lint must select E501 (or E) and the strict set E W F I B UP SIM RUF ARG A ANN201 PLR0915,
   in the command or the ruff config (ruff.toml, .ruff.toml or pyproject.toml [tool.ruff]). Python acceptance tests
@@ -152,22 +153,28 @@ def parse_functions(text, problems, label):
 
 
 def parse_architecture(text):
-    """{module: {"paths": [...] or None, "deps": [...] or None, "line": n}} from the `## Module <name>` sections."""
+    """{module: {"paths", "deps", "public": [...] or None, "line": n, "api": [(line, bullet)]}} from the
+    `## Module <name>` sections."""
     mods, cur = {}, None
     for n, line in enumerate(text.splitlines(), 1):
         m = re.match(r"^##\s+Module\s*:?\s+(\S+)", line, re.I)
         if m:
-            cur = mods.setdefault(m.group(1).strip("`:*"), {"paths": None, "deps": None, "line": n})
+            cur = mods.setdefault(m.group(1).strip("`:*"), {"paths": None, "deps": None, "line": n,
+                                                          "public": None, "api": []})
             continue
         if re.match(r"^#{1,2}\s", line):
             cur = None
         if cur is None:
             continue
-        m = re.match(r"^[\s>*-]*\**\s*(Paths|Depends on)\s*:\s*\**\s*(.*)$", line, re.I)
+        if re.match(r"^\s*[-*]\s+`", line):
+            cur["api"].append((n, line.strip()))
+        m = re.match(r"^[\s>*-]*\**\s*(Paths|Depends on|Public)\s*:\s*\**\s*(.*)$", line, re.I)
         if m:
             items = [x.strip().strip("`").strip() for x in re.split(r"[,;]", m.group(2).strip().strip("*")) if x.strip().strip("`").strip()]
             if m.group(1).lower() == "paths":
                 cur["paths"] = items
+            elif m.group(1).lower() == "public":
+                cur["public"] = items
             elif items:
                 cur["deps"] = [] if [x.lower() for x in items] in (["-"], ["none"]) else items
     return mods
@@ -369,6 +376,41 @@ def check_rules(rules, mods, problems, alabel):
         seen.add(rule)
 
 
+def exported(public, target):
+    """Whether a Public line covers the dotted `target` (`whole`, `stock.whole`): its name, or its submodule whole."""
+    parts = target.split(".")
+    for p in public:
+        q = p.split(".")
+        if q[-1] == parts[-1] or (len(parts) > 1 and q[-len(parts) + 1:] == parts[:-1]):
+            return True
+    return False
+
+
+def check_reuse(mods, rules, problems, alabel):
+    """A helper other modules are told to call is on its owner's Public line: each domain rule home, and each API
+    bullet that names a module depending on its owner. Otherwise the caller may not import it, may not edit the
+    owner, and the reviewer fails the copy it writes instead: a pass lost per attempt."""
+    if not mods:
+        return
+    users = {m: [u for u, v in mods.items() if u != m and m in (v["deps"] or [])] for m in mods}
+    for entry in (rules[1] if rules else []):
+        m = RULE_HOME.match(entry)
+        home = m and m.group(2) in mods and mods[m.group(2)]
+        if home and home["public"] is not None and users[m.group(2)] and not exported(home["public"], m.group(3)):
+            problems.append(f"{alabel}:{rules[0]} domain rule {m.group(1)!r}: {m.group(2)}.{m.group(3)} is not on "
+                            f"module {m.group(2)}'s Public line, so {', '.join(users[m.group(2)])} cannot call it")
+    for name, mod in mods.items():
+        if mod["public"] is None:
+            continue
+        for n, bullet in mod["api"]:
+            call = re.match(r"^[-*]\s+`([A-Za-z_][\w.]*)", bullet)
+            rest = bullet[call.end():] if call else ""
+            named = [u for u in users[name] if re.search(rf"(?<![\w.`]){re.escape(u)}(?![\w`(])", rest)]
+            if named and not exported(mod["public"], call.group(1)):
+                problems.append(f"{alabel}:{n} module {name}: {call.group(1)} is for {', '.join(named)} to call but "
+                                f"is not on the Public line; add it there")
+
+
 def check_policies(text, mods, rows, problems, alabel):
     """One owner per cross-cutting policy, tests for concurrent writers and boundaries, one home per domain rule."""
     pol, lists, rules = parse_policies(text)
@@ -386,6 +428,7 @@ def check_policies(text, mods, rows, problems, alabel):
                         "(write - for none)")
     else:
         check_rules(rules, mods, problems, alabel)
+    check_reuse(mods, rules, problems, alabel)
 
 
 def ruff_selected(repo, cmd):

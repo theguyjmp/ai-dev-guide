@@ -62,7 +62,8 @@ land.py also refuses any branch that edits them, so such an edit can never reach
    import it through the owning module's public API (its `Public:` line or `__init__` exports). Never import a
    name from inside another module's package. A message or format string is written once, as a named constant.
 6. Run the commands above and make them all pass, lint (line length included) and literals too. Do not stop
-   while one fails.
+   while one fails. drive.py runs cycles itself before review: a failure there is a failed attempt. Once your
+   module's package exists, every name on its Public line must exist in it.
 7. If the acceptance test is already green before you change anything, change nothing, commit nothing and say
    "acceptance already green before change" in your final message.
 8. Commit all your work on `{{branch}}` in `{{worktree}}` (`git add -A` then `git commit`). Do not push, do not

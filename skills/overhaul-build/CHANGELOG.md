@@ -4,6 +4,16 @@ Why each rule exists, newest first. Full v1 history: `git log -- skills/overhaul
 
 ## v2 polish phase, 2026-11-07
 Every gate passed in trial 3 and its blind audit still found 14 issues: the gates check what a rule names, and an auditor finds what no rule named. drive.py now ends with the same blind audit inside the harness (findings as JSON, file:line, module, rule and evidence), one fix builder per module, each reviewed and landed by `land.py --polish` (whole-tree gates, every proven row green, no FUNCTIONS row), then a re-audit, for `[limits] polish_rounds` rounds (default 2). verdict.py prints the final issue count and VERDICT GOOD requires 0.
+## v2 waste fixes from trial 3's pass count, 2026-11-07
+Trial 3 spent 29 builder passes on 23 functions; 6 were waste (runs/waste-3.md): F10 and F15 twice each on a review fix
+outside their allowed paths, F09 once on a cycles failure first seen at land.
+- plan_validate.py fails a plan whose reuse target is not on its owner's `Public:` line: each domain rule home, and each
+  API bullet naming a module that depends on the owner ("orders parses quantities with it").
+- drive.py sends a review FAIL straight to needs-plan, without another builder pass, when the reviewer writes a
+  `PLAN-GAP:` line or says "outside allowed paths" about a diff that stayed inside them. The review brief asks for
+  in-scope fixes only and a `PLAN-GAP:` line otherwise.
+- drive.py runs the `cycles` command in the worktree before review (the builder gate); a failure is a failed attempt
+  with the check's first lines in the retry brief, so a cycle or a missing Public name never reaches land.
 
 ## v2 quality fixes 2 from trial 3's blind audit, 2026-11-07
 Trial 3 scored 8 6 9 9 6 8 6 with 14 issues. New gates: the ruff strict set adds ARG A ANN201 PLR0915; shape_check.py (the `shape` command, run by land.py and plan_validate) fails functions over 30 lines, UPPER_CASE constants after the first def or class (unless built from the defs above), and a pytest fixture copied into two test files; check_cycles.py fails a Public entry that reaches past its package face's `__all__` (trial 3's `tinyshop.inventory.stock.whole`) or names a _private item. The polish phase (in-harness blind audit and fix passes) is not built yet.
