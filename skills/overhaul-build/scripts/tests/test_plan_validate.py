@@ -418,3 +418,48 @@ class QualityPolicies(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DepthCheck(Base):
+    @staticmethod
+    def rows(spec):
+        return [{"id": i, "deps": d} for i, d in spec]
+
+    def test_chain_depth_width_and_default_limit(self):
+        chain = self.rows([(f"F{n}", f"F{n - 1}" if n else "-") for n in range(8)])  # 8 functions, limit 4
+        p = []
+        self.assertEqual(pv.check_depth(chain, {}, p, "F"), (8, 1, [f"F{n}" for n in range(8)]))
+        self.only(p, "dependency depth 8 > 4", "F0 -> F1", "foundation", "[plan] max_depth")
+
+    def test_wide_plan_passes_and_limit_grows_with_n(self):
+        wide = self.rows([("F0", "-")] + [(f"F{n}", "F0") for n in range(1, 20)])
+        p = []
+        self.assertEqual(pv.check_depth(wide, {}, p, "F")[:2], (2, 19))
+        self.assertEqual(p, [])
+        chain = self.rows([(f"F{n}", f"F{n - 1}" if n < 6 else "-") for n in range(6)] +
+                          [(f"G{n}", "-") for n in range(18)])  # depth 6, N 24: ceil(24/4) = 6
+        p = []
+        self.assertEqual(pv.check_depth(chain, {}, p, "F")[0], 6)
+        self.assertEqual(p, [])
+
+    def test_toml_max_depth_overrides_and_validate_reports_it(self):
+        self.assertEqual(self.problems(self.make()), [])  # the toy chain F001 -> F002 -> F003 is under 4
+        tight = toml() + "[plan]\nmax_depth = 2\n"
+        self.only(self.problems(self.make(toml_text=tight)), "dependency depth 3 > 2", "F001 -> F002 -> F003")
+        p = []
+        loose = self.rows([(f"F{n}", f"F{n - 1}" if n else "-") for n in range(8)])
+        pv.check_depth(loose, {"plan": {"max_depth": 9}}, p, "F")
+        self.assertEqual(p, [])
+
+    def test_cycle_does_not_hang(self):
+        p = []
+        depth, _, _ = pv.check_depth(self.rows([("A", "B"), ("B", "A"), ("C", "A, B")]), {}, p, "F")
+        self.assertLessEqual(depth, 3)
+
+    def test_main_prints_depth_and_width(self):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stderr(out), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pv.main(["--repo", str(self.make())]), 0)
+        self.assertIn("critical path 3 functions, widest level 1", out.getvalue())

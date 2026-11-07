@@ -34,6 +34,7 @@ Problems (each is one line):
     negative, empty or injection); a domain rule without one `<module>.<function>` home, or named twice;
   - tests/conftest.py is missing;
   - the cycles, entry_lint, literals or shape command exits non-zero (run from the repo root, through overhaul.toml);
+  - the longest deps chain is over [plan] max_depth, default max(4, ceil(N/4)); depth and widest level print to stderr;
   - with --run: a non-proven function's acceptance test PASSES (it must be red before the build), or a proven one FAILS.
 Python standard library only.
 """
@@ -280,6 +281,40 @@ def check_rows(rows, mods, repo, problems, flabel):
         problems.append(f"{flabel}: dependency cycle {' -> '.join(cyc)}")
 
 
+def check_depth(rows, cfg, problems, flabel):
+    """Critical path of the deps graph. Returns (depth, widest level, longest chain); a chain longer than
+    [plan] max_depth (default max(4, ceil(N/4))) is a problem, since each link lands one after another."""
+    deps = {}
+    for r in rows:
+        rid = bare(r["id"])
+        if ID.match(rid) and rid not in deps:
+            cell = bare(r["deps"])
+            deps[rid] = [d for d in (bare(x) for x in cell.split(",")) if cell != "-" and d]
+    chain = {}
+
+    def walk(n, seen):
+        if n not in chain:
+            chain[n] = [n]  # a cycle stops here; find_cycles reports it
+            best = max(([walk(d, seen | {n}) for d in deps[n] if d in deps and d not in seen]), key=len, default=[])
+            chain[n] = [*best, n]
+        return chain[n]
+
+    for n in deps:
+        walk(n, frozenset())
+    if not chain:
+        return 0, 0, []
+    longest = max(chain.values(), key=len)
+    levels = {}
+    for c in chain.values():
+        levels[len(c)] = levels.get(len(c), 0) + 1
+    limit = (cfg.get("plan") or {}).get("max_depth") or max(4, -(-len(deps) // 4))
+    if len(longest) > limit:
+        problems.append(f"{flabel}: dependency depth {len(longest)} > {limit} ({' -> '.join(longest)}); put shared "
+                        "types, the store and errors in a foundation function, depend only on what a function's code "
+                        "calls, or set [plan] max_depth in overhaul.toml")
+    return len(longest), max(levels.values()), longest
+
+
 def check_architecture(mods, problems, alabel):
     for name, m in mods.items():
         where = f"{alabel}:{m['line']} module {name}"
@@ -483,7 +518,7 @@ def check_ruff(repo, cmd, problems):
         problems.append(f"overhaul.toml: [commands].lint (ruff) misses the strict set: select {' '.join(missing)}")
 
 
-def validate(repo, run=False, timeout=600):
+def validate(repo, run=False, timeout=600, notes=None):
     """Returns (problems, n functions). `repo` is the rebuild repo root."""
     repo, problems = Path(repo), []
     cfg, paths, toml_ok = {}, dict(DEFAULT_PATHS), False
@@ -522,6 +557,9 @@ def validate(repo, run=False, timeout=600):
     else:
         rows = parse_functions(fun_file.read_text(encoding="utf-8", errors="replace"), problems, paths["functions"])
         check_rows(rows, mods, repo, problems, paths["functions"])
+        depth, width, _ = check_depth(rows, cfg, problems, paths["functions"])
+        if notes is not None:
+            notes.append(f"{paths['functions']}: critical path {depth} functions, widest level {width}")
     if arch_file.is_file():
         check_policies(arch_file.read_text(encoding="utf-8", errors="replace"), mods, rows, problems,
                        paths["architecture"])
@@ -557,7 +595,10 @@ def main(argv=None):
     if not Path(a.repo).is_dir():
         print(f"plan_validate: --repo {a.repo} is not a directory", file=sys.stderr)
         return 2
-    problems, n = validate(a.repo, a.run, a.timeout)
+    notes = []
+    problems, n = validate(a.repo, a.run, a.timeout, notes)
+    for note in notes:
+        print(note, file=sys.stderr)  # stderr: stdout stays problem lines plus the PLAN line
     for p in problems:
         print(p)
     print(f"PLAN FAIL {len(problems)} problems" if problems else f"PLAN OK {n} functions")

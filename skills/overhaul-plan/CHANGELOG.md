@@ -1,5 +1,12 @@
 # overhaul-plan changelog
 
+## v2 depth, 2026-11-07
+plan_validate prints the critical path (longest deps chain) and the widest level, and fails a chain longer than
+max(4, ceil(N/4)) unless overhaul.toml sets `[plan] max_depth`. SKILL: F01 is the foundation (shared types, store,
+errors, entry dispatch; a second foundation may carry the domain types), deps name only functions whose API items the
+code calls, and each function gets its own files. Trial 4's plan was 7 deep (floor 29.8 of 41.7 min); with the
+foundation pattern the same 21 functions plus one foundation estimate 4 deep, widest level 16.
+
 ## v2 speed, 2026-11-07
 FUNCTIONS.md may carry a `files` column (each function's own files) and a module a `Shared:` line, so drive.py builds
 one module's functions at once; in trial 4 the one-function-per-module lock cost about 12 of 42 minutes. overhaul.toml

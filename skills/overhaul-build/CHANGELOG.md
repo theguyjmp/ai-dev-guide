@@ -2,6 +2,11 @@
 
 Why each rule exists, newest first. Full v1 history: `git log -- skills/overhaul-build` (71 commits, 2026-11-05 to 2026-11-07).
 
+## v2 depth: a critical-path check in plan_validate, 2026-11-07
+plan_validate.py `check_depth` prints `critical path N functions, widest level W` and fails a deps chain longer than
+max(4, ceil(N/4)) unless `[plan] max_depth` is set: each link lands one after another (about 2 min each), so the chain
+is the build's floor. Trial 4: 7 deep, floor 29.8 of 41.7 min. Tests: DepthCheck.
+
 ## v2 speed: a file lock instead of a module lock, 2026-11-07
 Trial 4 built 21 functions in 41.7 min wall for 51.9 builder-minutes, 1.24 builders at once (runs/speed-fix-4.md).
 The critical path of dependencies (build + review + land per function) was 29.8 min; the module lock added about 12:
