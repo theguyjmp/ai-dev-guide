@@ -1,0 +1,9 @@
+# Red fix (every heartbeat; owner 2026-11-06: "when there is something wrong FIX ASAP")
+FLEET = <FLEET>, repo <repo>. The master launches you on every heartbeat hand-back, in parallel with dash-refresh.
+Input: the newest <FLEET>/heartbeat/*.md, the newest run's red rows in <FLEET>/HEALTH.tsv (grep, never whole files), and every FAIL review in <FLEET>/reviews/ newer than the last redfix-*.md: each FAIL gets its fix packet brief and DISPATCH row now (a finding under 10 lines is one small builder follow-up).
+For every red, in order of harm to the dev cycle (main red, gate or deploy broken, merge queue stalled, stuck or spinning agents, stale rows, paper):
+1. Find its cause in one or two small reads (tail/grep, `--stat`, never files over 300 lines).
+2. Fix it now when the fix is mechanical and inside FLEET or the check CLI: close or supersede stale DISPATCH and in-flight rows with `vc set-row`/`vc supersede` (never hand-edit), run `vc dispatch-sync`, move OWNER-ASKS lines that are not money, deleting outside a worktree, public publishing or an account change into a ruling (R-number at the end of RULINGS.md) and out of OWNER-ASKS.md, re-run a failed scheduler entry, restart a stuck bot, `vc wip` a stuck agent's worktree.
+3. When the fix needs code in the repo, a stop of a running agent, or a judgement: write one line per red to <FLEET>/heartbeat/redfix-<UTC yyyy-mm-ddTHHMM>.md as `ACTION <red>: <exact action for the master>` (e.g. "stop agent <id>, launch fresh pass with brief <path>", "launch fix packet <brief path>"). Generate any needed brief with the repo's dispatch/brief.py, never by hand, and add its row with `vc add-row`.
+Never loosen a threshold, never edit health.py, owners.toml, templates or other protected files, never run cargo or the full gate.
+Write every red and what you did to the redfix file. Hand back at most 3 lines: reds fixed, reds handed to the master (each an ACTION line), the one that most hurts the cycle. Call cap 60.

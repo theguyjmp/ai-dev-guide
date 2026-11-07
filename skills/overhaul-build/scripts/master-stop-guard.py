@@ -1,7 +1,7 @@
 """Stop hook for the overhaul-build master chat (installed as FLEET/bin/master-stop-guard.py by permissions.py
 --stop-guard). Before the master ends a turn it runs the master-status checks and blocks the stop, once, with the
 to-do lines when the fleet is under 3/4 of FLEET-TARGET with launchable work, wait.sh is unarmed, or the dashboard
-upload or the health check is over 35 min old. Silent for subagents (transcript path contains "subagents"), for chats
+upload, the health check, the heartbeat or the management review is over 25 min old. Silent for subagents (transcript path contains "subagents"), for chats
 that never loaded overhaul-build, when stop_hook_active is set (never blocks twice in a row), and when FLEET/PAUSE.md
 or FLEET/FINISHED.md exists. Any error is silent: a hook must never wedge the chat.
   py -3 master-stop-guard.py [--fleet <FLEET>]   (reads the Stop hook JSON on stdin)
@@ -47,7 +47,7 @@ def decide(hook, fleet):
     s = ms.status(fleet)
     if s["paused"] or s["finished"]:
         return None
-    if (s["under"] and s["launchable"]) or not s["wait_armed"] or s["dash_stale"] or s["health_stale"]:
+    if (s["under"] and s["launchable"]) or not s["wait_armed"] or s["dash_stale"] or s["health_stale"] or s.get("beat_stale"):
         todo = ms.lines(s, fleet, mark=False)
         return {"decision": "block",
                 "reason": "overhaul-build loop not done. Act on every line, then end the turn:\n" + "\n".join(todo)}
