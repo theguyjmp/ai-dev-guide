@@ -10,6 +10,8 @@ REPO = r"Z:\Documents\AppDevelopment\VOIDCAD"
 LOG = r"C:\vc\gatebot.log"
 JOBS = r"Z:\vc-local\jobs"
 QUIET = 120
+DEPLOY_LOCK = r"Z:c-deploy\deploy.lock"
+DEPLOYED = r"Z:\Documents\AppDevelopment\VOIDCAD-fleet\gate-deployed.txt"
 
 
 def bot():
@@ -29,6 +31,15 @@ def code_time():
 
 
 def quiet(now):
+    # A deploy writes neither gatebot.log nor a job dir: the 06:27 restart on 2026-11-07 killed one mid-run and left
+    # a stale Z:/vc-deploy/deploy.lock that failed the next deploy. Busy while the lock exists or the record says deploying.
+    if os.path.exists(DEPLOY_LOCK):
+        return False
+    try:
+        if "deploying" in open(DEPLOYED, encoding="utf-8").read():
+            return False
+    except OSError:
+        pass
     if now - os.path.getmtime(LOG) < QUIET:
         return False
     for d in os.listdir(JOBS):
