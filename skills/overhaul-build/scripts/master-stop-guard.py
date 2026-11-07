@@ -47,7 +47,7 @@ def decide(hook, fleet):
     s = ms.status(fleet)
     if s["paused"] or s["finished"]:
         return None
-    if (s["under"] and s["launchable"]) or not s["wait_armed"] or s["dash_stale"] or s["health_stale"] or s.get("beat_stale"):
+    if (s["under"] and s["launchable"]) or not s["wait_armed"] or s["dash_stale"] or s["health_stale"] or s.get("beat_stale") or s.get("stall"):
         todo = ms.lines(s, fleet, mark=False)
         return {"decision": "block",
                 "reason": "overhaul-build loop not done. Act on every line, then end the turn:\n" + "\n".join(todo)}
