@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Overhaul v2 harness: build, review and land every function in spec/FUNCTIONS.md.
 
-A READY function (planned, deps proven, retries left, no function of its module in flight) gets a
+A READY function (planned, deps proven, retries left, no in-flight function whose files overlap its own) gets a
 worktree at .overhaul/wt/<id> on fn/<id> from main, a brief from templates/, and a `claude -p`
 builder. A finished build gets a blind reviewer; a PASS goes to land.py. A failure retries from main
 with its reason in the brief, then parks the function as needs-plan for the manager. A land.py
@@ -36,7 +36,7 @@ import time
 import tomllib
 import traceback
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -49,6 +49,8 @@ TEMPLATES = HERE / "templates"
 COLUMNS = ("id", "phase", "module", "deps", "entry", "acceptance", "status")
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 PATHS_LINE = re.compile(r"\W*(?:paths?|files)\W*?[:=]\s*(.+)", re.I)
+SHARED_LINE = re.compile(r"\W*shared\W*?[:=]\s*(.+)", re.I)  # files every function may touch; never a lock
+FILES_COLUMN = "files"  # optional FUNCTIONS.md column: the function's own files, the unit of the build lock
 IN_FLIGHT = ("building", "review", "landing")
 POLISH_KINDS = ("polish_audit", "polish_fix", "polish_review", "polish_land")
 GREEN_BEFORE = "acceptance already green before change"
@@ -64,7 +66,7 @@ POLL_S = 0.25
 DASH_EVERY_S = 15
 LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py's lock
 DEFAULTS = {
-    "limits": {"max_parallel": 4, "builder_max_calls": 60, "brief_max_tokens": 40000,
+    "limits": {"builder_max_calls": 60, "brief_max_tokens": 40000,
                "retries_per_function": 1, "conflict_retries": 2, "builder_timeout_min": 30,
                "polish_rounds": 2},
     "paths": {"functions": "spec/FUNCTIONS.md", "architecture": "spec/ARCHITECTURE.md",
@@ -89,6 +91,7 @@ class Fn:
     header: str
     row: str
     order: int
+    files: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -216,6 +219,7 @@ def parse_functions(text: str) -> list[Fn]:
     """Rows of every markdown table whose header has the FUNCTIONS.md columns."""
     fns: list[Fn] = []
     idx: dict[str, int] | None = None
+    names_files: int | None = None
     header = ""
     for line in text.splitlines():
         if not line.lstrip().startswith("|"):
@@ -225,15 +229,18 @@ def parse_functions(text: str) -> list[Fn]:
         names = [c.lower() for c in row]
         if all(c in names for c in COLUMNS):
             idx, header = {c: names.index(c) for c in COLUMNS}, line.strip()
+            names_files = names.index(FILES_COLUMN) if FILES_COLUMN in names else None
             continue
         if idx is None or all(set(c) <= set(":- ") for c in row):
             continue
         get = {c: (row[i] if i < len(row) else "") for c, i in idx.items()}
+        files = row[names_files] if names_files is not None and names_files < len(row) else ""
         fns.append(Fn(
             id=bare(get["id"]), phase=bare(get["phase"]), module=bare(get["module"]),
             deps=[bare(d) for d in get["deps"].split(",") if bare(d) not in ("", "-")],
             entry=get["entry"], acceptance=[bare(a) for a in get["acceptance"].split(";") if bare(a)],
-            status=bare(get["status"]).lower(), header=header, row=line.strip(), order=len(fns)))
+            status=bare(get["status"]).lower(), header=header, row=line.strip(), order=len(fns),
+            files=[bare(x) for x in re.split(r"[,;]", files) if bare(x) not in ("", "-")]))
     return fns
 
 
@@ -267,6 +274,38 @@ def module_paths(section: str, module: str) -> list[str]:
             if any(items):
                 return [p for p in items if p]
     return [module] if "/" in module else [f"src/{module.replace('.', '/')}/"]
+
+
+def section_items(section: str, pattern: re.Pattern) -> list[str]:
+    for line in section.splitlines():
+        m = pattern.match(line)
+        if m:
+            items = re.findall(r"`([^`]+)`", m.group(1)) or [p.strip() for p in m.group(1).split(",")]
+            return [p for p in items if p]
+    return []
+
+
+def module_shared(section: str) -> list[str]:
+    """Files from a `shared:` line in the module's section: an export list or registry every function touches."""
+    return section_items(section, SHARED_LINE)
+
+
+def _stem(p: str) -> str:
+    """The literal part of a path pattern before its first glob character."""
+    return re.split(r"[*?\[]", p, maxsplit=1)[0]
+
+
+def paths_overlap(a: list[str], b: list[str]) -> bool:
+    """Whether two path sets (files, dirs ending in /, globs) can name one file. A glob is compared by its literal
+    stem, so the answer errs towards overlap."""
+    def one(p: str, q: str) -> bool:
+        if p == q:
+            return True
+        if any(c in p + q for c in "*?["):
+            sp, sq = _stem(p), _stem(q)
+            return sp.startswith(sq) or sq.startswith(sp) or fnmatch.fnmatchcase(q, p) or fnmatch.fnmatchcase(p, q)
+        return (p.endswith("/") and q.startswith(p)) or (q.endswith("/") and p.startswith(q))
+    return any(one(p, q) for p in a for q in b)
 
 
 def in_paths(path: str, allowed: list[str]) -> bool:
@@ -320,7 +359,8 @@ class Driver:
     def __init__(self, repo: Path, cfg: dict):
         lim, har = cfg["limits"], cfg["harness"]
         self.repo, self.cfg = repo, cfg
-        self.max_parallel = max(1, int(lim["max_parallel"]))
+        # [harness] max_parallel, else the older [limits] key, else 6
+        self.max_parallel = max(1, int(har.get("max_parallel") or lim.get("max_parallel") or 6))
         self.max_calls = int(lim["builder_max_calls"])
         self.max_tokens = int(lim["brief_max_tokens"])
         self.retries = int(lim["retries_per_function"])
@@ -352,6 +392,7 @@ class Driver:
         self.dash_due = False
         self.warned: set[str] = set()
         self.dirty = False  # state.json is behind self.st (land.py held the lock)
+        self.cycle_due = ""  # a heartbeat a land asked for, run once the loop has launched what it unblocked
 
     # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
@@ -488,6 +529,9 @@ class Driver:
                 changed = self.pump_land() or changed
                 changed = self.launch() or changed
                 changed = self.polish_step() or changed
+                if self.cycle_due:
+                    why, self.cycle_due = self.cycle_due, ""
+                    self.cycle(why)
                 if self.dirty:
                     self.save()  # a write that had to wait for land.py's lock
                 if not self.busy():
@@ -505,25 +549,33 @@ class Driver:
     def busy(self) -> set[str]:
         return set(self.jobs) | set(self.land_queue) | ({self.land_job.fn} if self.land_job else set())
 
-    @staticmethod
-    def module_key(f: Fn) -> str:
-        return f.module.strip().lower()
+    def claims(self, f: Fn) -> list[str]:
+        """The files a function's build locks: its FUNCTIONS.md `files` cell, else its whole module's paths.
+        The module's `shared:` files are left out: a clash there goes to the conflict-fix pass."""
+        section = module_section(self.arch, f.module)
+        shared = set(module_shared(section))
+        return [p for p in (f.files or module_paths(section, f.module)) if p not in shared]
 
     def ready(self) -> list[Fn]:
-        """Functions to launch now: planned, deps proven, retries left, and at most one per module.
+        """Functions to launch now: planned, deps proven, retries left, and no file overlap with a function in
+        flight (building, in review or landing) or with one launched before it in this pass.
 
-        Builders in one module edit the same files and fail to land with a merge conflict, so a function
-        whose module has a function in flight (building, in review or landing) waits for it."""
+        Two builders that edit one file fail to land with a merge conflict, so a function waits while an in-flight
+        function's claimed files overlap its own. A plan with a `files` column runs one module's functions at once;
+        without it a function claims its module's paths, one function per module at a time."""
         recs = self.st["functions"]
         proven = {fid for fid, r in recs.items() if r["status"] == "proven"}
         busy = self.busy()
-        taken = {self.module_key(self.fns[fid]) for fid in busy if fid in self.fns}
+        taken = [self.claims(self.fns[fid]) for fid in busy if fid in self.fns]
         ready: list[Fn] = []
         for f in self.order:
             if (recs[f.id]["status"] != "planned" or f.id in busy or recs[f.id]["attempts"] > self.retries
-                    or not all(d in proven for d in f.deps) or self.module_key(f) in taken):
+                    or not all(d in proven for d in f.deps)):
                 continue
-            taken.add(self.module_key(f))
+            mine = self.claims(f)
+            if any(paths_overlap(mine, other) for other in taken):
+                continue
+            taken.append(mine)
             ready.append(f)
         return ready
 
@@ -609,8 +661,9 @@ class Driver:
         return wt
 
     def allowed_lists(self, f: Fn) -> tuple[list[str], list[str]]:
-        paths = module_paths(module_section(self.arch, f.module), f.module)
-        return paths, unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
+        section = module_section(self.arch, f.module)
+        paths = f.files + module_shared(section) if f.files else module_paths(section, f.module)
+        return list(dict.fromkeys(paths)), unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
 
     def allowed(self, f: Fn) -> str:
         paths, tests = self.allowed_lists(f)
@@ -864,7 +917,7 @@ class Driver:
             self.set(fid, status="proven", last_reason="")
             self.say(f"landed {fid}")
             self.record_proven()
-            self.cycle(f"landed {fid}")
+            self.cycle_due = f"landed {fid}"  # run after launch(): dependents start before verdict and dash
             return
         reason = "land.py timed out" if job.timed_out else (
             last_line(out) or last_line(err) or f"land.py exit {job.proc.returncode}")
@@ -913,14 +966,35 @@ class Driver:
             return False
         started = self.pump_polish_land()
         if pol["status"] == "fix":
-            while self.polish_queue and len(self.jobs) < self.max_parallel:
-                self.start_polish_fix(*self.polish_queue.pop(0))
+            for item in self.polish_ready():
+                self.polish_queue.remove(item)
+                self.start_polish_fix(*item)
                 started = True
             if not self.polish_pending():
                 return self.start_polish_audit(pol["round"] + 1)
         elif not self.busy():  # idle, or an audit a previous drive left unfinished
             return self.start_polish_audit(max(1, pol["round"]))
         return started
+
+    def polish_claims(self, module: str) -> list[str]:
+        section = module_section(self.arch, module)
+        return module_paths(section, module) + module_shared(section)
+
+    def polish_ready(self) -> list[tuple[str, list[dict]]]:
+        """Queued fix passes that may start now: a free slot each and no path overlap with a fix in flight."""
+        held = [fid for fid, j in self.jobs.items() if j.kind in ("polish_fix", "polish_review")] + self.polish_lands
+        if self.land_job and self.land_job.kind == "polish_land":
+            held.append(self.land_job.fn)
+        taken = [self.polish_claims(self.polish_meta[fid][0]) for fid in held if fid in self.polish_meta]
+        out, free = [], self.max_parallel - len(self.jobs)
+        for item in self.polish_queue:
+            if len(out) >= free:
+                break
+            mine = self.polish_claims(item[0])
+            if not any(paths_overlap(mine, other) for other in taken):
+                taken.append(mine)
+                out.append(item)
+        return out
 
     def polish_cmd(self, kind: str) -> tuple[list[str], str]:
         """The worker command for a polish kind, and its model label."""

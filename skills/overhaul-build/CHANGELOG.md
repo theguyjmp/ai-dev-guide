@@ -2,6 +2,19 @@
 
 Why each rule exists, newest first. Full v1 history: `git log -- skills/overhaul-build` (71 commits, 2026-11-05 to 2026-11-07).
 
+## v2 speed: a file lock instead of a module lock, 2026-11-07
+Trial 4 built 21 functions in 41.7 min wall for 51.9 builder-minutes, 1.24 builders at once (runs/speed-fix-4.md).
+The critical path of dependencies (build + review + land per function) was 29.8 min; the module lock added about 12:
+functions spent 30.2 function-minutes ready but waiting on a busy module, against 251.5 waiting on dependencies.
+- drive.py locks a function's files, not its module: two functions build at once unless their file sets overlap.
+  The files come from an optional FUNCTIONS.md `files` column (plan_validate.py accepts it and checks each file is
+  inside the module's Paths); without it a function claims its module's Paths, as before. A module's `Shared:` line
+  (an `__init__.py` export list, a registry) never locks; a clash there goes to the existing conflict-fix pass.
+- Polish fix passes start in parallel under the same rule (module Paths plus Shared must not overlap).
+- A land's heartbeat (verdict.py, dash.py) runs after the loop launches the functions the land unblocked, not before:
+  3 to 7 s per land on the critical path in trial 4.
+- `[harness] max_parallel` defaults to 6 (`[limits] max_parallel` is still read when `[harness]` has none).
+
 ## v2 polish phase, 2026-11-07
 Every gate passed in trial 3 and its blind audit still found 14 issues: the gates check what a rule names, and an auditor finds what no rule named. drive.py now ends with the same blind audit inside the harness (findings as JSON, file:line, module, rule and evidence), one fix builder per module, each reviewed and landed by `land.py --polish` (whole-tree gates, every proven row green, no FUNCTIONS row), then a re-audit, for `[limits] polish_rounds` rounds (default 2). verdict.py prints the final issue count and VERDICT GOOD requires 0.
 ## v2 waste fixes from trial 3's pass count, 2026-11-07

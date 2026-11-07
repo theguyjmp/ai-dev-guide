@@ -38,7 +38,12 @@ plan_validate.py checks the table in exactly this form:
 FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status |`
   phase = integer from 1; deps = comma-separated ids or `-`; entry = the public CLI command, route or UI action;
   acceptance = `tests/acceptance/<f>.py::<test>`, `;`-separated; status = planned|building|review|landing|proven|needs-plan.
+  Optional `files` column before status: the function's own files, comma-separated, inside its module's Paths.
 ```
+- files: give each function its own file(s) (`src/shop/cart/add.py`) so drive.py builds one module's functions at
+  once; two functions build together only when their files do not overlap. A file every function edits (an
+  `__init__.py` export list, a registry) goes on the module's `Shared:` line, never in a files cell. Without the column
+  a function locks its whole module and one module builds one function at a time.
 - id: `F01`, `F02`, ... unique, never reused. Phase 1 is the smallest set that makes the product usable end to end
   (under 3k lines, use 1 or 2 phases).
 - module: one from ARCHITECTURE. deps: each in the same or an earlier phase, including every function that builds an
@@ -69,6 +74,8 @@ Public (optional, Python): the dotted modules and names other modules may import
 name in it. Without it, a module's public face is the __init__.py of each Paths directory and each Paths file, and an
 __init__.py with a literal __all__ exports only those names.
 ```
+A section may add `Shared: src/shop/core/__init__.py`: files any function of the module may edit that never lock a
+build (drive.py); a clash there goes to the conflict-fix pass.
 For example (`Public:` is checked: other modules import only these names; Owns and the API bullets are free text):
 ```
 ## Module cart
@@ -120,8 +127,9 @@ literals   = "py -3 <overhaul-build>/scripts/dup_literals.py src"
 shape      = "py -3 <overhaul-build>/scripts/shape_check.py src tests"
 cycles     = "py -3 <overhaul-build>/scripts/check_cycles.py src"
 entry_lint = "py -3 <overhaul-build>/scripts/entry_lint.py tests/acceptance"
+[harness]
+max_parallel = 6
 [limits]
-max_parallel = 4
 builder_max_calls = 60
 brief_max_tokens = 40000
 retries_per_function = 1

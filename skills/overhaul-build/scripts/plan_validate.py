@@ -126,10 +126,11 @@ def bare(cell):
 
 def parse_functions(text, problems, label):
     """Rows of the FUNCTIONS.md table as dicts (with `line`); malformed cell counts are reported and dropped."""
-    rows, header_at, lines = [], None, text.splitlines()
+    rows, header_at, lines, names = [], None, text.splitlines(), COLUMNS
     for i, line in enumerate(lines):
-        if line.lstrip().startswith("|") and [bare(c).lower().strip("*") for c in cells(line)] == COLUMNS:
-            header_at = i
+        head = [bare(c).lower().strip("*") for c in cells(line)] if line.lstrip().startswith("|") else []
+        if head and [c for c in head if c != "files"] == COLUMNS and head.count("files") <= 1:
+            header_at, names = i, head  # an optional `files` column: the function's own files (drive.py's lock)
             break
     if header_at is None:
         problems.append(f"{label}: no table with the header | {' | '.join(COLUMNS)} |")
@@ -143,10 +144,10 @@ def parse_functions(text, problems, label):
         if not lines[n].lstrip().startswith("|"):
             break
         c = cells(lines[n])
-        if len(c) != len(COLUMNS):
-            problems.append(f"{label}:{n + 1}: row has {len(c)} cells, want {len(COLUMNS)}")
+        if len(c) != len(names):
+            problems.append(f"{label}:{n + 1}: row has {len(c)} cells, want {len(names)}")
             continue
-        row = dict(zip(COLUMNS, c))
+        row = dict(zip(names, c))
         row["line"] = n + 1
         rows.append(row)
     return rows
@@ -237,6 +238,11 @@ def check_rows(rows, mods, repo, problems, flabel):
             problems.append(f"{where}: malformed module (empty)")
         elif mods is not None and module not in mods:
             problems.append(f"{where}: module {module!r} is not in ARCHITECTURE (has: {', '.join(sorted(mods)) or 'none'})")
+        elif mods is not None and mods[module]["paths"] and "files" in r:
+            for f in (bare(x) for x in re.split(r"[,;]", r["files"])):
+                if f not in ("", "-") and not any(f == p or (p.endswith("/") and f.startswith(p))
+                                                  for p in mods[module]["paths"]):
+                    problems.append(f"{where}: file {f!r} is outside module {module!r} Paths")
         if r["entry"].strip().strip("`").strip().lower() in NO_ENTRY:
             problems.append(f"{where}: no entry (the public CLI command, HTTP route or UI action)")
         deps_cell = bare(r["deps"])

@@ -1,5 +1,10 @@
 # overhaul-plan changelog
 
+## v2 speed, 2026-11-07
+FUNCTIONS.md may carry a `files` column (each function's own files) and a module a `Shared:` line, so drive.py builds
+one module's functions at once; in trial 4 the one-function-per-module lock cost about 12 of 42 minutes. overhaul.toml
+sets `[harness] max_parallel = 6`.
+
 ## v2 waste fixes from trial 3's pass count, 2026-11-07
 A module with a `Public:` line lists on it every helper other modules are told to reuse (each domain rule home and each
 API bullet naming a dependent module); plan_validate fails it otherwise. In trial 3 the missing `inventory.whole` and

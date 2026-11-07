@@ -40,10 +40,32 @@ THREE = """# Functions
 | F3 | 1 | alpha | - | `toy triple 4` | tests/acceptance/test_f3.py::test_triple | planned |
 """
 
+# One module, four functions with a `files` column: F1-F3 own disjoint files, F4 overlaps F1 (the whole module dir).
+FILES4 = """# Functions
+
+| id | phase | module | deps | entry | acceptance | files | status |
+|----|-------|--------|------|-------|------------|-------|--------|
+| F1 | 1 | alpha | - | `toy add 1 2` | tests/acceptance/test_f1.py::test_add | src/alpha/f1.py | planned |
+| F2 | 1 | alpha | - | `toy double 4` | tests/acceptance/test_f2.py::test_double | src/alpha/f2.py, src/alpha/__init__.py | planned |
+| F3 | 1 | alpha | - | `toy triple 4` | tests/acceptance/test_f3.py::test_triple | src/alpha/f3.py | planned |
+| F4 | 1 | alpha | - | `toy quad 4` | tests/acceptance/test_f4.py::test_quad | {f4} | planned |
+"""
+
+CHAIN = """# Functions
+
+| id | phase | module | deps | entry | acceptance | files | status |
+|----|-------|--------|------|-------|------------|-------|--------|
+| F1 | 1 | alpha | - | `toy add 1 2` | tests/acceptance/test_f1.py::test_add | src/alpha/f1.py | planned |
+| F2 | 1 | alpha | F1 | `toy double 4` | tests/acceptance/test_f2.py::test_double | src/alpha/f2.py | planned |
+| F3 | 1 | alpha | F2 | `toy triple 4` | tests/acceptance/test_f3.py::test_triple | src/alpha/f3.py | planned |
+| F4 | 1 | alpha | F1 | `toy quad 4` | tests/acceptance/test_f4.py::test_quad | src/alpha/f4.py | planned |
+"""
+
 ARCH = """# Architecture
 
 ## alpha
 paths: `src/alpha/`
+shared: `src/alpha/__init__.py`
 Adds numbers.
 
 ## beta
@@ -143,6 +165,9 @@ if mode == "hang":
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
     (ROOT / "pids" / (fid + ".child")).write_text(str(child.pid))
     time.sleep(300)
+if mode == "slow":  # a build that takes long enough for parallel builds to overlap in time
+    time.sleep(2.5)
+    mode = "ok"
 if mode == "outside":  # edits a protected file and leaves it uncommitted
     p = Path("spec/FUNCTIONS.md")
     p.write_text(p.read_text(encoding="utf-8") + "\\n<!-- edited by the builder -->\\n", encoding="utf-8")
@@ -219,6 +244,7 @@ class Toy(unittest.TestCase):
         put(repo / "tests" / "acceptance" / "test_f1.py", ACCEPT.format(name="add"))
         put(repo / "tests" / "acceptance" / "test_f2.py", ACCEPT.format(name="double"))
         put(repo / "tests" / "acceptance" / "test_f3.py", ACCEPT.format(name="triple"))
+        put(repo / "tests" / "acceptance" / "test_f4.py", ACCEPT.format(name="quad"))
         py, worker = Path(sys.executable).as_posix(), (self.root / "fake_worker.py").as_posix()
         limits_extra = "" if conflict_retries is None else f"conflict_retries = {conflict_retries}"
         put(repo / "overhaul.toml", f"""[commands]
@@ -466,6 +492,63 @@ class TestModules(Toy):
         events = [(e["fn"], e["event"]) for e in self.events(repo)]
         self.assertLess(events.index(("F1", "land_ok")), events.index(("F3", "build_start")))  # F3 waited
         self.assertLess(events.index(("F2", "build_start")), events.index(("F1", "land_ok")))  # F2 did not
+
+
+class TestFileLock(Toy):
+    """The build lock is the function's files (FUNCTIONS.md `files`), not its module."""
+
+    SLOW = {f"F{i}": {"build": ["slow"]} for i in range(1, 5)}
+
+    def order(self, repo: Path) -> list[tuple[str, str]]:
+        return [(e["fn"], e["event"]) for e in self.events(repo)]
+
+    def test_four_functions_of_one_module_with_disjoint_files_build_at_once(self):
+        repo = self.make_repo(self.SLOW, functions=FILES4.format(f4="src/alpha/f4.py"), max_parallel=6)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.order(repo)
+        first_end = min(ev.index((f"F{i}", "build_end")) for i in range(1, 5))
+        for i in range(1, 5):
+            self.assertLess(ev.index((f"F{i}", "build_start")), first_end, f"F{i} waited for another build")
+        rec = self.state(repo)["functions"]
+        self.assertEqual({k: (v["status"], v["attempts"]) for k, v in rec.items()},
+                         {f"F{i}": ("proven", 0) for i in range(1, 5)})  # no failed attempt: no rework
+        self.assertIn("`src/alpha/f2.py`", self.seen("F2-build-1.md"))
+        self.assertIn("`src/alpha/__init__.py`", self.seen("F1-build-1.md"))  # the shared file is allowed to all
+
+    def test_overlapping_files_serialise(self):
+        repo = self.make_repo(self.SLOW, functions=FILES4.format(f4="src/alpha/"), max_parallel=6)
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        self.assertEqual([f.id for f in drv.ready()], ["F1", "F2", "F3"])  # F4 claims the whole module dir
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.order(repo)
+        last_land = max(ev.index((f"F{i}", "land_ok")) for i in range(1, 4))
+        self.assertLess(last_land, ev.index(("F4", "build_start")))
+
+    def test_shared_file_is_no_lock_and_globs_overlap(self):
+        self.assertFalse(drive.paths_overlap(["src/a/f1.py"], ["src/a/f2.py"]))
+        self.assertTrue(drive.paths_overlap(["src/a/"], ["src/a/f2.py"]))
+        self.assertTrue(drive.paths_overlap(["src/a/*.py"], ["src/a/f2.py"]))
+        self.assertTrue(drive.paths_overlap(["src/a/f*"], ["src/a/**"]))
+        self.assertFalse(drive.paths_overlap(["src/a/*.py"], ["src/b/x.py"]))
+
+    def test_a_dependency_chain_is_respected(self):
+        repo = self.make_repo(functions=CHAIN, max_parallel=6)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.order(repo)
+        for fn, dep in (("F2", "F1"), ("F3", "F2"), ("F4", "F1")):
+            self.assertLess(ev.index((dep, "land_ok")), ev.index((fn, "build_start")), f"{fn} before {dep}")
+
+    def test_max_parallel_defaults_to_6_and_harness_wins(self):
+        repo = self.make_repo(functions=CHAIN)
+        cfg = drive.load_config(repo)
+        cfg["limits"].pop("max_parallel", None)
+        self.assertEqual(drive.Driver(repo, cfg).max_parallel, 6)
+        cfg["limits"]["max_parallel"], cfg["harness"]["max_parallel"] = 2, 5
+        self.assertEqual(drive.Driver(repo, cfg).max_parallel, 5)
 
 
 class TestConflicts(Toy):
