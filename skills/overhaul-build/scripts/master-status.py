@@ -247,6 +247,33 @@ def status(fleet, check_scheduler=True):
         target = min(target, max(4, -(-s["landed_3h"] * 2 // 3)))  # per hour x ~2 h pass-to-land cycle
         s["target"] = target
     s["under"] = target > 0 and running * 4 < target * 3
+    # Outcome stall alarm (owner 2026-11-06 "get your managing GOOD"): proven on deployed main and gate merges are the
+    # only progress. No new proven function AND no gate merge for 60 min while not paused = STALL: the master launches a
+    # root-cause agent on the phase gate's critical path that same wake, never more builders.
+    s["stall"] = None
+    try:
+        st = json.load(open(os.path.join(fleet, "dash", "status.json"), encoding="utf-8"))
+        st = st[0] if isinstance(st, list) else st
+        hist = os.path.join(fleet, ".proven-history")
+        now = time.time()
+        rows = [l.split() for l in open(hist, encoding="utf-8")] if os.path.exists(hist) else []
+        if not rows or rows[-1][1] != str(st.get("proven")):
+            with open(hist, "a", encoding="utf-8") as f:
+                f.write(f"{int(now)} {st.get('proven')}" + "\n")
+            rows.append([str(int(now)), str(st.get("proven"))])
+        since_proven = (now - int(rows[-1][0])) / 60
+        merged_1h = None
+        repo = b.get("repo", "")
+        if repo:
+            r = subprocess.run(["git", "-C", repo, "log", "--since=1 hour ago", "--oneline", "--grep=gate: merge",
+                                "origin/main"], capture_output=True, text=True, timeout=20,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            merged_1h = len(r.stdout.splitlines()) if r.returncode == 0 else None
+        if since_proven >= 60 and merged_1h == 0:
+            s["stall"] = f"proven {st.get('proven')} unchanged {int(since_proven)} min and 0 gate merges in 1 h"
+        s["proven_now"], s["merged_1h"] = st.get("proven"), merged_1h
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        pass
     s["launchable"] = bool(waiting or ready)
 
     s["wait_age"] = age_min(os.path.join(fleet, ".wait-armed"))
@@ -309,6 +336,9 @@ def lines(s, fleet, mark=True):
         ok.append("wait armed")
     else:
         out.append(f"WAIT unarmed (.wait-armed {fmt(s['wait_age'])}): arm FLEET/bin/wait.sh in the background before ending this turn")
+    if s.get("stall"):
+        out.append(f"STALL {s['stall']}: launch a root-cause agent on the phase gate's critical path now (FLEET/briefs/red-fix.md "
+                   f"with 'critical path only'); launch no builders until a merge or a proven function moves")
     if s["beat_stale"]:
         out.append(f"BEAT heartbeat {fmt(s['beat_age'])}, management {fmt(s['mgmt_age'])} (red over {BEAT_MAX} min): "
                    f"launch the heartbeat (FLEET/briefs/heartbeat.md) now, then dash-refresh and red-fix (FLEET/briefs/red-fix.md) on its hand-back")
