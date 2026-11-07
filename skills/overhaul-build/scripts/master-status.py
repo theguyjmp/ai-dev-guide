@@ -207,6 +207,19 @@ def fmt(m):
     return "missing" if m is None else f"{m:.0f} min"
 
 
+def landed_3h(repo):
+    """Gate merge commits on origin/main in the last 3 hours, or None when it cannot be measured."""
+    if not repo:
+        return None
+    try:
+        r = subprocess.run(["git", "-C", repo, "log", "--since=3 hours ago", "--oneline", "--grep=gate: merge",
+                            "origin/main"], capture_output=True, text=True, timeout=20,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return len(r.stdout.splitlines()) if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def status(fleet, check_scheduler=True):
     b = budget(fleet)
     tr = b.get("transcripts", "")
@@ -225,6 +238,14 @@ def status(fleet, check_scheduler=True):
     ready = [n for n in dispatch_ready(fleet, rows, phase0_proven) if n not in launched]
     s.update(target=target, running=running, waiting=waiting, ready=ready, launch_file=lfile, held=held,
              phase=phase, phase0_proven=phase0_proven)
+    # Landing brake (owner 2026-11-06, "is it just spinning wheels?"): FLEET-TARGET = landing rate x pass length,
+    # capped at the owner's number. Never fill to the owner's number while nothing lands: agents only queue on the
+    # check slot and the merge queue. Landings = gate merge commits on origin/main in the last 3 h.
+    s["owner_target"] = target
+    s["landed_3h"] = landed_3h(b.get("repo", ""))
+    if s["landed_3h"] is not None:
+        target = min(target, max(4, -(-s["landed_3h"] * 2 // 3)))  # per hour x ~2 h pass-to-land cycle
+        s["target"] = target
     s["under"] = target > 0 and running * 4 < target * 3
     s["launchable"] = bool(waiting or ready)
 
