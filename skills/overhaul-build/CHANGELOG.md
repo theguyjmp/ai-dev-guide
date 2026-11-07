@@ -2,6 +2,12 @@
 
 Why each rule exists, newest first. Full v1 history: `git log -- skills/overhaul-build` (71 commits, 2026-11-05 to 2026-11-07).
 
+## v2 trial 1 fixes, 2026-11-07
+Trial 1 took 26 builds for 20 functions. 5 landings failed with "merge conflict merging main into fn/<id>" between parallel builders in one module, and F05 and F08 spent 3 passes each on it, because every conflict cost a whole attempt (a rebuild from main). Now:
+- A function never launches while another function of its module (the FUNCTIONS `module` column) is in flight, so parallelism comes from different modules.
+- A merge conflict at landing is not an attempt: a conflict-fix builder pass (`templates/conflict-brief.md`) merges main into the same worktree and branch, then the function is reviewed and landed again. `[limits] conflict_retries` (default 2, per attempt) bounds it; after that the failure counts as an attempt, and so does a conflict pass that itself fails.
+- `[harness] builder_model` (default opus) and `review_model` (default sonnet) become `claude -p --model`; build, conflict and review events in `.overhaul/log.jsonl` name the model.
+
 ## v2, 2026-11-07: the harness
 Rewritten around a deterministic harness: drive.py builds, blind-reviews and lands one function at a time, land.py alone changes main, and the manager only starts it, fixes needs-plan functions through plan_validate, runs a blind proof-check and reports. Design and contracts: `skills/OVERHAUL-V2-DESIGN.md`. Evidence: harness `notes/failure-analysis-2026-11-07.md` (F1-F10, R1-R12 and its Confidence section), `proof-check-2026-11-07.md`, `code-quality-2026-11-07.md`, `build-vs-buy-2026-11-07.md`.
 

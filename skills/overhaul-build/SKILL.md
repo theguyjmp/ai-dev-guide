@@ -66,6 +66,8 @@ Read every time from the clock (`date`) just before writing it, in the owner's l
 - Module dependencies have no cycles [by check_cycles, in plan_validate.py and in every landing].
 - A brief stays under brief_max_tokens; one over it is a plan problem, never trimmed by hand [by drive.py (refuses it; the function goes needs-plan)].
 - Retries are limited to retries_per_function; then the function is needs-plan, and a cycle with nothing to do exits instead of spinning [by drive.py (attempts in state.json; exit 3)].
+- Functions of one module never build at once, and a landing that fails with a merge conflict gets a conflict-fix pass on the same worktree and branch instead of an attempt, up to conflict_retries per attempt [by drive.py (the FUNCTIONS module column; templates/conflict-brief.md)].
+- Builders and conflict passes run on [harness] builder_model (default opus), reviewers on review_model (default sonnet), and every build, conflict and review event in .overhaul/log.jsonl names its model [by drive.py (claude --model)].
 - Builders stay in their allowed paths and never edit tests/acceptance, stand in for real behaviour or special-case a test [by drive.py (allowed paths in each brief); the blind review (line 1 PASS or FAIL)].
 - A function counts only when land.py proved it on main and the proof-check finds it REAL [by land.py; the proof-check].
 - The dashboard is dash.py's output, never hand-made or edited; publish `dash/index.html` as an Artifact only if the Artifact tool exists (same file, same URL, at each drive.py exit), else give its path [by dash.py, run by drive.py every cycle].

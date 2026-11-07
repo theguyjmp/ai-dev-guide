@@ -14,6 +14,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPTS))
@@ -27,6 +29,15 @@ FUNCTIONS = """# Functions
 |----|-------|--------|------|-------|------------|--------|
 | F1 | 1 | alpha | - | `toy add 1 2` | tests/acceptance/test_f1.py::test_add | planned |
 | F2 | 2 | beta | F1 | `toy double 4` | tests/acceptance/test_f2.py::test_double | planned |
+"""
+
+THREE = """# Functions
+
+| id | phase | module | deps | entry | acceptance | status |
+|----|-------|--------|------|-------|------------|--------|
+| F1 | 1 | alpha | - | `toy add 1 2` | tests/acceptance/test_f1.py::test_add | planned |
+| F2 | 1 | beta | - | `toy double 4` | tests/acceptance/test_f2.py::test_double | planned |
+| F3 | 1 | alpha | - | `toy triple 4` | tests/acceptance/test_f3.py::test_triple | planned |
 """
 
 ARCH = """# Architecture
@@ -59,7 +70,8 @@ ROOT = Path(__file__).resolve().parent
 brief = Path(sys.argv[-1].split("Read and do ", 1)[1]).read_text(encoding="utf-8")
 first = brief.splitlines()[0]
 review = first.startswith("# Blind review of ")
-fid = first.split()[-1] if review else first.split()[2]
+conflict = first.startswith("# Resolve conflict ")
+fid = first.split()[-1] if review else first.split()[3 if conflict else 2]
 scenario = json.loads((ROOT / "scenario.json").read_text(encoding="utf-8")).get(fid, {})
 seen = ROOT / "seen"
 seen.mkdir(exist_ok=True)
@@ -92,6 +104,19 @@ if review:
     finish(verdict)
 
 n = int(first.rstrip(")").split()[-1])
+if conflict:  # a conflict-fix pass: same worktree and branch, merge main, commit a visible fix
+    (seen / f"{fid}-conflict-{n}.md").write_text(brief, encoding="utf-8")
+    head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True)
+    (seen / f"{fid}-conflict-{n}.json").write_text(
+        json.dumps({"cwd": os.getcwd(), "branch": head.stdout.strip()}), encoding="utf-8")
+    if pick("conflict", n) == "crash":
+        finish("boom: conflict", 7)
+    git("merge", "--no-edit", "main")
+    p = Path("src") / field("- Module:") / (fid.lower() + ".py")
+    p.write_text(p.read_text(encoding="utf-8") + f"# conflict fix {n}\\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", f"{fid}: conflict fix {n}")
+    finish("DONE")
 (seen / f"{fid}-build-{n}.md").write_text(brief, encoding="utf-8")
 mode = pick("build", n)
 if mode == "crash":
@@ -150,7 +175,8 @@ class Toy(unittest.TestCase):
     """A fresh toy repo per test: F1 (phase 1) and F2 (phase 2, deps F1)."""
 
     def make_repo(self, scenario: dict | None = None, retries: int = 1, timeout_min: float = 30,
-                  brief_max: int = 40000) -> Path:
+                  brief_max: int = 40000, functions: str = FUNCTIONS, max_parallel: int = 2,
+                  conflict_retries: int | None = None, worker_args: str = "", harness_extra: str = "") -> Path:
         self.root = Path(tempfile.mkdtemp(prefix="drive-test-")).resolve()
         self.addCleanup(self.cleanup_root)
         repo, scripts = self.root / "repo", self.root / "scripts"
@@ -161,25 +187,29 @@ class Toy(unittest.TestCase):
         put(scripts / "verdict.py", "print('VERDICT GOOD fake')\n")
         put(scripts / "dash.py", "pass\n")
         put(repo / ".gitignore", ".overhaul/\n__pycache__/\n")
-        put(repo / "spec" / "FUNCTIONS.md", FUNCTIONS)
+        put(repo / "spec" / "FUNCTIONS.md", functions)
         put(repo / "spec" / "ARCHITECTURE.md", ARCH)
         put(repo / "tests" / "acceptance" / "test_f1.py", ACCEPT.format(name="add"))
         put(repo / "tests" / "acceptance" / "test_f2.py", ACCEPT.format(name="double"))
+        put(repo / "tests" / "acceptance" / "test_f3.py", ACCEPT.format(name="triple"))
         py, worker = Path(sys.executable).as_posix(), (self.root / "fake_worker.py").as_posix()
+        limits_extra = "" if conflict_retries is None else f"conflict_retries = {conflict_retries}"
         put(repo / "overhaul.toml", f"""[commands]
 test = "py -3 -m pytest -q tests/unit"
 acceptance = "py -3 -m pytest -q tests/acceptance -k {{test}}"
 
 [limits]
-max_parallel = 2
+max_parallel = {max_parallel}
 builder_max_calls = 12
 brief_max_tokens = {brief_max}
 retries_per_function = {retries}
 builder_timeout_min = {timeout_min}
+{limits_extra}
 
 [harness]
-worker_cmd = ["{py}", "{worker}"]
+worker_cmd = ["{py}", "{worker}"{worker_args}]
 scripts_dir = "{scripts.as_posix()}"
+{harness_extra}
 """)
         git(repo, "init", "-q", "-b", "main")
         for key, value in (("user.name", "toy"), ("user.email", "toy@example.com"),
@@ -218,7 +248,9 @@ class TestTemplates(unittest.TestCase):
         build = "id attempt worktree branch row entry module module_section allowed_paths " \
                 "acceptance_source commands max_calls previous".split()
         review = "id branch row allowed_paths acceptance_source review_file diffstat diff max_calls".split()
-        for name, keys in (("build-brief.md", build), ("review-brief.md", review)):
+        conflict = "id pass worktree branch main module reason row allowed_paths commands max_calls".split()
+        for name, keys in (("build-brief.md", build), ("review-brief.md", review),
+                           ("conflict-brief.md", conflict)):
             used = set(re.findall(r"\{\{(\w+)\}\}", (drive.TEMPLATES / name).read_text(encoding="utf-8")))
             self.assertEqual(used, set(keys), name)
             self.assertNotIn("{{", drive.render(name, {k: f"<{k}>" for k in keys}))
@@ -321,6 +353,146 @@ class TestBudgets(Toy):
         self.assertTrue(wait_dead(worker), "the timed-out worker is still running")
         self.assertTrue(wait_dead(child), "the worker's child is still running")
         self.assertIsNone(bystander.poll(), "an unrelated process of the same program was killed")
+
+
+class TestModules(Toy):
+    def driver(self, repo: Path) -> drive.Driver:
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        return drv
+
+    def test_ready_offers_one_function_per_module_and_none_of_an_in_flight_module(self):
+        drv = self.driver(self.make_repo(functions=THREE))
+        self.assertEqual([f.id for f in drv.ready()], ["F1", "F2"])  # F3 shares alpha with F1
+        drv.land_queue.append("F1")  # F1 is in flight (queued to land)
+        self.assertEqual([f.id for f in drv.ready()], ["F2"])
+        drv.land_queue.clear()
+        drv.jobs["F2"] = None  # F2 is in flight (building); ready() reads only the ids
+        self.assertEqual([f.id for f in drv.ready()], ["F1"])
+
+    def test_same_module_functions_never_run_in_parallel_other_modules_do(self):
+        repo = self.make_repo(functions=THREE, max_parallel=3)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        events = [(e["fn"], e["event"]) for e in self.events(repo)]
+        self.assertLess(events.index(("F1", "land_ok")), events.index(("F3", "build_start")))  # F3 waited
+        self.assertLess(events.index(("F2", "build_start")), events.index(("F1", "land_ok")))  # F2 did not
+
+
+class TestConflicts(Toy):
+    def of(self, repo: Path, event: str) -> list[dict]:
+        return [e for e in self.events(repo) if e["fn"] == "F1" and e["event"] == event]
+
+    def test_a_merge_conflict_runs_a_conflict_pass_and_is_not_an_attempt(self):
+        repo = self.make_repo({"F1": {"land": ["conflict", "ok"]}}, retries=1)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["attempts"], rec["conflicts"]), ("proven", 0, 1))
+        self.assertEqual((len(self.of(repo, "build_start")), len(self.of(repo, "conflict_start"))), (1, 1))
+        self.assertEqual(len(self.of(repo, "review_pass")), 2)  # reviewed again after the fix, then landed
+        self.assertFalse((self.root / "seen" / "F1-build-2.md").exists())  # never rebuilt
+        brief = self.seen("F1-conflict-1.md")
+        for needle in ("Resolve conflict F1 (pass 1)", "`git merge main`", "merge conflict merging main into fn/F1",
+                       "src/alpha/", "Never edit `tests/acceptance/`"):
+            self.assertIn(needle, brief)
+        self.assertNotIn("{{", brief)
+        where = json.loads(self.seen("F1-conflict-1.json"))
+        self.assertEqual(where["branch"], "fn/F1")
+        same = os.path.normcase(os.path.realpath(where["cwd"]))
+        self.assertEqual(same, os.path.normcase(os.path.realpath(repo / ".overhaul" / "wt" / "F1")))
+        self.assertIn("# conflict fix 1", git(repo, "show", "main:src/alpha/f1.py"))  # the fix reached main
+
+    def test_the_conflict_budget_is_spent_then_the_failure_counts_as_an_attempt(self):
+        repo = self.make_repo({"F1": {"land": ["conflict", "conflict", "conflict", "ok"]}}, retries=1)
+        rc, out = self.drive_cli(repo)  # conflict_retries defaults to 2
+        self.assertEqual(rc, 0, out)
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["attempts"], rec["conflicts"]), ("proven", 1, 0))
+        self.assertEqual((len(self.of(repo, "conflict_start")), len(self.of(repo, "build_start"))), (2, 2))
+        self.assertIn("Attempt 1 failed: land: merge conflict merging main into fn/F1", self.seen("F1-build-2.md"))
+
+    def test_conflict_retries_zero_makes_it_an_ordinary_failed_attempt(self):
+        repo = self.make_repo({"F1": {"land": ["conflict"]}}, retries=0, conflict_retries=0)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 3, out)
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["attempts"]), ("needs-plan", 1))
+        self.assertEqual(self.of(repo, "conflict_start"), [])
+
+    def test_a_failed_conflict_pass_is_an_attempt(self):
+        repo = self.make_repo({"F1": {"land": ["conflict", "ok"], "conflict": ["crash"]}}, retries=1)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["attempts"]), ("proven", 1))
+        self.assertIn("Attempt 1 failed: conflict pass 1: builder exited rc=7: boom: conflict",
+                      self.seen("F1-build-2.md"))
+
+    def test_the_branch_must_contain_main_as_it_was_when_the_pass_began(self):
+        repo = self.make_repo()
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        wt = drv.prepare_worktree("F1")
+        put(wt / "src" / "alpha" / "f1.py", "def run():\n    return 1\n")
+        git(wt, "add", "-A")
+        git(wt, "commit", "-q", "-m", "F1 work")
+        put(repo / "NEWS.md", "main moved\n")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "main moves")
+        job = SimpleNamespace(fn="F1", attempt=1, kind="conflict", timed_out=False, out=repo / "none.json",
+                              proc=SimpleNamespace(returncode=0), base=git(repo, "rev-parse", "main").strip())
+        self.assertIn("does not contain main", drv.conflict_problem(job, ""))
+        git(wt, "merge", "--no-edit", "main")
+        self.assertEqual(drv.conflict_problem(job, ""), "")
+        put(repo / "NEWS.md", "main moved again\n")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "main moves on")  # a landing during the pass must not fail it
+        self.assertEqual(drv.conflict_problem(job, ""), "")
+
+    def test_the_conflict_wording_is_the_one_land_py_prints(self):
+        self.assertIn(f"{drive.CONFLICT} merging", (SCRIPTS / "land.py").read_text(encoding="utf-8"))
+
+
+class TestModels(Toy):
+    def claude_cmds(self, repo: Path) -> dict[str, list[str]]:
+        """What drive.py runs per worker kind when no worker_cmd is set and `claude` is on PATH."""
+        toml = repo / "overhaul.toml"
+        toml.write_text(re.sub(r"^worker_cmd = .*\n", "", toml.read_text(encoding="utf-8"), flags=re.M),
+                        encoding="utf-8")
+        drv = drive.Driver(repo, drive.load_config(repo))
+        with mock.patch.object(drive.shutil, "which", return_value="claude"), \
+                mock.patch.object(drive, "supports_max_turns", return_value=True):
+            return {kind: drv.worker_cmd(kind) for kind in ("build", "conflict", "review")}
+
+    @staticmethod
+    def flag(cmd: list[str], name: str) -> str | None:
+        return cmd[cmd.index(name) + 1] if name in cmd else None
+
+    def test_defaults_and_the_model_flag_of_each_worker_kind(self):
+        repo = self.make_repo()
+        cfg = drive.load_config(repo)
+        self.assertEqual(cfg["limits"]["conflict_retries"], 2)
+        self.assertEqual((cfg["harness"]["builder_model"], cfg["harness"]["review_model"]), ("opus", "sonnet"))
+        cmds = self.claude_cmds(repo)
+        for kind, model, turns in (("build", "opus", "12"), ("conflict", "opus", "12"), ("review", "sonnet", "20")):
+            self.assertEqual(cmds[kind][1], "-p", kind)
+            self.assertEqual(self.flag(cmds[kind], "--model"), model, kind)
+            self.assertEqual(self.flag(cmds[kind], "--max-turns"), turns, kind)
+
+    def test_models_come_from_overhaul_toml_and_an_empty_one_means_the_claude_default(self):
+        repo = self.make_repo(harness_extra='builder_model = "haiku"\nreview_model = ""')
+        cmds = self.claude_cmds(repo)
+        self.assertEqual([self.flag(cmds[k], "--model") for k in ("build", "conflict", "review")],
+                         ["haiku", "haiku", None])
+
+    def test_the_model_is_logged_on_build_conflict_and_review_events(self):
+        repo = self.make_repo({"F1": {"land": ["conflict", "ok"]}}, worker_args=', "--model", "fake-m"')
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        for event in ("build_start", "build_end", "conflict_start", "conflict_end", "review_pass"):
+            details = [e["detail"] for e in self.events(repo) if e["fn"] == "F1" and e["event"] == event]
+            self.assertTrue(details and all("model=fake-m" in d for d in details), (event, details))
 
 
 class TestManagerCommands(Toy):

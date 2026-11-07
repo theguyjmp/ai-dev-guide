@@ -17,7 +17,11 @@ repo = Path(a.repo)
 (repo / ".overhaul").mkdir(parents=True, exist_ok=True)
 (repo / ".overhaul" / "land-argv.json").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
 scenario = json.loads((Path(__file__).resolve().parent.parent / "scenario.json").read_text(encoding="utf-8"))
-mode = (scenario.get(a.fn, {}).get("land") or ["ok"])[0]
+seq = scenario.get(a.fn, {}).get("land") or ["ok"]  # the Nth land of a function uses entry N, the last repeats
+counter = repo / ".overhaul" / f"land-count-{a.fn}.txt"
+calls = int(counter.read_text(encoding="utf-8")) + 1 if counter.exists() else 1
+counter.write_text(str(calls), encoding="utf-8")
+mode = seq[min(calls, len(seq)) - 1]
 lock, end = repo / ".overhaul" / "lock", time.monotonic() + 5
 while True:  # like land.py: O_EXCL create, wait a little, else one reason line
     try:
@@ -45,6 +49,10 @@ try:
     if mode == "green_before":
         log("land_fail", "acceptance already green before change")
         print(a.fn + ": acceptance already green before change")
+        sys.exit(1)
+    if mode == "conflict":  # main moved under the branch: land.py logs its own land_fail and prints the reason
+        log("land_fail", f"merge conflict merging {a.main} into fn/{a.fn}")
+        print(f"merge conflict merging {a.main} into fn/{a.fn}")
         sys.exit(1)
     if mode == "die":  # exits without writing its own log line
         print(a.fn + ": land died")

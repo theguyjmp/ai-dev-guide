@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Overhaul v2 harness: build, review and land every function in spec/FUNCTIONS.md.
 
-A READY function (planned, deps proven, retries left) gets a worktree at .overhaul/wt/<id>
-on fn/<id> from main, a brief from templates/, and a `claude -p` builder. A finished build
-gets a blind reviewer; a PASS goes to land.py. A failure retries from main with its reason
-in the brief, then parks the function as needs-plan for the manager.
+A READY function (planned, deps proven, retries left, no function of its module in flight) gets a
+worktree at .overhaul/wt/<id> on fn/<id> from main, a brief from templates/, and a `claude -p`
+builder. A finished build gets a blind reviewer; a PASS goes to land.py. A failure retries from main
+with its reason in the brief, then parks the function as needs-plan for the manager. A land.py
+"merge conflict" is not an attempt: a conflict-fix builder pass merges main into the same worktree
+and branch (templates/conflict-brief.md, [limits] conflict_retries per attempt), then the function
+is reviewed and landed again.
 
     py -3 drive.py --repo R                      run until done (0) or manager needed (3)
     py -3 drive.py --repo R --reset ID           planned, attempts 0
@@ -47,6 +50,7 @@ ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 PATHS_LINE = re.compile(r"\W*(?:paths?|files)\W*?[:=]\s*(.+)", re.I)
 IN_FLIGHT = ("building", "review", "landing")
 GREEN_BEFORE = "acceptance already green before change"
+CONFLICT = "merge conflict"  # land.py: "merge conflict merging <main> into fn/<id>"
 FENCE = {".py": "python", ".rs": "rust", ".js": "javascript", ".ts": "typescript"}
 REVIEW_MAX_CALLS = 20
 REASON_MAX = 1500
@@ -55,9 +59,10 @@ DASH_EVERY_S = 15
 LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py's lock
 DEFAULTS = {
     "limits": {"max_parallel": 4, "builder_max_calls": 60, "brief_max_tokens": 40000,
-               "retries_per_function": 1, "builder_timeout_min": 30},
+               "retries_per_function": 1, "conflict_retries": 2, "builder_timeout_min": 30},
     "paths": {"functions": "spec/FUNCTIONS.md", "architecture": "spec/ARCHITECTURE.md",
               "state": ".overhaul/state.json"},
+    "harness": {"builder_model": "opus", "review_model": "sonnet"},
 }
 
 
@@ -82,7 +87,7 @@ class Fn:
 @dataclass
 class Job:
     fn: str
-    kind: str  # build | review | land
+    kind: str  # build | conflict | review | land
     proc: subprocess.Popen
     out: Path
     started: float
@@ -91,6 +96,8 @@ class Job:
     head: str = ""
     timed_out: bool = False
     log_at: int = 0  # size of log.jsonl when a land job started
+    base: str = ""  # a conflict pass: the sha of main when it started (the branch must contain it)
+    model: str = ""  # the --model a claude worker got; "custom" for a worker_cmd without one
 
 
 def now_iso() -> str:
@@ -291,7 +298,6 @@ def load_config(repo: Path) -> dict:
         raise DriveError(f"overhaul.toml: {e}") from e
     cfg = {name: {**base, **raw.get(name, {})} for name, base in DEFAULTS.items()}
     cfg["commands"] = {k: str(v) for k, v in raw.get("commands", {}).items()}
-    cfg["harness"] = raw.get("harness", {})
     return cfg
 
 
@@ -305,9 +311,12 @@ class Driver:
         self.max_calls = int(lim["builder_max_calls"])
         self.max_tokens = int(lim["brief_max_tokens"])
         self.retries = int(lim["retries_per_function"])
+        self.conflict_retries = max(0, int(lim["conflict_retries"]))
         self.timeout_s = float(lim["builder_timeout_min"]) * 60
         self.heartbeat_s = float(har.get("heartbeat_min", 10)) * 60
         self.main = str(har.get("main_branch", "main"))
+        self.builder_model = str(har.get("builder_model") or "")  # also used by conflict passes
+        self.review_model = str(har.get("review_model") or "")
         scripts = Path(str(har.get("scripts_dir") or HERE))
         self.scripts = scripts if scripts.is_absolute() else repo / scripts
         self.ov = repo / ".overhaul"
@@ -421,7 +430,7 @@ class Driver:
         for fid in [k for k in recs if k not in self.fns]:
             del recs[fid]
         for f in self.order:
-            rec = recs.setdefault(f.id, {"status": "planned", "attempts": 0, "last_reason": "",
+            rec = recs.setdefault(f.id, {"status": "planned", "attempts": 0, "conflicts": 0, "last_reason": "",
                                          "branch": f"fn/{f.id}", "updated": now_iso()})
             if f.status == "proven":
                 rec["status"] = "proven"
@@ -477,12 +486,27 @@ class Driver:
     def busy(self) -> set[str]:
         return set(self.jobs) | set(self.land_queue) | ({self.land_job.fn} if self.land_job else set())
 
+    @staticmethod
+    def module_key(f: Fn) -> str:
+        return f.module.strip().lower()
+
     def ready(self) -> list[Fn]:
+        """Functions to launch now: planned, deps proven, retries left, and at most one per module.
+
+        Builders in one module edit the same files and fail to land with a merge conflict, so a function
+        whose module has a function in flight (building, in review or landing) waits for it."""
         recs = self.st["functions"]
         proven = {fid for fid, r in recs.items() if r["status"] == "proven"}
         busy = self.busy()
-        return [f for f in self.order if recs[f.id]["status"] == "planned" and f.id not in busy
-                and recs[f.id]["attempts"] <= self.retries and all(d in proven for d in f.deps)]
+        taken = {self.module_key(self.fns[fid]) for fid in busy if fid in self.fns}
+        ready: list[Fn] = []
+        for f in self.order:
+            if (recs[f.id]["status"] != "planned" or f.id in busy or recs[f.id]["attempts"] > self.retries
+                    or not all(d in proven for d in f.deps) or self.module_key(f) in taken):
+                continue
+            taken.add(self.module_key(f))
+            ready.append(f)
+        return ready
 
     def launch(self) -> bool:
         launched = False
@@ -508,33 +532,42 @@ class Driver:
                 self.after_land(job)
             else:
                 del self.jobs[job.fn]
-                (self.after_build if job.kind == "build" else self.after_review)(job)
+                {"build": self.after_build, "conflict": self.after_conflict}.get(job.kind, self.after_review)(job)
         return done
 
     # ---- build ----
-    def worker_cmd(self, kind: str) -> list[str]:
+    def custom_cmd(self, kind: str) -> list[str]:
         har = self.cfg["harness"]
         custom = (har.get("reviewer_cmd") if kind == "review" else None) or har.get("worker_cmd")
-        if custom:
-            return [str(c) for c in custom] if isinstance(custom, list) else shlex.split(custom)
+        if not custom:
+            return []
+        return [str(c) for c in custom] if isinstance(custom, list) else shlex.split(custom)
+
+    def worker_cmd(self, kind: str) -> list[str]:
+        """The worker command for kind build | conflict | review, without the prompt."""
+        if custom := self.custom_cmd(kind):
+            return custom
         exe = shutil.which("claude")
         if not exe:
             raise DriveError("claude CLI not on PATH")
         cmd = [exe, "-p", "--dangerously-skip-permissions", "--output-format", "json"]
         if supports_max_turns(exe):
-            cmd += ["--max-turns", str(self.max_calls if kind == "build" else REVIEW_MAX_CALLS)]
-        model = har.get("builder_model" if kind == "build" else "reviewer_model")
-        return cmd + (["--model", str(model)] if model else [])
+            cmd += ["--max-turns", str(REVIEW_MAX_CALLS if kind == "review" else self.max_calls)]
+        model = self.review_model if kind == "review" else self.builder_model
+        return cmd + (["--model", model] if model else [])
 
-    def start_job(self, fid: str, kind: str, attempt: int, brief: Path, cwd: Path) -> None:
-        out = self.ov / "runs" / f"{fid}-a{attempt}-{kind}.json"
-        cmd = [*self.worker_cmd(kind), f"Read and do {brief.as_posix()}"]
+    def start_job(self, fid: str, kind: str, attempt: int, brief: Path, cwd: Path, tag: str = "") -> None:
+        out = self.ov / "runs" / f"{fid}-a{attempt}-{tag or kind}.json"
+        base = self.worker_cmd(kind)
+        cmd = [*base, f"Read and do {brief.as_posix()}"]
         try:
             proc = spawn(cmd, cwd, out)
         except OSError as e:
             raise DriveError(f"cannot start the {kind} worker {cmd[0]}: {e}") from e
+        model = base[base.index("--model") + 1] if "--model" in base[:-1] else (
+            "custom" if self.custom_cmd(kind) else "default")
         start = time.monotonic()
-        self.jobs[fid] = Job(fid, kind, proc, out, start, start + self.timeout_s, attempt)
+        self.jobs[fid] = Job(fid, kind, proc, out, start, start + self.timeout_s, attempt, model=model)
 
     def prepare_worktree(self, fid: str) -> Path:
         """A clean worktree on fn/<id> at main (reset on a retry)."""
@@ -600,16 +633,16 @@ class Driver:
         path = self.ov / "briefs" / f"{f.id}.md"
         path.write_text(brief, encoding="utf-8")
         self.start_job(f.id, "build", attempt, path, wt)
-        self.set(f.id, status="building")
-        self.log(f.id, "build_start", f"attempt {attempt}")
+        self.set(f.id, status="building", conflicts=0)  # a fresh branch from main: a fresh conflict budget
+        self.log(f.id, "build_start", f"attempt {attempt} model={self.jobs[f.id].model}")
         self.say(f"build {f.id} attempt {attempt}")
 
     def after_build(self, job: Job) -> None:
         tokens, turns, text = read_result(job.out)
         flags = (" over-budget" if turns is not None and turns > self.max_calls else "") + \
                 (" timeout" if job.timed_out else "")
-        self.log(job.fn, "build_end", f"rc={job.proc.returncode} turns={turns}/{self.max_calls}{flags}",
-                 time.monotonic() - job.started, tokens)
+        self.log(job.fn, "build_end", f"rc={job.proc.returncode} turns={turns}/{self.max_calls}{flags} "
+                 f"model={job.model}", time.monotonic() - job.started, tokens)
         problem = self.build_problem(job, text)
         if problem:
             self.fail(job.fn, problem)
@@ -628,7 +661,7 @@ class Driver:
         try:
             if git(wt, "status", "--porcelain").strip():
                 git(wt, "add", "-A")
-                git(wt, "commit", "-q", "-m", f"{job.fn}: build attempt {job.attempt} (committed by drive.py)")
+                git(wt, "commit", "-q", "-m", f"{job.fn}: {job.kind} attempt {job.attempt} (committed by drive.py)")
         except DriveError as e:
             return f"auto-commit of the builder's leftover changes failed: {e}"
         changed = git(self.repo, "diff", "--name-only", f"{self.main}...{branch}").splitlines()
@@ -637,6 +670,66 @@ class Driver:
         hits = [p for p in changed if p.startswith(self.protected)]
         if hits:
             return f"changed protected files ({', '.join(hits[:5])}); never edit tests/acceptance, spec or overhaul.toml"
+        return ""
+
+    # ---- conflict: main moved under a branch that land.py could not merge ----
+    def start_conflict(self, fid: str, reason: str) -> bool:
+        """Start a conflict-fix builder pass on fn/<id>'s own worktree. False once conflict_retries is spent
+        (or the worktree is unusable): the caller then counts the land failure as an attempt."""
+        rec = self.st["functions"][fid]
+        n = int(rec.get("conflicts") or 0) + 1
+        if n > self.conflict_retries:
+            return False
+        f, branch, wt = self.fns[fid], f"fn/{fid}", self.ov / "wt" / fid
+        try:
+            git(wt, "checkout", "-q", "-f", branch)  # keep the reviewed work; never reset to main here
+            git(wt, "clean", "-fdq")
+            base = git(self.repo, "rev-parse", self.main).strip()
+        except DriveError as e:
+            self.say(f"{fid}: cannot start a conflict pass ({e})")
+            return False
+        brief = render("conflict-brief.md", {
+            "id": fid, "pass": str(n), "branch": branch, "worktree": wt.as_posix(), "main": self.main,
+            "module": f.module, "reason": reason, "row": self.row_table(f), "allowed_paths": self.allowed(f),
+            "commands": self.commands_text(f), "max_calls": str(self.max_calls)})
+        path = self.ov / "briefs" / f"conflict-{fid}-{n}.md"
+        path.write_text(brief, encoding="utf-8")
+        self.start_job(fid, "conflict", rec["attempts"] + 1, path, wt, tag=f"conflict{n}")
+        self.jobs[fid].base = base
+        self.set(fid, status="building", conflicts=n)
+        self.log(fid, "conflict_start", f"pass {n}/{self.conflict_retries}, not an attempt: {reason} "
+                 f"model={self.jobs[fid].model}")
+        self.say(f"conflict pass {n}/{self.conflict_retries} for {fid}: {reason}")
+        return True
+
+    def after_conflict(self, job: Job) -> None:
+        tokens, turns, text = read_result(job.out)
+        flags = (" over-budget" if turns is not None and turns > self.max_calls else "") + \
+                (" timeout" if job.timed_out else "")
+        self.log(job.fn, "conflict_end", f"rc={job.proc.returncode} turns={turns}/{self.max_calls}{flags} "
+                 f"model={job.model}", time.monotonic() - job.started, tokens)
+        problem = self.conflict_problem(job, text)
+        if problem:  # a conflict pass that fails is a failed attempt: the retry rebuilds from the new main
+            self.fail(job.fn, f"conflict pass {self.st['functions'][job.fn].get('conflicts', 0)}: {problem}")
+        else:
+            self.start_review(job.fn, job.attempt)
+
+    def conflict_problem(self, job: Job, text: str) -> str:
+        """Why this conflict pass cannot go back to review, or ''. Commits a merge the builder left staged."""
+        wt, branch = self.ov / "wt" / job.fn, f"fn/{job.fn}"
+        try:
+            if not job.timed_out and job.proc.returncode == 0:  # before build_problem stages everything
+                left = git(wt, "diff", "--name-only", "--diff-filter=U").split()
+                if left:
+                    return f"conflicts left unresolved in {', '.join(left[:5])}"
+            problem = self.build_problem(job, text)
+            if problem:
+                return problem
+            base = job.base or self.main  # main as it was when the pass began; it may have moved on since
+            if run(["git", "merge-base", "--is-ancestor", base, branch], self.repo).returncode != 0:
+                return f"{branch} does not contain {self.main} yet ({base[:12]}); run git merge {self.main} and commit"
+        except DriveError as e:
+            return f"git failed after the conflict pass: {e}"
         return ""
 
     # ---- review ----
@@ -676,11 +769,11 @@ class Driver:
             verdict, notes = "FAIL", "review file missing or line 1 not exactly PASS or FAIL"
         secs = time.monotonic() - job.started
         if verdict == "PASS":
-            self.log(fid, "review_pass", notes, secs, tokens)
+            self.log(fid, "review_pass", f"{notes} model={job.model}".strip(), secs, tokens)
             self.land_queue.append(fid)
             self.set(fid, status="landing")
         else:
-            self.log(fid, "review_fail", notes, secs, tokens)
+            self.log(fid, "review_fail", f"{notes} model={job.model}".strip(), secs, tokens)
             self.fail(fid, f"review FAIL: {notes or 'no reason given'}")
 
     # ---- land ----
@@ -718,6 +811,8 @@ class Driver:
             self.log(fid, "land_fail", reason, secs)
         if GREEN_BEFORE in reason:
             self.park(fid, f"land: {reason}")
+        elif CONFLICT in reason.lower() and self.start_conflict(fid, reason):
+            return  # main moved under the branch: a conflict-fix pass, not an attempt
         else:
             self.fail(fid, f"land: {reason}")
 
@@ -823,7 +918,7 @@ class Driver:
 
     # ---- manager commands ----
     def reset(self, fid: str) -> None:
-        self.set(fid, status="planned", attempts=0, last_reason="")
+        self.set(fid, status="planned", attempts=0, conflicts=0, last_reason="")
         if self.dirty:
             self.flush()
         self.log(fid, "cycle", "reset to planned, attempts 0")
