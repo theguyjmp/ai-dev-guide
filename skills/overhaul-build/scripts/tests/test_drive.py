@@ -96,6 +96,22 @@ def git(*args):
     subprocess.run(["git", *args], check=True, capture_output=True)
 
 
+if first.startswith("# Polish audit round "):  # scenario "audit": one list of findings per round, the last repeats
+    rnd = int(first.split()[-1])
+    audits = json.loads((ROOT / "scenario.json").read_text(encoding="utf-8")).get("audit") or [[]]
+    (seen / f"polish-audit-{rnd}.md").write_text(brief, encoding="utf-8")
+    found = audits[min(rnd, len(audits)) - 1]
+    Path(field("- Findings file to write:")).write_text(json.dumps(found), encoding="utf-8")
+    finish(str(len(found)))
+if first.startswith("# Polish fix "):
+    (seen / f"{first.split()[3]}-fix.md").write_text(brief, encoding="utf-8")
+    p = Path("src") / field("- Module:") / "tidy.py"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(f"# tidied by {first.split()[3]}\\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", first)
+    finish("DONE")
+
 if review:
     n = len(list(seen.glob(fid + "-review-*.md"))) + 1
     (seen / f"{fid}-review-{n}.md").write_text(brief, encoding="utf-8")
@@ -249,8 +265,11 @@ class TestTemplates(unittest.TestCase):
                 "acceptance_source policies commands max_calls previous".split()
         review = "id branch row allowed_paths acceptance_source review_file policies diffstat diff max_calls".split()
         conflict = "id pass worktree branch main module reason row allowed_paths commands max_calls".split()
+        audit = "round main audit_file max_calls scratch modules policies commands".split()
+        fix = "id round module branch max_calls issues allowed_paths policies commands".split()
         for name, keys in (("build-brief.md", build), ("review-brief.md", review),
-                           ("conflict-brief.md", conflict)):
+                           ("conflict-brief.md", conflict), ("polish-audit.md", audit),
+                           ("polish-fix-brief.md", fix)):
             used = set(re.findall(r"\{\{(\w+)\}\}", (drive.TEMPLATES / name).read_text(encoding="utf-8")))
             self.assertEqual(used, set(keys), name)
             self.assertNotIn("{{", drive.render(name, {k: f"<{k}>" for k in keys}))
@@ -617,6 +636,66 @@ class TestLock(Toy):
         self.assertTrue(drive.acquire_lock(repo, 0))
         drive.release_lock(repo)
         self.assertEqual(drive.lock_path(repo), Path(land.lock_path(str(repo))))
+
+
+def finding(module: str, n: int) -> dict:
+    return {"module": module, "file": f"src/{module}/x.py", "line": n, "rule": "duplication", "evidence": f"dup {n}"}
+
+
+class TestPolish(Toy):
+    def verdict(self, repo: Path) -> str:
+        p = subprocess.run([sys.executable, str(SCRIPTS / "verdict.py"), "--repo", str(repo), "--no-checks"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        return p.stdout.strip().splitlines()[-1]
+
+    def polish_events(self, repo: Path) -> list[tuple[str, str]]:
+        return [(e["event"], e["detail"]) for e in self.events(repo) if e["event"].startswith("polish_")]
+
+    def test_audit_fix_land_then_a_clean_reaudit_gives_verdict_good(self):
+        repo = self.make_repo({"audit": [[finding("alpha", 3), finding("beta", 7)], []]})
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.polish_events(repo)
+        self.assertEqual([d.split(" model=")[0] for e, d in ev if e == "polish_audit"],
+                         ["round 1: 2 issues", "round 2: 0 issues"])
+        landed = sorted(d for e, d in ev if e == "polish_fix" and d.startswith("landed"))
+        self.assertEqual(landed, ["landed alpha", "landed beta"])
+        self.assertEqual([d for e, d in ev if e == "polish_land_ok"], ["landed", "landed"])
+        self.assertEqual(ev[-1], ("polish_done", "0 issues after 1 fix rounds"))
+        files = git(repo, "ls-tree", "-r", "--name-only", "main")
+        self.assertIn("src/alpha/tidy.py", files)
+        self.assertIn("src/beta/tidy.py", files)
+        self.assertIn("`src/alpha/x.py:3` [duplication] dup 3", self.seen("polish-r1-alpha-fix.md"))
+        self.assertNotIn("beta/x.py", self.seen("polish-r1-alpha-fix.md"))  # one module per fix pass
+        pol = self.state(repo)["polish"]
+        self.assertEqual((pol["status"], pol["issues"], pol["history"]), ("done", 0, [[1, 2], [2, 0]]))
+        self.assertEqual(set(self.state(repo)["functions"]), {"F1", "F2"})  # no state entry for a polish fix
+        line = self.verdict(repo)
+        self.assertTrue(line.startswith("VERDICT GOOD proven 2/2 rate"), line)
+        self.assertIn(" issues 0 ", line)
+
+    def test_issues_left_after_polish_rounds_give_a_verdict_that_is_not_good(self):
+        repo = self.make_repo({"audit": [[finding("alpha", 3), finding("beta", 7)]]})
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.polish_events(repo)
+        self.assertEqual(len([1 for e, _ in ev if e == "polish_audit"]), 3)  # polish_rounds 2, then the re-audit
+        self.assertEqual(len([1 for e, d in ev if e == "polish_fix" and d.startswith("landed")]), 4)
+        self.assertEqual(ev[-1], ("polish_done", "2 issues after 2 fix rounds"))
+        line = self.verdict(repo)
+        self.assertTrue(line.startswith("VERDICT BAD proven 2/2"), line)
+        self.assertIn(" issues 2 ", line)
+        self.assertIn("polish done: 2 issues", line)
+
+    def test_polish_rounds_zero_skips_the_phase(self):
+        repo = self.make_repo({"audit": [[finding("alpha", 3)]]})
+        toml = repo / "overhaul.toml"
+        toml.write_text(toml.read_text(encoding="utf-8").replace("[limits]\n", "[limits]\npolish_rounds = 0\n"),
+                        encoding="utf-8")
+        git(repo, "commit", "-qam", "no polish")
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.polish_events(repo), [])
 
 
 if __name__ == "__main__":

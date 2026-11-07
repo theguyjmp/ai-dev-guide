@@ -49,6 +49,7 @@ COLUMNS = ("id", "phase", "module", "deps", "entry", "acceptance", "status")
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 PATHS_LINE = re.compile(r"\W*(?:paths?|files)\W*?[:=]\s*(.+)", re.I)
 IN_FLIGHT = ("building", "review", "landing")
+POLISH_KINDS = ("polish_audit", "polish_fix", "polish_review", "polish_land")
 GREEN_BEFORE = "acceptance already green before change"
 CONFLICT = "merge conflict"  # land.py: "merge conflict merging <main> into fn/<id>"
 FENCE = {".py": "python", ".rs": "rust", ".js": "javascript", ".ts": "typescript"}
@@ -59,7 +60,8 @@ DASH_EVERY_S = 15
 LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py's lock
 DEFAULTS = {
     "limits": {"max_parallel": 4, "builder_max_calls": 60, "brief_max_tokens": 40000,
-               "retries_per_function": 1, "conflict_retries": 2, "builder_timeout_min": 30},
+               "retries_per_function": 1, "conflict_retries": 2, "builder_timeout_min": 30,
+               "polish_rounds": 2},
     "paths": {"functions": "spec/FUNCTIONS.md", "architecture": "spec/ARCHITECTURE.md",
               "state": ".overhaul/state.json"},
     "harness": {"builder_model": "opus", "review_model": "sonnet"},
@@ -87,7 +89,7 @@ class Fn:
 @dataclass
 class Job:
     fn: str
-    kind: str  # build | conflict | review | land
+    kind: str  # build | conflict | review | land, or one of POLISH_KINDS
     proc: subprocess.Popen
     out: Path
     started: float
@@ -317,6 +319,11 @@ class Driver:
         self.main = str(har.get("main_branch", "main"))
         self.builder_model = str(har.get("builder_model") or "")  # also used by conflict passes
         self.review_model = str(har.get("review_model") or "")
+        self.audit_model = str(har.get("audit_model") or self.review_model)
+        self.polish_rounds = int(lim["polish_rounds"])
+        self.polish_queue: list[tuple[str, list[dict]]] = []  # (module, issues) fix passes waiting for a slot
+        self.polish_lands: list[str] = []
+        self.polish_meta: dict[str, tuple[str, str]] = {}  # fix fid -> (module, issues text)
         scripts = Path(str(har.get("scripts_dir") or HERE))
         self.scripts = scripts if scripts.is_absolute() else repo / scripts
         self.ov = repo / ".overhaul"
@@ -469,6 +476,7 @@ class Driver:
                 changed = self.reap()
                 changed = self.pump_land() or changed
                 changed = self.launch() or changed
+                changed = self.polish_step() or changed
                 if self.dirty:
                     self.save()  # a write that had to wait for land.py's lock
                 if not self.busy():
@@ -527,7 +535,9 @@ class Driver:
                 kill_tree(job.proc)
                 job.timed_out = True
             done = True
-            if job.kind == "land":
+            if job.kind in POLISH_KINDS:
+                self.reap_polish(job)
+            elif job.kind == "land":
                 self.land_job = None
                 self.after_land(job)
             else:
@@ -838,6 +848,213 @@ class Driver:
             if isinstance(rec, dict) and rec.get("fn") == fid and rec.get("event") in ("land_ok", "land_fail"):
                 return True
         return False
+
+    # ---- polish: once every function is proven, a blind audit, fix passes per module, then a re-audit ----
+    def polish_state(self) -> dict:
+        """st["polish"]: round, status (idle | audit | fix | done | failed), issues and [round, issues] history."""
+        return self.st.setdefault("polish", {"round": 0, "status": "idle", "issues": None, "history": []})
+
+    def polish_pending(self) -> bool:
+        land = self.land_job is not None and self.land_job.kind == "polish_land"
+        return land or bool(self.polish_queue or self.polish_lands) or any(
+            j.kind in POLISH_KINDS for j in self.jobs.values())
+
+    def polish_step(self) -> bool:
+        """Drive the polish phase one step; True if anything started."""
+        pol = self.polish_state()
+        if self.polish_rounds < 1 or pol["status"] in ("done", "failed"):
+            return False
+        if any(self.st["functions"][fid]["status"] != "proven" for fid in self.fns):
+            return False
+        started = self.pump_polish_land()
+        if pol["status"] == "fix":
+            while self.polish_queue and len(self.jobs) < self.max_parallel:
+                self.start_polish_fix(*self.polish_queue.pop(0))
+                started = True
+            if not self.polish_pending():
+                return self.start_polish_audit(pol["round"] + 1)
+        elif not self.busy():  # idle, or an audit a previous drive left unfinished
+            return self.start_polish_audit(max(1, pol["round"]))
+        return started
+
+    def polish_cmd(self, kind: str) -> tuple[list[str], str]:
+        """The worker command for a polish kind, and its model label."""
+        custom = self.custom_cmd("review" if kind in ("polish_audit", "polish_review") else "build")
+        if custom:
+            return custom, "custom"
+        base = self.worker_cmd("review" if kind == "polish_review" else "build")
+        if kind == "polish_audit" and self.audit_model:
+            base = (base[:base.index("--model")] if "--model" in base else base) + ["--model", self.audit_model]
+        return base, base[base.index("--model") + 1] if "--model" in base[:-1] else "default"
+
+    def start_polish_job(self, fid: str, kind: str, rnd: int, brief: Path, cwd: Path) -> None:
+        base, model = self.polish_cmd(kind)
+        out = self.ov / "runs" / f"{fid}-r{rnd}-{kind}.json"
+        try:
+            proc = spawn([*base, f"Read and do {brief.as_posix()}"], cwd, out)
+        except OSError as e:
+            raise DriveError(f"cannot start the {kind} worker {base[0]}: {e}") from e
+        start = time.monotonic()
+        self.jobs[fid] = Job(fid, kind, proc, out, start, start + self.timeout_s, rnd, model=model)
+
+    def polish_commands(self) -> str:
+        lines = [f"- {name}: `{cmd}`" for name, cmd in self.cfg["commands"].items() if "{test}" not in cmd]
+        return "\n".join(lines) or "(overhaul.toml has no whole-tree [commands])"
+
+    def polish_allowed(self, module: str) -> str:
+        paths = module_paths(module_section(self.arch, module), module)
+        tests = unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
+        return "\n".join([f"- `{p}`" for p in paths] + [f"- `{t}` (unit tests for this module only)" for t in tests])
+
+    def start_polish_audit(self, rnd: int) -> bool:
+        fid, pol = "polish-audit", self.polish_state()
+        audit = self.ov / "polish" / f"audit-{rnd}.json"
+        audit.parent.mkdir(parents=True, exist_ok=True)
+        audit.unlink(missing_ok=True)
+        modules = sorted({f.module for f in self.order})
+        brief = render("polish-audit.md", {
+            "round": str(rnd), "main": self.main, "audit_file": audit.as_posix(), "max_calls": str(self.max_calls),
+            "scratch": (self.ov / "polish").as_posix(), "policies": self.policies(), "commands": self.polish_commands(),
+            "modules": "\n".join(f"- `{m}`: " + ", ".join(module_paths(module_section(self.arch, m), m)) for m in modules)})
+        path = self.ov / "briefs" / f"polish-audit-{rnd}.md"
+        path.write_text(brief, encoding="utf-8")
+        self.start_polish_job(fid, "polish_audit", rnd, path, self.prepare_worktree(fid))
+        pol.update(round=rnd, status="audit")
+        self.save()
+        self.say(f"polish audit round {rnd}")
+        return True
+
+    @staticmethod
+    def read_audit(path: Path) -> list[dict] | None:
+        try:
+            data = json.loads(read_text(path))
+        except ValueError:
+            return None
+        if not isinstance(data, list) or not all(isinstance(i, dict) for i in data):
+            return None
+        return data
+
+    def after_polish_audit(self, job: Job) -> None:
+        rnd, pol, secs = job.attempt, self.polish_state(), time.monotonic() - job.started
+        tokens, _, _ = read_result(job.out)
+        issues = self.read_audit(self.ov / "polish" / f"audit-{rnd}.json")
+        if issues is None:
+            why = "auditor timed out" if job.timed_out else f"audit-{rnd}.json missing or not a JSON list"
+            self.log(None, "polish_audit", f"round {rnd} failed: {why} model={job.model}", secs, tokens)
+            self.log(None, "polish_done", f"? issues: {why}")
+            pol.update(status="failed", issues=None)
+            self.save()
+            self.say(f"polish audit round {rnd} failed: {why}")
+            return
+        n = len(issues)
+        pol["history"].append([rnd, n])
+        pol["issues"] = n
+        self.log(None, "polish_audit", f"round {rnd}: {n} issues model={job.model}", secs, tokens)
+        if not issues or rnd > self.polish_rounds:
+            pol["status"] = "done"
+            self.save()
+            self.log(None, "polish_done", f"{n} issues after {rnd - 1} fix rounds")
+            self.say(f"polish done: {n} issues after {rnd - 1} fix rounds")
+            return
+        groups: dict[str, list[dict]] = {}
+        for item in issues:
+            groups.setdefault(str(item.get("module") or "unknown").strip(), []).append(item)
+        self.polish_queue = sorted(groups.items())
+        pol["status"] = "fix"
+        self.save()
+
+    def start_polish_fix(self, module: str, items: list[dict]) -> None:
+        rnd = self.polish_state()["round"]
+        fid = f"polish-r{rnd}-" + (re.sub(r"[^A-Za-z0-9._-]+", "-", module).strip("-.") or "misc")
+        issues = "\n".join(f"- `{i.get('file', '?')}:{i.get('line', '?')}` [{i.get('rule', '?')}] "
+                           f"{i.get('evidence') or i.get('issue') or ''}" for i in items)
+        self.polish_meta[fid] = (module, issues)
+        brief = render("polish-fix-brief.md", {
+            "id": fid, "round": str(rnd), "module": module, "branch": f"fn/{fid}", "max_calls": str(self.max_calls),
+            "issues": issues, "allowed_paths": self.polish_allowed(module), "policies": self.policies(),
+            "commands": self.polish_commands()})
+        path = self.ov / "briefs" / f"{fid}.md"
+        path.write_text(brief, encoding="utf-8")
+        self.start_polish_job(fid, "polish_fix", rnd, path, self.prepare_worktree(fid))
+        self.log(fid, "polish_fix", f"start {module}: {len(items)} issues model={self.jobs[fid].model}")
+        self.say(f"polish fix {fid}")
+
+    def after_polish_fix(self, job: Job) -> None:
+        tokens, turns, text = read_result(job.out)
+        self.log(job.fn, "polish_fix", f"built rc={job.proc.returncode} turns={turns}/{self.max_calls}",
+                 time.monotonic() - job.started, tokens)
+        problem = self.build_problem(job, text)
+        if problem:
+            self.polish_failed(job.fn, problem)
+            return
+        module, issues = self.polish_meta[job.fn]
+        branch, review_file = f"fn/{job.fn}", self.ov / "reviews" / f"{job.fn}.txt"
+        review_file.unlink(missing_ok=True)
+        brief = render("review-brief.md", {
+            "id": job.fn, "branch": branch, "allowed_paths": self.polish_allowed(module),
+            "row": f"A polish fix of module `{module}`: no function row, and no behaviour may change. "
+                   f"The issues it must fix:\n\n{issues}",
+            "acceptance_source": "(none: a polish fix adds no function; land.py re-runs every proven acceptance test)",
+            "review_file": review_file.as_posix(), "policies": self.policies(),
+            "diffstat": git(self.repo, "diff", "--stat", f"{self.main}...{branch}").rstrip(),
+            "diff": git(self.repo, "diff", f"{self.main}...{branch}").rstrip(), "max_calls": str(REVIEW_MAX_CALLS)})
+        if len(brief) // 4 > self.max_tokens:
+            self.polish_failed(job.fn, f"change too large to review (over brief_max_tokens {self.max_tokens})")
+            return
+        path = self.ov / "briefs" / f"review-{job.fn}.md"
+        path.write_text(brief, encoding="utf-8")
+        head = git(self.repo, "rev-parse", branch).strip()
+        self.start_polish_job(job.fn, "polish_review", job.attempt, path, self.ov / "wt" / job.fn)
+        self.jobs[job.fn].head = head
+
+    def after_polish_review(self, job: Job) -> None:
+        fid = job.fn
+        tokens, _, _ = read_result(job.out)
+        git(self.ov / "wt" / fid, "checkout", "-q", "-f", "-B", f"fn/{fid}", job.head)  # drop reviewer edits
+        git(self.ov / "wt" / fid, "clean", "-fdq")
+        lines = read_text(self.ov / "reviews" / f"{fid}.txt").splitlines()
+        verdict = "FAIL" if job.timed_out else (lines[0].strip() if lines else "")
+        notes = "reviewer timed out" if job.timed_out else " / ".join(ln.strip() for ln in lines[1:] if ln.strip())
+        self.log(fid, "polish_fix", f"review {verdict or 'missing'}: {notes} model={job.model}",
+                 time.monotonic() - job.started, tokens)
+        if verdict == "PASS":
+            self.polish_lands.append(fid)
+        else:
+            self.polish_failed(fid, f"review {verdict or 'file missing'}: {notes or 'no reason given'}")
+
+    def pump_polish_land(self) -> bool:
+        if self.land_job or self.land_queue or not self.polish_lands:
+            return False
+        fid = self.polish_lands.pop(0)
+        out = self.ov / "runs" / f"{fid}-land.out"
+        cmd = [sys.executable, str(self.scripts / "land.py"), "--repo", str(self.repo), "--fn", fid,
+               "--main", self.main, "--polish"]
+        start = time.monotonic()
+        self.land_job = Job(fid, "polish_land", spawn(cmd, self.repo, out), out, start,
+                            start + 2 * self.timeout_s, 0)
+        return True
+
+    def after_polish_land(self, job: Job) -> None:
+        if job.proc.returncode == 0 and not job.timed_out:
+            self.log(job.fn, "polish_fix", f"landed {self.polish_meta[job.fn][0]}", time.monotonic() - job.started)
+            self.say(f"polish landed {job.fn}")
+            return
+        out, err = read_text(job.out), read_text(job.out.with_suffix(".err"))
+        self.polish_failed(job.fn, "land: " + ("land.py timed out" if job.timed_out else (
+            last_line(out) or last_line(err) or f"land.py exit {job.proc.returncode}")))
+
+    def polish_failed(self, fid: str, reason: str) -> None:
+        """A fix pass that cannot land is dropped; the re-audit finds its issues again."""
+        self.log(fid, "polish_fix", f"failed: {reason[:REASON_MAX]}")
+        self.say(f"polish {fid} failed: {reason}")
+
+    def reap_polish(self, job: Job) -> None:
+        if job is self.land_job:
+            self.land_job = None
+        else:
+            del self.jobs[job.fn]
+        {"polish_audit": self.after_polish_audit, "polish_fix": self.after_polish_fix,
+         "polish_review": self.after_polish_review, "polish_land": self.after_polish_land}[job.kind](job)
 
     # ---- outcomes ----
     def fail(self, fid: str, reason: str) -> None:

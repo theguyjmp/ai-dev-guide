@@ -1,6 +1,6 @@
 """Land one function's branch on main (overhaul v2). Deterministic, no LLM, Python stdlib only.
 
-    py -3 land.py --repo R --fn ID [--main main] [--wait 30] [--timeout 1800]
+    py -3 land.py --repo R --fn ID [--main main] [--wait 30] [--timeout 1800] [--polish]
 
 Sequential under the lock file R/.overhaul/lock (created with O_EXCL, removed on exit; drive.py takes the same lock to
 write state.json and can import acquire_lock/release_lock from here). All work happens in the worktree
@@ -22,6 +22,10 @@ FUNCTIONS.md rows: | id | phase | module | deps | entry | acceptance | status |,
 Writes the untracked R/.overhaul/state.json (functions[ID]: status proven on success, last_reason on failure; attempts
 are drive.py's) and appends one line to R/.overhaul/log.jsonl. Any failure prints one reason line, exits 1 and leaves
 main untouched. The failing command's full output stays in R/.overhaul/land.out.
+
+--polish lands a polish fix branch fn/<ID> (no FUNCTIONS row, no red-before): steps 1, 3 and 4, then every proven row
+still passes and main fast-forwards to the merged commit. It logs polish_land_ok or polish_land_fail and writes no
+state.json entry.
 """
 import argparse
 import datetime
@@ -359,6 +363,79 @@ def land(repo, fid, main, timeout):
     return new, sum(1 for r in parse_functions(text).values() if r["status"] == "proven")
 
 
+def gate_merged(wt, rows, commands, out_path, timeout):
+    """Whole-tree commands, then every proven row's acceptance, on the merged tree in wt."""
+    for name in WHOLE_TREE:
+        cmd = commands.get(name)
+        if not cmd:
+            continue
+        cmd = fill(cmd)
+        code, tail = run(cmd, wt, out_path, timeout)
+        if not passes(cmd, code):
+            raise LandFail(f"{name} failed (exit {code}) on merged tree: {tail}")
+    for rid, row in rows.items():
+        if row["status"] != "proven":
+            continue
+        for node, cmd in acceptance_cmds(commands["acceptance"], row["acceptance"]):
+            code, tail = run(cmd, wt, out_path, timeout)
+            if code != 0:
+                raise LandFail(f"regression: proven {rid} {node} fails (exit {code}): {tail}")
+
+
+def land_polish(repo, fid, main, timeout):
+    """Land a polish fix: no FUNCTIONS row, no red-before; merge, gate, keep every proven row green, fast-forward."""
+    ovh = os.path.join(repo, ".overhaul")
+    wt, branch = os.path.join(ovh, "wt", "land"), f"fn/{fid}"
+    main_sha = git(repo, "rev-parse", "--verify", f"refs/heads/{main}^{{commit}}").stdout.strip()
+    fn = git(repo, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}", check=False)
+    if fn.returncode != 0:
+        raise LandFail(f"no branch {branch}")
+    conf = tomllib.loads(git(repo, "show", f"{main_sha}:overhaul.toml").stdout)
+    commands = conf.get("commands", {})
+    fpath = conf.get("paths", {}).get("functions", "spec/FUNCTIONS.md")
+    if not commands.get("acceptance"):
+        raise LandFail("overhaul.toml has no [commands] acceptance")
+    touched = git(repo, "diff", "--name-only", f"{main_sha}...{fn.stdout.strip()}").stdout.splitlines()
+    bad = [p for p in touched if p.startswith(PLAN_PATHS) or p == fpath]
+    if bad:
+        raise LandFail(f"{branch} edits plan files: {', '.join(bad[:5])}")
+    if not touched:
+        raise LandFail(f"{branch} changes nothing")
+    prepare_worktree(repo, wt)
+    git(wt, "checkout", "-q", "--detach", fn.stdout.strip())
+    merged = git(wt, "merge", "-q", "--no-edit", "-m", f"polish {fid}: merge {main} into {branch}", main_sha,
+                 check=False)
+    if merged.returncode != 0:
+        git(wt, "merge", "--abort", check=False)
+        raise LandFail(f"merge conflict merging {main} into {branch}")
+    gate_merged(wt, parse_functions(git(repo, "show", f"{main_sha}:{fpath}").stdout), commands,
+                os.path.join(ovh, "land.out"), timeout)
+    new = git(wt, "rev-parse", "HEAD").stdout.strip()
+    advance(repo, main, new, main_sha)
+    return new
+
+
+def log_line(repo, fid, event, detail, start):
+    with open(os.path.join(repo, ".overhaul", "log.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"t": now_iso(), "fn": fid, "event": event, "detail": detail,
+                            "seconds": round(time.monotonic() - start, 1), "tokens": None}) + "\n")
+
+
+def main_polish(repo, fid, main, timeout):
+    """--polish under the lock: one log line, no state.json entry."""
+    start = time.monotonic()
+    try:
+        sha = land_polish(repo, fid, main, timeout)
+        ok, detail = True, f"{main} -> {sha[:12]}"
+    except LandFail as e:
+        ok, detail = False, str(e)
+    except Exception as e:  # noqa: BLE001 - any crash is one reason line, main untouched
+        ok, detail = False, f"land error: {type(e).__name__}: {e}"
+    log_line(repo, fid, "polish_land_ok" if ok else "polish_land_fail", detail, start)
+    print(f"landed {fid}: {detail}" if ok else detail)
+    return 0 if ok else 1
+
+
 # ---- state and log --------------------------------------------------------------------------------------------------
 
 def read_state(path):
@@ -395,6 +472,7 @@ def main(argv=None):
     ap.add_argument("--main", default="main")
     ap.add_argument("--wait", type=float, default=30.0, help="seconds to wait for .overhaul/lock")
     ap.add_argument("--timeout", type=float, default=1800.0, help="seconds per command")
+    ap.add_argument("--polish", action="store_true", help="land a polish fix branch (no FUNCTIONS row)")
     a = ap.parse_args(argv)
     repo = os.path.abspath(a.repo)
 
@@ -406,6 +484,11 @@ def main(argv=None):
             holder = "?"
         print(f"lock held: .overhaul/lock ({holder})")
         return 1
+    if a.polish:
+        try:
+            return main_polish(repo, a.fid, a.main, a.timeout)
+        finally:
+            release_lock(repo)
     start = time.monotonic()
     try:
         spath = state_path(repo)

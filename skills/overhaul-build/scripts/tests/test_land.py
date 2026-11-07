@@ -171,6 +171,26 @@ class LandTest(unittest.TestCase):
         self.assertEqual((last["event"], last["tokens"]), ("land_ok", None))
         self.assertFalse(os.path.exists(os.path.join(repo, ".overhaul", "lock")))
 
+    def test_polish_lands_a_green_change_with_no_row_and_no_state_entry(self):
+        repo = self.make_repo(main_toy=toy(mul="a * b"), branch={"toy.py": toy(mul="a * b", extra="# tidy\n")})
+        before = git(repo, "rev-parse", "main")
+        code, out, err = self.land(repo, "--polish")
+        self.assertEqual(code, 0, out + err)
+        self.assertNotEqual(git(repo, "rev-parse", "main"), before)
+        self.assertEqual(git(repo, "show", "main:spec/FUNCTIONS.md"), FUNCTIONS.strip())
+        self.assertIn("# tidy", git(repo, "show", "main:toy.py"))
+        self.assertEqual(self.log(repo)[-1]["event"], "polish_land_ok")
+        self.assertFalse(os.path.exists(os.path.join(repo, ".overhaul", "state.json")))
+
+    def test_polish_that_breaks_a_proven_row_fails_and_leaves_main(self):
+        repo = self.make_repo(branch={"toy.py": toy(add="a - b")})
+        before = git(repo, "rev-parse", "main")
+        code, out, _ = self.land(repo, "--polish")
+        self.assertEqual(code, 1, out)
+        self.assertTrue(out.startswith("regression: proven F1"), out)
+        self.assertEqual(git(repo, "rev-parse", "main"), before)
+        self.assertEqual((self.log(repo)[-1]["event"], self.log(repo)[-1]["detail"]), ("polish_land_fail", out))
+
     def test_already_green_before(self):
         repo = self.make_repo(main_toy=toy(mul="a * b"), branch={"toy.py": toy(mul="a * b", extra="# tweak\n")})
         before = git(repo, "rev-parse", "main")

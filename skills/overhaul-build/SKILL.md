@@ -31,10 +31,13 @@ The harness is the machinery. M0 adds no scheduler entry, bot, hook, guard, wait
 In a POSIX shell (Git Bash on Windows): `mkdir -p R/.overhaul; py -3 <skill>/scripts/drive.py --repo R > R/.overhaul/drive.out 2>&1; echo "drive exit $?"; tail -n 5 R/.overhaul/drive.out`
 - Interactive: run drive.py as one background command, then make one long wait for its exit. Never poll, never read drive.out or `.overhaul/log.jsonl` while it runs; a still-running notice gets no tool call. Asked for status meanwhile, copy the VERDICT line from `.overhaul/verdict.json`; never run verdict.py by hand (it compares against its own last run).
 - Headless: run drive.py directly, in the foreground. A foreground call is cut at 10 minutes unless the headless session starts with `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` above the run (14400000 is 4 hours).
-- Exit 0: every function is proven. Run the proof-check, then report.
+- Exit 0: every function is proven and the polish phase has run. Run the proof-check, then report.
 - Exit 3: the manager is needed (below); after the fixes, run again.
 - Any other exit: run once more; the same failure twice is a harness defect. Report its last error line and stop; never do the harness's work by hand.
 - On the owner's stop: stop the command (TaskStop) and say so in one line; the next run resumes from state.json.
+
+## Polish phase (inside drive.py)
+Once every function is proven, drive.py runs a blind audit (`claude -p`, template `polish-audit.md`, model `[harness] audit_model`, else review_model) that writes `.overhaul/polish/audit-<round>.json`: a list of {module, file, line, rule, evidence}. It groups the findings by module and runs one fix builder per module (branch `fn/polish-r<round>-<module>`), each blind-reviewed and landed by `land.py --polish` (no FUNCTIONS row, no red-before; whole-tree gates and every proven row stay green), then re-audits. After `[limits] polish_rounds` fix rounds (default 2; 0 turns the phase off) the last audit's count is final. Events: polish_audit, polish_fix, polish_done. The VERDICT line shows `issues K`, and VERDICT GOOD needs 0; issues left over are fixed through a plan or by raising polish_rounds, never by hand on main.
 
 ## Exit 3: needs-plan functions
 drive.py exits 3 when nothing is READY and some function is needs-plan: its retries are used up, its brief is over budget, or it cannot land. drive.py has stopped, so nothing races your edits. For each such function read only its row, its review reason (`.overhaul/reviews/<id>.txt`) and its last events (`grep <id> .overhaul/log.jsonl | tail -n 3`), never its diff, and make one plan fix by overhaul-plan's rules:

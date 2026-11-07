@@ -5,12 +5,14 @@ GOOD only when all of these hold:
   2 the whole-tree commands in overhaul.toml [commands] (test, lint, dup, cycles, entry_lint) pass on main, run from the
     repo root (pytest exit 5, "no tests collected", is a pass, R-c; --no-checks skips them);
   3 no function has waited in needs-plan for more than 1 cycle;
-  4 no log event since the previous verdict shows a builder over its call budget.
+  4 no log event since the previous verdict shows a builder over its call budget;
+  5 once every function is proven and state.json has a polish phase, its final audit found 0 issues.
 Otherwise BAD, with at most 5 reds ranked by harm, each naming its automatic action (R in an action is the repo).
 Reads spec/FUNCTIONS.md (the committed truth for proven, R-a), .overhaul/state.json and .overhaul/log.jsonl; the
 paths follow overhaul.toml [paths]. Writes .overhaul/verdict.json, appends a "verdict" event to .overhaul/log.jsonl
 and prints one line:
-  VERDICT GOOD|BAD proven N/T rate X/h reds: ...
+  VERDICT GOOD|BAD proven N/T rate X/h [issues K] reds: ...
+(issues K is the polish phase's latest audit count, shown once it has started.)
 The rate is proven per hour over the last 3 h of state.json proven_history, measured up to now.
   py -3 verdict.py --repo R [--no-checks] [--timeout S]     exit 0 GOOD, 1 BAD, 2 no repo
 """
@@ -271,6 +273,14 @@ def judge(p, prev, t_now, checks, events):
         since_txt = f"previous verdict {prev_proven}" if prev_proven is not None else "first verdict"
         reds.append((2, "progress", f"proven stuck at {proven} ({since_txt})", progress_action(view)))
 
+    pol = state.get("polish") if isinstance(state.get("polish"), dict) else None
+    issues = pol.get("issues") if pol else None
+    if pol and total and proven == total and (pol.get("status") != "done" or issues != 0):
+        reds.append((2, "polish", f"polish {pol.get('status')}: {'?' if issues is None else issues} issues "
+                     f"after round {pol.get('round')}",
+                     "drive.py --repo R runs the polish audit and fix passes; issues left after [limits] "
+                     "polish_rounds are in R/.overhaul/polish/: fix them or raise polish_rounds"))
+
     seq = as_int(prev.get("seq")) + 1
     cycle = as_int(state.get("cycle"), seq)
     prev_since = prev.get("needs_plan_since") if isinstance(prev.get("needs_plan_since"), dict) else {}
@@ -322,7 +332,9 @@ def judge(p, prev, t_now, checks, events):
             "prev_proven": prev_proven, "rate_per_h": round(rate, 2), "counts": counts,
             "reds": [{"kind": k, "what": w, "action": a} for _, k, w, a in shown], "reds_total": len(reds),
             "checks": checks if checks is not None else "skipped", "needs_plan_since": since,
-            "line": f"VERDICT {verdict} proven {proven}/{total} rate {rate:.1f}/h reds: {text}"}
+            "polish_issues": issues,
+            "line": f"VERDICT {verdict} proven {proven}/{total} rate {rate:.1f}/h"
+                    f"{'' if pol is None else ' issues ' + ('?' if issues is None else str(issues))} reds: {text}"}
 
 
 def write_atomic(path, text):

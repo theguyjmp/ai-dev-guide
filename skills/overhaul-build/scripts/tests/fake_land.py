@@ -12,6 +12,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--repo", required=True)
 ap.add_argument("--fn", required=True)
 ap.add_argument("--main", default="main")
+ap.add_argument("--polish", action="store_true")
 a = ap.parse_args()
 repo = Path(a.repo)
 (repo / ".overhaul").mkdir(parents=True, exist_ok=True)
@@ -60,6 +61,10 @@ try:
     if mode == "slow":
         time.sleep(1.5)  # a long land keeps the lock this long
     git("merge", "--no-edit", "fn/" + a.fn)
+    if a.polish:  # no FUNCTIONS row, no state.json entry
+        log("polish_land_ok", "landed")
+        print("landed " + a.fn)
+        sys.exit(0)
     spec = repo / "spec" / "FUNCTIONS.md"
     text = re.sub(r"^(\| " + re.escape(a.fn) + r" \|.*)\| planned \|[ \t]*$", r"\1| proven |",
                   spec.read_text(encoding="utf-8"), flags=re.M)
