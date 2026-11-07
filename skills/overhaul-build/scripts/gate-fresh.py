@@ -10,7 +10,7 @@ REPO = r"<repo>"
 LOG = r"C:\vc\gatebot.log"
 JOBS = r"<data>\jobs"
 QUIET = 120
-DEPLOY_LOCK = r"Z:c-deploy\deploy.lock"
+DEPLOY_LOCK = "<data>/deploy.lock"
 DEPLOYED = r"<harness>\gate-deployed.txt"
 
 
