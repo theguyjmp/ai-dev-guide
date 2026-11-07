@@ -336,6 +336,15 @@ def lines(s, fleet, mark=True):
         ok.append("wait armed")
     else:
         out.append(f"WAIT unarmed (.wait-armed {fmt(s['wait_age'])}): arm FLEET/bin/wait.sh in the background before ending this turn")
+    beats = sorted(glob.glob(os.path.join(fleet, "heartbeat", "20*.md")), key=os.path.getmtime)
+    if beats:  # MANAGING: BAD in the newest heartbeat blocks until a red-fix or ruling newer than it exists
+        first = (open(beats[-1], encoding="utf-8", errors="replace").read(400).splitlines() or [""])
+        bad = next((l for l in first if l.startswith("MANAGING: BAD")), None)
+        acted = [f for f in glob.glob(os.path.join(fleet, "heartbeat", "redfix-*.md"))
+                 if os.path.getmtime(f) > os.path.getmtime(beats[-1])]
+        if bad and not acted:
+            s["managing_bad"] = bad
+            out.append(f"{bad[:220]}: act on it now (launch red-fix on that cause, or do the FIX); the turn cannot end until you do")
     if s.get("stall"):
         out.append(f"STALL {s['stall']}: launch a root-cause agent on the phase gate's critical path now (FLEET/briefs/red-fix.md "
                    f"with 'critical path only'); launch no builders until a merge or a proven function moves")
