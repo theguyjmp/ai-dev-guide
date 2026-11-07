@@ -130,7 +130,17 @@ if mode == "hang":
 if mode == "outside":  # edits a protected file and leaves it uncommitted
     p = Path("spec/FUNCTIONS.md")
     p.write_text(p.read_text(encoding="utf-8") + "\\n<!-- edited by the builder -->\\n", encoding="utf-8")
-if mode == "ok":
+if mode == "stray":  # also writes into another module's paths
+    p = Path("src") / "beta" / (fid.lower() + "_stray.py")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("STRAY = 1" + chr(10), encoding="utf-8")
+if mode == "cycle":  # a change the cycles check fails, as F09 of trial 3 did
+    p = Path("src") / field("- Module:") / (fid.lower() + ".py")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# CYCLE" + chr(10), encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", f"{fid}: build {n}")
+if mode in ("ok", "stray"):
     p = Path("src") / field("- Module:") / (fid.lower() + ".py")
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(f"def run():\\n    return '{fid} real work'\\n", encoding="utf-8")
@@ -176,7 +186,8 @@ class Toy(unittest.TestCase):
 
     def make_repo(self, scenario: dict | None = None, retries: int = 1, timeout_min: float = 30,
                   brief_max: int = 40000, functions: str = FUNCTIONS, max_parallel: int = 2,
-                  conflict_retries: int | None = None, worker_args: str = "", harness_extra: str = "") -> Path:
+                  conflict_retries: int | None = None, worker_args: str = "", harness_extra: str = "",
+                  commands_extra: str = "") -> Path:
         self.root = Path(tempfile.mkdtemp(prefix="drive-test-")).resolve()
         self.addCleanup(self.cleanup_root)
         repo, scripts = self.root / "repo", self.root / "scripts"
@@ -197,6 +208,7 @@ class Toy(unittest.TestCase):
         put(repo / "overhaul.toml", f"""[commands]
 test = "py -3 -m pytest -q tests/unit"
 acceptance = "py -3 -m pytest -q tests/acceptance -k {{test}}"
+{commands_extra}
 
 [limits]
 max_parallel = {max_parallel}
@@ -328,6 +340,64 @@ class TestRetries(Toy):
         self.assertIn("acceptance already green before change", rec["last_reason"])
         builds = [e for e in self.events(repo) if e["event"] == "build_start" and e["fn"] == "F1"]
         self.assertEqual(len(builds), 1)
+
+
+CYCLES = """import pathlib
+import sys
+
+bad = [p for p in pathlib.Path("src").rglob("*.py") if "CYCLE" in p.read_text(encoding="utf-8")]
+for p in bad:
+    print(f"spec/ARCHITECTURE.md:9: Public entry toy.alpha.add_line of module alpha is no module or name it owns")
+print(f"CYCLES FAIL {len(bad)} problems" if bad else "CYCLES OK")
+sys.exit(1 if bad else 0)
+"""
+
+
+class TestTrial3Waste(Toy):
+    """Trial 3 lost builder passes to review fixes outside the allowed paths (F10, F15) and to a cycles failure
+    first seen at land (F09)."""
+
+    def builds(self, repo: Path, fid: str, kind: str = "build_start") -> int:
+        return sum(1 for e in self.events(repo) if e["event"] == kind and e["fn"] == fid)
+
+    def test_review_fix_outside_allowed_paths_goes_to_needs_plan(self):  # F10
+        why = "FAIL whole is not exported by inventory/__init__.py (outside allowed paths); reuse whole(text)"
+        repo = self.make_repo({"F1": {"review": [why, "PASS"]}}, retries=2)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 3, out)
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["attempts"]), ("needs-plan", 0))
+        self.assertIn("plan gap", rec["last_reason"])
+        self.assertEqual(self.builds(repo, "F1"), 1)
+
+    def test_plan_gap_line_goes_to_needs_plan(self):  # F15
+        repo = self.make_repo({"F1": {"review": ["FAIL PLAN-GAP: export a total from inventory", "PASS"]}}, retries=2)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 3, out)
+        self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "needs-plan")
+        self.assertEqual(self.builds(repo, "F1"), 1)
+
+    def test_outside_allowed_paths_on_a_stray_diff_is_a_builder_retry(self):
+        why = "FAIL src/beta/f1_stray.py is outside the allowed paths; remove it"
+        repo = self.make_repo({"F1": {"build": ["stray", "ok"], "review": [why, "PASS"]}}, retries=2)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Attempt 1 failed: review FAIL: src/beta/f1_stray.py", self.seen("F1-build-2.md"))
+
+    def test_cycles_run_before_review_and_reach_the_retry(self):  # F09
+        py = Path(sys.executable).as_posix()
+        repo = self.make_repo({"F1": {"build": ["cycle", "ok"]}}, retries=2,
+                              commands_extra=f'cycles = "{py} tools/cyc.py"')
+        put(repo / "tools" / "cyc.py", CYCLES)
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "cycles tool")
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        brief = self.seen("F1-build-2.md")
+        self.assertIn("Attempt 1 failed: cycles failed (exit 1) in the worktree before review", brief)
+        self.assertIn("Public entry toy.alpha.add_line of module alpha is no module or name it owns", brief)
+        self.assertEqual(self.builds(repo, "F1", "review_pass") + self.builds(repo, "F1", "review_fail"), 1)
+        self.assertFalse(any(e["event"] == "land_fail" for e in self.events(repo)))
 
 
 class TestBudgets(Toy):

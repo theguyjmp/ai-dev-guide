@@ -1,5 +1,10 @@
 # overhaul-plan changelog
 
+## v2 waste fixes from trial 3's pass count, 2026-11-07
+A module with a `Public:` line lists on it every helper other modules are told to reuse (each domain rule home and each
+API bullet naming a dependent module); plan_validate fails it otherwise. In trial 3 the missing `inventory.whole` and
+stock total cost F10 and F15 two builder passes each.
+
 ## v2 quality fixes 2 from trial 3's blind audit, 2026-11-07
 The Policies section now also requires `Untrusted input:` (HTTP framing 400/413 with a body cap, files checked for encoding and schema, export formula injection neutralised, atomic non-temp writes), `Retries:` (bounded, with backoff), `Boundaries:` (each listed function and each HTTP route with a body needs a negative acceptance test) and `Domain rules: <rule> -> <module>.<function>` (one home per rule). tests/conftest.py is required and scaffolded; the toml template adds the `shape` command and the wider ruff set.
 

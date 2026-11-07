@@ -22,6 +22,7 @@ while land.py runs, and defers a write (retried every loop pass) while land.py h
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -51,6 +52,10 @@ PATHS_LINE = re.compile(r"\W*(?:paths?|files)\W*?[:=]\s*(.+)", re.I)
 IN_FLIGHT = ("building", "review", "landing")
 GREEN_BEFORE = "acceptance already green before change"
 CONFLICT = "merge conflict"  # land.py: "merge conflict merging <main> into fn/<id>"
+# A review fix the builder cannot make: the reviewer's PLAN-GAP line, or "outside (the) allowed paths" on a diff
+# that stayed inside them. Such a FAIL goes to needs-plan; another builder pass would only re-learn it.
+PLAN_GAP = re.compile(r"\bPLAN-GAP\b")
+OUTSIDE = re.compile(r"\boutside\s+(?:the\s+|my\s+|its\s+|your\s+)?allowed\s+paths\b", re.I)
 FENCE = {".py": "python", ".rs": "rust", ".js": "javascript", ".ts": "typescript"}
 REVIEW_MAX_CALLS = 20
 REASON_MAX = 1500
@@ -260,6 +265,12 @@ def module_paths(section: str, module: str) -> list[str]:
             if any(items):
                 return [p for p in items if p]
     return [module] if "/" in module else [f"src/{module.replace('.', '/')}/"]
+
+
+def in_paths(path: str, allowed: list[str]) -> bool:
+    """Whether a repo-relative file is under one of the allowed paths (a dir ends in /, * ? [ make a glob)."""
+    return any(fnmatch.fnmatchcase(path, p) if any(c in p for c in "*?[") else
+               path.startswith(p) if p.endswith("/") else path == p for p in allowed)
 
 
 def unit_dirs(cmd: str) -> list[str]:
@@ -587,10 +598,23 @@ class Driver:
         git(self.repo, "worktree", "add", "-q", "-f", "-B", branch, str(wt), self.main)
         return wt
 
-    def allowed(self, f: Fn) -> str:
+    def allowed_lists(self, f: Fn) -> tuple[list[str], list[str]]:
         paths = module_paths(module_section(self.arch, f.module), f.module)
-        tests = unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
+        return paths, unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
+
+    def allowed(self, f: Fn) -> str:
+        paths, tests = self.allowed_lists(f)
         return "\n".join([f"- `{p}`" for p in paths] + [f"- `{t}` (unit tests for this module only)" for t in tests])
+
+    def plan_gap(self, fid: str, notes: str) -> bool:
+        """Whether a review FAIL asks for a change only the plan can allow (see PLAN_GAP)."""
+        if PLAN_GAP.search(notes):
+            return True
+        if not OUTSIDE.search(notes):
+            return False
+        allowed = [p for group in self.allowed_lists(self.fns[fid]) for p in group]
+        changed = git(self.repo, "diff", "--name-only", f"{self.main}...fn/{fid}").splitlines()
+        return all(in_paths(p, allowed) for p in changed)  # else the builder strayed: an ordinary FAIL
 
     def acceptance_text(self, f: Fn) -> str:
         parts = []
@@ -670,7 +694,25 @@ class Driver:
         hits = [p for p in changed if p.startswith(self.protected)]
         if hits:
             return f"changed protected files ({', '.join(hits[:5])}); never edit tests/acceptance, spec or overhaul.toml"
-        return ""
+        return self.cycles_problem(wt)
+
+    def cycles_problem(self, wt: Path) -> str:
+        """The builder gate's cycles check, run on the branch before review: land.py runs it again on the merged
+        tree, so a cycle or a broken Public line found only there costs a review and a land."""
+        cmd = self.cfg["commands"].get("cycles")
+        if not cmd:
+            return ""
+        try:
+            p = subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=self.timeout_s, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return f"cycles check timed out in the worktree: `{cmd}`"
+        if p.returncode == 0:
+            return ""
+        lines = [ln.strip() for ln in (p.stdout + p.stderr).splitlines() if ln.strip()]
+        shown = lines[:4] + (lines[-1:] if len(lines) > 4 else [])
+        return (f"cycles failed (exit {p.returncode}) in the worktree before review: `{cmd}`: " + " / ".join(shown)
+                + ". Run it before you hand back; every name on your module's Public line must exist")
 
     # ---- conflict: main moved under a branch that land.py could not merge ----
     def start_conflict(self, fid: str, reason: str) -> bool:
@@ -780,7 +822,10 @@ class Driver:
             self.set(fid, status="landing")
         else:
             self.log(fid, "review_fail", f"{notes} model={job.model}".strip(), secs, tokens)
-            self.fail(fid, f"review FAIL: {notes or 'no reason given'}")
+            if self.plan_gap(fid, notes):
+                self.park(fid, f"review asks for a change outside the allowed paths (plan gap): {notes}")
+            else:
+                self.fail(fid, f"review FAIL: {notes or 'no reason given'}")
 
     # ---- land ----
     def pump_land(self) -> bool:

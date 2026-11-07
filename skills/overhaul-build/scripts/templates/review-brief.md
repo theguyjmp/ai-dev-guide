@@ -64,6 +64,8 @@ Write `{{review_file}}` with exactly this shape and nothing else:
 - Line 1 is exactly `PASS` or exactly `FAIL`. No other words, no punctuation, no markdown on that line.
 - From line 2, the reasons, one short line each. On a FAIL, name the file and what to change. On a PASS, one
   line saying what you checked.
+- Name only fixes inside the allowed paths. When a fix needs a file outside them (another module must export or
+  change a helper), write that reason on a line starting `PLAN-GAP:`; drive.py sends it to the plan, not the builder.
 
 Do not edit any other file. Do not run the build. Your final message is 2 lines: the verdict, then the main
 reason.
