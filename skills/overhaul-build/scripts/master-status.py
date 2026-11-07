@@ -257,11 +257,17 @@ def status(fleet, check_scheduler=True):
         hist = os.path.join(fleet, ".proven-history")
         now = time.time()
         rows = [l.split() for l in open(hist, encoding="utf-8")] if os.path.exists(hist) else []
-        if not rows or rows[-1][1] != str(st.get("proven")):
+        # Only a RISE counts (owner 2026-11-07: 7 hours of merges, proven flat at 4): a deploy placeholder that read 0
+        # for a minute used to restart this clock and hide the stall.
+        top = max([int(r[1]) for r in rows if len(r) > 1 and r[1].isdigit()] or [-1])
+        cur = st.get("proven")
+        if isinstance(cur, int) and cur > top:
             with open(hist, "a", encoding="utf-8") as f:
-                f.write(f"{int(now)} {st.get('proven')}" + "\n")
-            rows.append([str(int(now)), str(st.get("proven"))])
-        since_proven = (now - int(rows[-1][0])) / 60
+                f.write(f"{int(now)} {cur}\n")
+            rows.append([str(int(now)), str(cur)])
+        top = max([int(r[1]) for r in rows if len(r) > 1 and r[1].isdigit()] or [-1])
+        rise = [r for r in rows if len(r) > 1 and r[1].isdigit() and int(r[1]) == top]  # when the best was first reached
+        since_proven = (now - int(rise[0][0])) / 60 if rise else 0
         merged_1h = None
         repo = b.get("repo", "")
         if repo:
@@ -271,6 +277,9 @@ def status(fleet, check_scheduler=True):
             merged_1h = len(r.stdout.splitlines()) if r.returncode == 0 else None
         if since_proven >= 60 and merged_1h == 0:
             s["stall"] = f"proven {st.get('proven')} unchanged {int(since_proven)} min and 0 gate merges in 1 h"
+        elif since_proven >= 180:  # busy, not finishing: merges land but no function completes (owner 2026-11-07)
+            s["stall"] = (f"proven has not risen in {int(since_proven)} min although {merged_1h} gate merges landed in 1 h: "
+                          "packets land but no function completes; push the function nearest proven to done first")
         s["proven_now"], s["merged_1h"] = st.get("proven"), merged_1h
     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         pass
