@@ -17,6 +17,12 @@ You build ONE function of the rebuild. You work alone in a git worktree and hand
 {{module_section}}
 `````
 
+## Policies (from spec/ARCHITECTURE.md; every module follows them)
+
+`````markdown
+{{policies}}
+`````
+
 ## Allowed paths
 
 You may create or edit ONLY these paths. Every other file is off limits.
@@ -48,12 +54,18 @@ land.py also refuses any branch that edits them, so such an edit can never reach
    A blind reviewer reads your diff and fails any of these.
 3. Add unit tests for the new code under `tests/unit/` (inside the allowed unit-test path above). They test the
    module's own behavior and must pass.
-4. Keep the code readable and free of duplication: reuse what the module and its allowed dependencies already
-   offer instead of copying it.
-5. Run the commands above and make them all pass. Do not stop while one fails.
-6. If the acceptance test is already green before you change anything, change nothing, commit nothing and say
+4. Follow the Policies above. Shared state goes through the persistence owner's API (its lock and atomic
+   write), and errors are raised, reported and logged the way the Errors policy says. If you write shared state
+   that two requests or processes can reach at once, add a unit test that writes it from several threads and
+   checks no write was lost.
+5. No duplication. Before you write a helper, constant or message, search for one (`git grep -n "<words>"`) and
+   import it through the owning module's public API (its `Public:` line or `__init__` exports). Never import a
+   name from inside another module's package. A message or format string is written once, as a named constant.
+6. Run the commands above and make them all pass, lint (line length included) and literals too. Do not stop
+   while one fails.
+7. If the acceptance test is already green before you change anything, change nothing, commit nothing and say
    "acceptance already green before change" in your final message.
-7. Commit all your work on `{{branch}}` in `{{worktree}}` (`git add -A` then `git commit`). Do not push, do not
+8. Commit all your work on `{{branch}}` in `{{worktree}}` (`git add -A` then `git commit`). Do not push, do not
    merge, do not switch branches, do not touch any other worktree or the main checkout.
 
 ## Budget

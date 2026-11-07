@@ -76,7 +76,14 @@ Depends on: -
 ## Module report
 Paths: src/report.py
 Depends on: calc
+
+## Policies
+Concurrency: calc - single-threaded CLI; one process per command
+Persistence: calc - none; nothing is stored
+Errors: calc - usage errors print one line to stderr and exit 2
+Concurrent writers: -
 """
+POLICIES = ARCH[ARCH.index("## Policies"):]
 CALC_T = "tests/acceptance/test_calc.py"
 REPORT_T = "tests/acceptance/test_report.py"
 
@@ -101,7 +108,7 @@ def r3(**kw):
 
 
 def toml(**over):
-    cmds = {"test": OK, "acceptance": ACCEPT, "lint": OK, "dup": OK, "cycles": FAST, "entry_lint": FAST}
+    cmds = {"test": OK, "acceptance": ACCEPT, "lint": OK, "dup": OK, "literals": FAST, "cycles": FAST, "entry_lint": FAST}
     cmds.update(over)
     body = "\n".join(f"{k} = '{v}'" for k, v in cmds.items() if v is not None)
     return f"[commands]\n{body}\n[limits]\nmax_parallel = 4\n[paths]\nfunctions = 'spec/FUNCTIONS.md'\n"
@@ -195,7 +202,7 @@ class StaticChecks(Base):
         cyc = ARCH.replace("Depends on: -", "Depends on: report")
         self.only(self.problems(self.make(arch=cyc)), "module cycle")
         styled = "## Module calc\n- **Paths:** `src/tiny.py`\n- **Depends on:** none\n### API\ntext\n## Module report\nPaths: src/r.py\nDepends on: calc\n"
-        self.assertEqual(self.problems(self.make(arch=styled)), [])
+        self.assertEqual(self.problems(self.make(arch=styled + POLICIES)), [])
 
     def test_no_entry(self):
         for entry in ("", "-", "`-`", "TBD"):
@@ -304,6 +311,50 @@ class Cli(Base):
         passing = table(R1, row("F002", deps="F001", acc=f"{CALC_T}::test_add", status="planned"))
         code, out, _ = self.cli("--repo", str(self.make(passing)), "--run")
         self.assertEqual((code, out[-1]), (1, "PLAN FAIL 1 problems"))
+
+
+class QualityPolicies(Base):
+    def test_policies_required(self):
+        found = self.problems(self.make(arch=ARCH[:ARCH.index("## Policies")]))
+        for key in ("`Concurrency:", "`Persistence:", "`Errors:", "`Concurrent writers:"):
+            self.assertTrue(self.has(found, "## Policies has no", key), found)
+
+    def test_policy_owner_must_be_a_module(self):
+        found = self.problems(self.make(arch=ARCH.replace("Errors: calc -", "Errors: nobody -")))
+        self.only(found, "policy errors: owner nobody is no module")
+        found = self.problems(self.make(arch=ARCH.replace("Errors: calc -", "Errors:")))
+        self.only(found, "policy errors: write `<owner module> - <policy>`")
+
+    def test_concurrent_writer_needs_concurrent_test(self):
+        arch = ARCH.replace("Concurrent writers: -", "Concurrent writers: F001")
+        self.only(self.problems(self.make(arch=arch)), "F001 writes shared state concurrently")
+        acc = f"{CALC_T}::test_add; {CALC_T}::test_add_concurrent"
+        root = self.make(functions=table(row(acc=acc), R2, r3()), arch=arch)
+        (root / CALC_T).write_text(CALC + "\n\ndef test_add_concurrent():\n    assert tiny('add', '1', '1') == '2'\n",
+                                   encoding="utf-8")
+        self.assertEqual(self.problems(root), [])
+
+    def test_http_write_route_must_be_a_concurrent_writer(self):
+        threaded = ARCH.replace("single-threaded CLI; one process per command", "threaded HTTP server; one lock")
+        found = self.problems(self.make(functions=table(row(entry="`POST /add`"), R2, r3()), arch=threaded))
+        self.only(found, "F001 is an HTTP write (`POST /add`) but not in Concurrent writers")
+        self.assertEqual(self.problems(self.make(functions=table(row(entry="`POST /add`"), R2, r3()))), [])
+
+    def test_ruff_lint_must_be_strict(self):
+        found = self.problems(self.make(lint="py -3 -m ruff check ."))
+        self.assertEqual(len(found), 2, found)
+        self.assertTrue(self.has(found, "does not select E501"), found)
+        self.assertTrue(self.has(found, "misses the strict set: select E W F I B UP SIM RUF"), found)
+        self.only(self.problems(self.make(lint="ruff check --select E501,F .")), "misses the strict set: select E W I")
+        self.assertEqual(self.problems(self.make(lint="ruff check --select E,W,F,I,B,UP,SIM,RUF .")), [])
+        root = self.make(lint="py -3 -m ruff check .")
+        (root / "pyproject.toml").write_text('[tool.ruff]\nline-length = 88\n[tool.ruff.lint]\n'
+                                             'select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "C90"]\n',
+                                             encoding="utf-8")
+        self.assertEqual(self.problems(root), [])
+
+    def test_literals_command_required(self):
+        self.only(self.problems(self.make(literals=None)), "[commands].literals is missing")
 
 
 if __name__ == "__main__":

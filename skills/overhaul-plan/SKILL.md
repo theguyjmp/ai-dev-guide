@@ -62,20 +62,29 @@ ARCHITECTURE.md format: one section per module; any other line in it (public API
     ## Module <name>
     Paths: src/shop/core/, src/shop/money.py
     Depends on: base, util
+    Public: shop.core, shop.money.cents
 Paths: repo-relative, comma-separated; a trailing / is a directory; * ? [ make a glob; a file belongs to the module
 whose matching path is the longest. Depends on: the modules it may import, comma-separated; - or none for none.
+Public (optional, Python): the dotted modules and names other modules may import; a whole module listed allows every
+name in it. Without it, a module's public face is the __init__.py of each Paths directory and each Paths file, and an
+__init__.py with a literal __all__ exports only those names.
 ```
-For example (the Owns and Public API lines are free text):
+For example (`Public:` is checked: other modules import only these names; Owns and the API bullets are free text):
 ```
 ## Module cart
 Paths: src/shop/cart/
 Depends on: app, catalog
+Public: shop.cart.add_line, shop.cart.lines, shop.cart.register
 Owns: the cart table.
-Public API:
 - `add_line(sku: str, qty: int) -> Line` [F04]
 - `lines() -> list[Line]` [F03]
 - `register(sub)` adds the `cart` commands [F03, F04]
 ```
+- One `## Policies` section, each line `<owner module> - <policy>` [by plan_validate.py]: `Concurrency:` (server
+  model, what locks), `Persistence:` (the ONE module that reads and writes stored state; atomic writes through a
+  unique temp file then replace), `Errors:` (typed errors, how the entry reports them, what is logged), and
+  `Concurrent writers:` listing every function that writes shared state two clients can reach at once; each needs
+  an acceptance test named `test_<f>_concurrent` (parallel clients through the entry, every write kept).
 - Unit tests for module m go in `tests/unit/m/`. Each data store has one owning module; the others use its API.
 - Every module owns at least one function. The graph is acyclic: code two modules need lives in the lower one, as
   an API item tagged with the function that builds it, and each user lists that function in its deps.
@@ -100,8 +109,9 @@ The commands are the gates land.py runs on the whole tree. Python, with `<overha
 [commands]
 test       = "py -3 -m pytest -q tests/unit"
 acceptance = "py -3 -m pytest -q tests/acceptance -k {test}"
-lint       = "py -3 -m ruff check ."
+lint       = "py -3 -m ruff check --line-length 88 --select E,W,F,I,B,UP,SIM,C4,RET,PIE,RUF,C90 ."
 dup        = "py -3 -m pylint --disable=all --enable=duplicate-code --min-similarity-lines=6 --recursive=y src"
+literals   = "py -3 <overhaul-build>/scripts/dup_literals.py src"
 cycles     = "py -3 <overhaul-build>/scripts/check_cycles.py src"
 entry_lint = "py -3 <overhaul-build>/scripts/entry_lint.py tests/acceptance"
 [limits]
@@ -115,8 +125,8 @@ architecture = "spec/ARCHITECTURE.md"
 state = ".overhaul/state.json"
 ```
 Rust: `cargo clippy -- -D warnings`, `cargo test`, cycles from `cargo metadata`; JS: `npx eslint .`, `npx jscpd src`,
-`node --test`. Install what is missing now (`py -3 -m pip install ruff pylint pytest`); then test, lint, dup, cycles
-and entry_lint must each exit 0 on the skeleton.
+`node --test`. Install what is missing now (`py -3 -m pip install ruff pylint pytest`); then test, lint, dup, literals,
+cycles and entry_lint must each exit 0 on the skeleton.
 
 ## Step 7. Validate until PLAN OK
 Run `py -3 <overhaul-build>/scripts/plan_validate.py --repo <rebuild> --run`, fix the first reported line, repeat.
@@ -177,6 +187,8 @@ checking only the exit code.
 ## Rules
 - The plan is done only at PLAN OK: every function has a public entry, an acceptance test that exists and fails now, and deps in the same or an earlier phase [by plan_validate.py --run].
 - Acceptance tests reach the product only through `_entry.py`: no product imports, mocks or fakes [by entry_lint.py].
-- The module graph is acyclic [by check_cycles.py].
+- The module graph is acyclic and modules import each other only through `Public:` names [by check_cycles.py].
+- Each cross-cutting policy has one owner, and every concurrent writer has a concurrent acceptance test [by plan_validate.py].
+- Lint enforces line length and the strict set, and no 20+ char literal is written twice [by plan_validate.py and dup_literals.py].
 - A function counts only when its test is red on main, green after the merge, and every proven test stays green [by land.py].
 - Builders never edit tests/acceptance or leave their module's Paths [by drive.py's brief and the blind review].

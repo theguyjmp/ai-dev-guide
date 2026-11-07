@@ -2,6 +2,14 @@
 
 Why each rule exists, newest first. Full v1 history: `git log -- skills/overhaul-build` (71 commits, 2026-11-05 to 2026-11-07).
 
+## v2 quality fixes from trial 1's blind audit, 2026-11-07
+Trial 1's rebuild scored 8/10: an unlocked load-modify-save with a fixed temp-file name under a ThreadingHTTPServer (lost orders and 500s, while every acceptance test was sequential), two stores with different error handling, three imports past a module's public API, one message written 3 times and a re-implemented helper, and 76 lines over 88 columns. Each now has a mechanism:
+- check_cycles.py fails a Python import into another module that misses its `Public:` names (or, without that line, its `__init__.py` face and `__all__`).
+- dup_literals.py (new `literals` gate in land.py) fails a 20+ char string literal written in 2+ places outside tests.
+- plan_validate.py requires `literals`, a ruff lint selecting E501 and the strict set E W F I B UP SIM RUF, a `## Policies` section (Concurrency, Persistence and Errors, each with one owner module) and a `Concurrent writers:` line whose functions each have a `concurrent` acceptance test; an HTTP write route must be listed unless the server is single-threaded.
+- entry_lint.py allows threading and concurrent.futures, so acceptance tests can drive parallel clients.
+- drive.py puts the Policies section in the build and review briefs; the review brief is a 7-item checklist (scope, real behavior, concurrency, errors, public API, no re-implementation after a search, readability).
+
 ## v2 trial 1 fixes, 2026-11-07
 Trial 1 took 26 builds for 20 functions. 5 landings failed with "merge conflict merging main into fn/<id>" between parallel builders in one module, and F05 and F08 spent 3 passes each on it, because every conflict cost a whole attempt (a rebuild from main). Now:
 - A function never launches while another function of its module (the FUNCTIONS `module` column) is in flight, so parallelism comes from different modules.

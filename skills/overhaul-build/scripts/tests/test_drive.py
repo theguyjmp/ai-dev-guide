@@ -246,8 +246,8 @@ scripts_dir = "{scripts.as_posix()}"
 class TestTemplates(unittest.TestCase):
     def test_every_placeholder_is_one_drive_fills(self):
         build = "id attempt worktree branch row entry module module_section allowed_paths " \
-                "acceptance_source commands max_calls previous".split()
-        review = "id branch row allowed_paths acceptance_source review_file diffstat diff max_calls".split()
+                "acceptance_source policies commands max_calls previous".split()
+        review = "id branch row allowed_paths acceptance_source review_file policies diffstat diff max_calls".split()
         conflict = "id pass worktree branch main module reason row allowed_paths commands max_calls".split()
         for name, keys in (("build-brief.md", build), ("review-brief.md", review),
                            ("conflict-brief.md", conflict)):

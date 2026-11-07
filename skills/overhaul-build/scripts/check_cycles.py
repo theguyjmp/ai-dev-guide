@@ -4,13 +4,18 @@ ARCHITECTURE.md format: one section per module; any other line in it (public API
     ## Module <name>
     Paths: src/shop/core/, src/shop/money.py
     Depends on: base, util
+    Public: shop.core, shop.money.cents
 Paths: repo-relative, comma-separated; a trailing / is a directory; * ? [ make a glob; a file belongs to the module
 whose matching path is the longest. Depends on: the modules it may import, comma-separated; - or none for none.
+Public (optional, Python): the dotted modules and names other modules may import; a whole module listed allows every
+name in it. Without it, a module's public face is the __init__.py of each Paths directory and each Paths file, and an
+__init__.py with a literal __all__ exports only those names.
 Fails, printing `file:line: message` per violation, on a malformed module section, a cycle in the declared graph,
-a real import between modules that the declared deps do not allow, a cycle in the real module graph, and an import
-cycle between Python files. Real imports: Python (ast, exact; `if TYPE_CHECKING:` imports are left out of file
-cycles), Rust (`use crate::|super::|self::`, `mod x;`, workspace crate paths, Cargo path and workspace deps) and
-JS/TS (import, export from, require, import()); Rust and JS are best effort.
+a real import between modules that the declared deps do not allow, a cycle in the real module graph, an import
+cycle between Python files, and a Python import into another module past its public API (Public, else its face).
+Real imports: Python (ast, exact; `if TYPE_CHECKING:` imports are left out of file cycles), Rust
+(`use crate::|super::|self::`, `mod x;`, workspace crate paths, Cargo path and workspace deps) and JS/TS
+(import, export from, require, import()); Rust and JS are best effort.
     py -3 check_cycles.py [--repo R] [--arch spec/ARCHITECTURE.md] [path ...]
 Paths (overhaul.toml runs `check_cycles.py src`) limit the scan to files under them, and a source file there that
 no module owns is a violation; without paths every owned file is scanned. Exit 0 clean, 1 violations.
@@ -29,7 +34,7 @@ JS = (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts")
 SRC = (".py", ".rs") + JS
 MANIFESTS = ("Cargo.toml", "package.json")
 MOD_RE = re.compile(r"##\s+Module:?\s+`?([A-Za-z0-9_.\-]+)`?")
-KEY_RE = re.compile(r"\s*(?:[-*]\s+)?\**\s*(paths|depends on)\s*\**\s*:\s*\**(.*)$", re.I)
+KEY_RE = re.compile(r"\s*(?:[-*]\s+)?\**\s*(paths|depends on|public)\s*\**\s*:\s*\**(.*)$", re.I)
 RS_MOD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_]\w*)\s*;", re.M)
 RS_PATH = re.compile(r"\b(crate|super|self)(?=\s*::)((?:\s*::\s*[A-Za-z_]\w*)*)(\s*::\s*\{([^{}]*)\})?")
 RS_EXT = re.compile(r"\b([A-Za-z_]\w*)\s*::")
@@ -102,7 +107,7 @@ def parse_architecture(text):
             if m and m.group(1) in mods:
                 probs.append((n, f"module {m.group(1)} is defined twice"))
             elif m:
-                cur = mods[m.group(1)] = {"line": n, "paths": [], "deps": [], "keys": set()}
+                cur = mods[m.group(1)] = {"line": n, "paths": [], "deps": [], "public": [], "keys": set()}
             continue
         k = KEY_RE.match(line) if cur else None
         if not k:
@@ -113,6 +118,8 @@ def parse_architecture(text):
         items = [i[0] for i in items if i and i[0].lower() not in ("-", "none")]
         if key == "paths":
             cur["paths"] += [(norm_path(i), n) for i in items]
+        elif key == "public":
+            cur["public"] += [(i, n) for i in items]
         else:
             cur["deps"] += [(i, n) for i in items]
     claimed = {}
@@ -254,21 +261,99 @@ def py_edges(rel, text, fset, idx):
     edges = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            targets = [py_resolve(idx, a.name, rel) for a in node.names]
+            targets = [(py_resolve(idx, a.name, rel), None) for a in node.names]
         elif isinstance(node, ast.ImportFrom) and node.level:
             base = posixpath.dirname(rel)
             for _ in range(node.level - 1):
                 base = posixpath.dirname(base)
             pkg = join(base, (node.module or "").replace(".", "/"))
             tail = [pkg + ".py", join(pkg, "__init__.py")] if node.module else [join(pkg, "__init__.py")]
-            targets = [first(fset, [join(pkg, a.name + ".py"), join(pkg, a.name, "__init__.py")] + tail)
-                       for a in node.names]
+            targets = []
+            for a in node.names:
+                sub = first(fset, [join(pkg, a.name + ".py"), join(pkg, a.name, "__init__.py")])
+                targets.append((sub, None) if sub else (first(fset, tail), a.name))
         elif isinstance(node, ast.ImportFrom):
-            targets = [py_resolve(idx, f"{node.module}.{a.name}", rel) for a in node.names]
+            whole = py_resolve(idx, node.module, rel)
+            targets = [(t, a.name if t == whole else None)
+                       for a in node.names for t in [py_resolve(idx, f"{node.module}.{a.name}", rel)]]
         else:
             continue
-        edges += [(node.lineno, t, id(node) in guarded) for t in targets if t and t != rel]
+        edges += [(node.lineno, t, id(node) in guarded, name) for t, name in targets if t and t != rel]
     return edges, None
+
+
+def py_public(idx, entry):
+    """(file, name or None) that a dotted Public entry names, or None when it is no module in the tree."""
+    parts = entry.split(".")
+    for k in range(len(parts), 0, -1):
+        if ".".join(parts[:k]) in idx:
+            if k < len(parts) - 1:
+                return None
+            return py_resolve(idx, ".".join(parts[:k]), ""), (parts[k] if k < len(parts) else None)
+    return None
+
+
+def top_names(text):
+    """Names bound at module level: defs, classes, assignments and imports."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return set()
+    names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            for t in getattr(node, "targets", [getattr(node, "target", None)]):
+                names.update(n.id for n in ast.walk(t) if isinstance(n, ast.Name))
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update((a.asname or a.name).split(".")[0] for a in node.names)
+    return names
+
+
+def dunder_all(text):
+    """The literal names in a module-level __all__, or None when there is none."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "__all__" for t in node.targets)
+                and isinstance(node.value, (ast.List, ast.Tuple))):
+            return {e.value for e in node.value.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+    return None
+
+
+def public_problems(repo, mods, idx, arch, py_edges_out):
+    """Python imports into another module that miss its Public entries (or, without them, its face files)."""
+    out, listed, alls = [], {}, {}
+    for name, mod in mods.items():
+        if mod["public"]:
+            listed[name] = set()
+        for entry, n in mod["public"]:
+            hit = py_public(idx, entry)
+            if hit and owner(mods, hit[0]) == name and (
+                    hit[1] is None or hit[1] in top_names(read(os.path.join(repo, hit[0])))):
+                listed[name].add(hit)
+            elif any(owner(mods, f) == name for cands in idx.values() for _, f in cands):
+                out.append(f"{arch}:{n}: Public entry {entry} of module {name} is no module or name it owns")
+    for src, line, tgt, b, name in py_edges_out:
+        if b in listed:
+            ok = (tgt, None) in listed[b] or (tgt, name) in listed[b] or (
+                name in (None, "*") and any(f == tgt for f, _ in listed[b]))
+        else:
+            face = any(p.rstrip("/") == tgt or (p.endswith("/") and tgt == p + "__init__.py")
+                       for p, _ in mods[b]["paths"])
+            if face and name not in (None, "*") and tgt.endswith("__init__.py"):
+                if tgt not in alls:
+                    alls[tgt] = dunder_all(read(os.path.join(repo, tgt)))
+                face = alls[tgt] is None or name in alls[tgt]
+            ok = face
+        if not ok:
+            what = f"{name} from {tgt}" if name else tgt
+            out.append(f"{src}:{line}: imports {what}, past the public API of module {b}; "
+                       f"use a name module {b} exports, or add it to its Public: line in {arch}")
+    return out
 
 
 def strip_comments(text, quotes):
@@ -444,10 +529,12 @@ def check(repo, arch=None, roots=None):
             found = cargo_edges(f, text, crates, crate_dirs)
         else:
             found = []
-        edges += [(f, line, tgt, tonly) for line, tgt, tonly in found]
-    scanned, mgraph, fgraph = set(scan), {}, {}
-    for src, line, tgt, tonly in edges:
+        edges += [(f, line, tgt, tonly, rest[0] if rest else None) for line, tgt, tonly, *rest in found]
+    scanned, mgraph, fgraph, cross_py = set(scan), {}, {}, []
+    for src, line, tgt, tonly, name in edges:
         a, b = owner(mods, src), owner(mods, tgt)
+        if b and a != b and src.endswith(".py") and tgt.endswith(".py"):
+            cross_py.append((src, line, tgt, b, name))
         if b and a != b:
             mgraph.setdefault(a, {}).setdefault(b, f"{src}:{line}")
             if b not in allowed[a]:
@@ -459,6 +546,7 @@ def check(repo, arch=None, roots=None):
         out.append(f"{mgraph[cyc[0]][cyc[1]]}: import cycle between modules: {' -> '.join(cyc)}")
     for cyc in cycles(fgraph):
         out.append(f"{cyc[0]}:{fgraph[cyc[0]][cyc[1]]}: import cycle: {' -> '.join(cyc)}")
+    out += public_problems(repo, mods, idx, arch, cross_py)
     return list(dict.fromkeys(out)), len(mods), len(scan)
 
 

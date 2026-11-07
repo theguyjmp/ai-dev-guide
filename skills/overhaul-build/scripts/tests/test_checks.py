@@ -106,8 +106,47 @@ class CyclesTest(ToyCase):
         self.pkg("core", "api")
         self.write("src/toy/core/money.py", "import json\n\n\ndef cents(x):\n    return json.dumps(x)\n")
         self.write("src/toy/api/routes.py", PRICE)
-        self.write("spec/ARCHITECTURE.md", arch(("core", "src/toy/core/", "-"), ("api", "src/toy/api/", "core")))
+        self.write("spec/ARCHITECTURE.md", arch(("core", "src/toy/core/", "-\nPublic: toy.core.money"),
+                                                ("api", "src/toy/api/", "core")))
         self.assertIn("CYCLES OK 2 modules", self.assert_clean(CYCLES))
+
+    def public_toy(self, core_public=""):
+        self.pkg("core", "api")
+        self.write("src/toy/core/__init__.py", "from toy.core.money import cents\n\n__all__ = [\"cents\"]\n")
+        self.write("src/toy/core/money.py", "CURRENCY = 1\n\n\ndef cents(x):\n    return x\n")
+        deps = "-" + (f"\nPublic: {core_public}" if core_public else "")
+        self.write("spec/ARCHITECTURE.md", arch(("core", "src/toy/core/", deps), ("api", "src/toy/api/", "core")))
+
+    def test_import_through_face_passes(self):
+        self.public_toy()
+        self.write("src/toy/api/routes.py", "from toy.core import cents\n")
+        self.assert_clean(CYCLES)
+
+    def test_import_past_face_fails(self):
+        self.public_toy()
+        self.write("src/toy/api/routes.py", "from toy.core.money import CURRENCY\n")
+        out = self.assert_fails(CYCLES)
+        self.assertIn("src/toy/api/routes.py:1: imports CURRENCY from src/toy/core/money.py, past the public API "
+                      "of module core", out)
+
+    def test_name_missing_from_dunder_all_fails(self):
+        self.public_toy()
+        self.write("src/toy/api/routes.py", "from toy.core import money\n")
+        out = self.assert_fails(CYCLES)
+        self.assertIn("imports src/toy/core/money.py, past the public API of module core", out)
+
+    def test_public_line_allows_listed_names_only(self):
+        self.public_toy("toy.core.money.cents")
+        self.write("src/toy/api/routes.py", "from toy.core.money import cents\n")
+        self.assert_clean(CYCLES)
+        self.write("src/toy/api/routes.py", "from toy.core.money import CURRENCY\n")
+        self.assertIn("imports CURRENCY from src/toy/core/money.py", self.assert_fails(CYCLES))
+
+    def test_unknown_public_entry_fails(self):
+        self.public_toy("toy.core.nothing_here.x")
+        self.write("src/toy/api/routes.py", "")
+        out = self.assert_fails(CYCLES)
+        self.assertIn("Public entry toy.core.nothing_here.x of module core is no module or name it owns", out)
 
     def test_longest_path_wins(self):
         self.pkg("core")
@@ -205,6 +244,44 @@ class EntryLintTest(ToyCase):
         self.assertIn("ENTRY LINT OK 1 files", self.assert_clean(ENTRY, "tests/acceptance"))
         self.assertIn("tests/unit/test_u.py:1: imports `collections`", self.assert_fails(ENTRY, "tests/unit"))
         self.assertIn("tests/nope:1: not found", self.assert_fails(ENTRY, "tests/nope"))
+
+    def test_concurrent_test_may_use_threads(self):
+        self.write("tests/acceptance/test_burst.py",
+                   "import threading\nfrom concurrent.futures import ThreadPoolExecutor\n\n\n"
+                   "def test_burst():\n    assert threading and ThreadPoolExecutor\n")
+        self.assert_clean(ENTRY)
+
+
+LITERALS = os.path.join(SCRIPTS, "dup_literals.py")
+MSG = "qty must be a positive whole number"
+
+
+class DupLiteralsTest(ToyCase):
+    def test_repeat_across_files_fails(self):
+        self.write("src/toy/a.py", f'def a():\n    raise ValueError("{MSG}")\n')
+        self.write("src/toy/b.py", f'\n\ndef b(q):\n    return f"{MSG}: {{q}}"\n')
+        out = self.assert_fails(LITERALS)
+        self.assertIn("src/toy/a.py:2: literal", out)
+        self.assertIn("is repeated at src/toy/b.py:4; define it once and import it", out)
+
+    def test_repeat_in_one_file_fails(self):
+        self.write("src/toy/a.py", f'X = "{MSG}"\nY = "{MSG}"\n')
+        self.assertIn("src/toy/a.py:1: literal", self.assert_fails(LITERALS))
+
+    def test_docstrings_short_literals_and_tests_pass(self):
+        doc = f'"""{MSG}."""\n'
+        self.write("src/toy/a.py", doc + f'\n\ndef a():\n    {doc}    return "short text"\n')
+        self.write("src/toy/b.py", doc + 'NAME = "short text"\n')
+        self.write("src/toy/tests/test_a.py", f'M = "{MSG}"\n')
+        self.write("tests/unit/test_b.py", f'M = "{MSG}"\n')
+        self.write("src/toy/c.py", f'M = "{MSG}"\n')
+        self.assertIn("LITERALS OK 3 files", self.assert_clean(LITERALS))
+
+    def test_js_and_min_flag(self):
+        self.write("src/web/a.ts", "export const a = 'no such item in stock';\n")
+        self.write("src/web/b.ts", 'throw new Error("no such item in stock");\n')
+        self.assert_fails(LITERALS)
+        self.assert_clean(LITERALS, "--min", "40")
 
 
 if __name__ == "__main__":

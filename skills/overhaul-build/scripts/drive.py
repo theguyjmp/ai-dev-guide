@@ -623,7 +623,7 @@ class Driver:
             "module": f.module, "module_section": module_section(self.arch, f.module)
             or "(spec/ARCHITECTURE.md has no section naming this module)",
             "allowed_paths": self.allowed(f), "acceptance_source": self.acceptance_text(f),
-            "commands": self.commands_text(f), "max_calls": str(self.max_calls), "previous": previous})
+            "policies": self.policies(), "commands": self.commands_text(f), "max_calls": str(self.max_calls), "previous": previous})
         tokens = len(brief) // 4
         if tokens > self.max_tokens:
             self.park(f.id, f"brief is {tokens} tokens, over brief_max_tokens {self.max_tokens}; "
@@ -733,6 +733,11 @@ class Driver:
         return ""
 
     # ---- review ----
+    def policies(self) -> str:
+        """The `## Policies` section of ARCHITECTURE.md: concurrency, persistence and error owners."""
+        return (module_section(self.arch, "Policies")
+                or "(spec/ARCHITECTURE.md declares no Policies section; re-run plan_validate.py)")
+
     def start_review(self, fid: str, attempt: int) -> None:
         f, branch = self.fns[fid], f"fn/{fid}"
         review_file = self.ov / "reviews" / f"{fid}.txt"
@@ -740,6 +745,7 @@ class Driver:
         brief = render("review-brief.md", {
             "id": fid, "branch": branch, "row": self.row_table(f), "allowed_paths": self.allowed(f),
             "acceptance_source": self.acceptance_text(f), "review_file": review_file.as_posix(),
+            "policies": self.policies(),
             "diffstat": git(self.repo, "diff", "--stat", f"{self.main}...{branch}").rstrip(),
             "diff": git(self.repo, "diff", f"{self.main}...{branch}").rstrip(),
             "max_calls": str(REVIEW_MAX_CALLS)})

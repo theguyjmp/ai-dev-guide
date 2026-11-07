@@ -2,7 +2,8 @@
 
 Every .py file under tests/acceptance/ may import only these modules (a name also allows its submodules):
     subprocess, urllib, http.client, json, pathlib, tempfile, os, sys, time, socket, re, shutil, signal,
-    pytest, and the local helper _entry (tests/acceptance/_entry.py)
+    threading, concurrent.futures (for concurrent tests), pytest, and the local helper _entry
+    (tests/acceptance/_entry.py)
 It may not use unittest.mock, MagicMock, patch or monkeypatch (nor Mock, AsyncMock, MonkeyPatch, mocker), and it may
 not import any product package. Drive the product as a user does: a CLI through subprocess, a server over HTTP.
     py -3 entry_lint.py [--repo R] [path ...]      repo-relative files or dirs; default tests/acceptance
@@ -15,7 +16,7 @@ import posixpath
 import sys
 
 ALLOWED = ("subprocess", "urllib", "http.client", "json", "pathlib", "tempfile", "os", "sys", "time", "socket", "re",
-           "shutil", "signal", "pytest", "_entry")
+           "shutil", "signal", "threading", "concurrent.futures", "pytest", "_entry")
 BANNED = frozenset(("MagicMock", "Mock", "AsyncMock", "patch", "monkeypatch", "MonkeyPatch", "mocker"))
 BANNED_TEXT = frozenset(("monkeypatch", "mocker", "unittest.mock"))
 DEFAULT = "tests/acceptance"
