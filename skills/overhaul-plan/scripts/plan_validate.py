@@ -1,6 +1,6 @@
-"""plan_validate.py: the plan validator the build cannot start without (overhaul-plan Step 8, R6).
+"""plan_validate.py: the plan validator the build cannot start without (overhaul-plan Step 8, R6), and the counting check.
 
-Reads spec/UNITS.md (generated plan data, not protected prose):
+Plan mode reads spec/UNITS.md (generated plan data, not protected prose):
   `Phases: M0, P0, M1, ...` (the phase order), an Owners table `| Owner | Layer | Root |` and a Units table
   `| Unit | Function | Phase | Owner | Test | Calls | Needs | Ext | Allowed | Lines |`.
 A unit is one function, or one plan-made split of it (F394a, F394b), each with its own tests: one unit = one packet.
@@ -13,15 +13,29 @@ Fails (one MISS line each) when, for the phases checked:
   - Allowed is empty, or an Allowed path is outside the owner's Root and is not a test path;
   - an Ext item (toolkit, model download, GPU) is not named in spec/MACHINES.md's provisioning;
   - a FUNCTIONS.md row of the phase has no unit, or a unit names a function FUNCTIONS.md lacks.
-  py -3 plan_validate.py <repo> [--phase M1] [--cap 300] [--callers]
---callers prints the derived import allowlist (owner: callers) that the import lint reads. Exit 1 on any miss.
+  py -3 plan_validate.py <repo> [--phase M1] [--cap 300] [--callers] [--layers]
+--callers prints the derived import allowlist (owner: callers) that the import lint reads.
+
+Counting mode (a tick check row): fails when the project's own proven-counting rule cannot read a named test for
+every function of the phase in spec/FUNCTIONS.md, so a change to counting never again disconnects silently from the plan.
+  py -3 plan_validate.py <repo> --counting --phase M1 [--rule <file.py>:<func>] [--syspath <dir;dir>] [--ref origin/main] [--exists]
+--rule is the counting code itself, called on the FUNCTIONS.md text and returning {function id: names}
+(the pilot project: --rule tools/health/health/sources/gate.py:accept_map --syspath "tools/health;tools/vc", R192); it is loaded
+from the checkout with the --syspath dirs (default <repo>/tools) first on sys.path, as the project's own entry point does. Without --rule a backticked `<file>::<test>` in the row counts. --ref reads FUNCTIONS.md (and, with --exists,
+the test sources) at that git ref. --exists also fails a named test that no file in the repo defines.
+Exit 0 pass, 1 on any miss, 2 on bad usage. Read-only: it writes nothing.
 """
 import collections
+import importlib.util
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
-TEST = re.compile(r"^[\w./-]+::[\w.-]+$")
+TEST = re.compile(r"^[\w./-]+(::[\w.-]+)+$")
+FID = re.compile(r"F\d{3}[a-z]?")
+DEFAULT_NAME = re.compile(r"`([^`\s]+::[^`]+)`")
 
 
 def rows(text, header0):
@@ -44,25 +58,170 @@ def items(cell):
     return [x.strip().strip("`") for x in re.split(r"[,;]\s*", cell or "") if x.strip() and x.strip() not in ("-", "none")]
 
 
+def arg(a, flag, default=None):
+    if flag not in a:
+        return default
+    i = a.index(flag) + 1
+    if i >= len(a):
+        raise SystemExit(f"usage: {flag} needs a value")
+    return a[i]
+
+
+def git(repo, *args):
+    p = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if p.returncode:
+        raise RuntimeError(f"git {' '.join(args)}: {p.stderr.strip()[:200]}")
+    return p.stdout
+
+
+def functions_rows(ftext):
+    """[(id, phase, cells, line)] of the FUNCTIONS table whose header names Id and Phase."""
+    out, cols = [], None
+    for i, line in enumerate(ftext.splitlines(), 1):
+        s = line.strip()
+        if not s.startswith("|"):
+            cols = None
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        low = [c.strip("`* ").lower() for c in cells]
+        if "id" in low and "phase" in low:
+            cols = (low.index("id"), low.index("phase"))
+            continue
+        if cols and len(cells) > max(cols) and FID.fullmatch(cells[cols[0]].strip("`* ")):
+            out.append((cells[cols[0]].strip("`* "), cells[cols[1]].strip("`* "), cells, i))
+    return out
+
+
+def default_rule(ftext):
+    out = {}
+    for fid, _, cells, _ in functions_rows(ftext):
+        names = set(DEFAULT_NAME.findall(" | ".join(cells[1:])))
+        if names:
+            out.setdefault(fid, set()).update(names)
+    return out
+
+
+def load_rule(repo, spec, syspath="tools"):
+    path, _, func = spec.rpartition(":")
+    full = Path(path) if os.path.isabs(path) else repo / path
+    for d in reversed([x for x in re.split(r"[;,]", syspath or "") if x.strip()]):
+        d = d.strip() if os.path.isabs(d.strip()) else str(repo / d.strip())
+        if os.path.isdir(d) and d not in sys.path:
+            sys.path.insert(0, d)
+    s = importlib.util.spec_from_file_location("counting_rule", str(full))
+    if s is None:
+        raise FileNotFoundError(str(full))
+    mod = importlib.util.module_from_spec(s)
+    s.loader.exec_module(mod)
+    return getattr(mod, func)
+
+
+def name_key(n):
+    """(kind, key) of one name the rule returns: a (kind, key) tuple, or a bare `<file>::<test>` string."""
+    if isinstance(n, (tuple, list)) and len(n) == 2:
+        return str(n[0]), str(n[1])
+    return "test", str(n)
+
+
+class Tree:
+    """Repo files at a ref (git) or in the checkout (tracked files), read on demand."""
+
+    def __init__(self, repo, ref):
+        self.repo, self.ref = repo, ref
+        out = git(repo, "ls-tree", "-r", "--name-only", ref) if ref else git(repo, "ls-files")
+        self.by_name = collections.defaultdict(list)
+        for p in out.splitlines():
+            self.by_name[p.rsplit("/", 1)[-1]].append(p)
+
+    def read(self, p):
+        if self.ref:
+            return git(self.repo, "show", f"{self.ref}:{p}")
+        return (self.repo / p).read_text(encoding="utf-8", errors="replace")
+
+    def defines(self, kind, key):
+        if kind == "file":
+            return bool(self.by_name.get(key.rsplit("/", 1)[-1] + ".rs"))
+        file, _, test = key.partition("::")
+        file = file.rsplit("/", 1)[-1]
+        if file.endswith(".test.mjs"):
+            return any(test.strip() in self.read(p) for p in self.by_name.get(file, []))
+        fn = re.compile(rf"\bfn\s+{re.escape(test.split('::')[-1])}\s*\(")
+        return any(fn.search(self.read(p)) for p in self.by_name.get(file + ".rs", []))
+
+
+def counting(repo, a):
+    phase, ref = arg(a, "--phase"), arg(a, "--ref")
+    if not phase:
+        print("usage: --counting needs --phase <P>")
+        return 2
+    try:
+        ftext = git(repo, "show", f"{ref}:spec/FUNCTIONS.md") if ref else (repo / "spec/FUNCTIONS.md").read_text(encoding="utf-8")
+    except (OSError, RuntimeError) as e:
+        print(f"MISS spec/FUNCTIONS.md unreadable: {e}")
+        print("COUNTING FAIL: no FUNCTIONS.md")
+        return 1
+    spec = arg(a, "--rule")
+    try:
+        amap = load_rule(repo, spec, arg(a, "--syspath", "tools"))(ftext) if spec else default_rule(ftext)
+    except Exception as e:  # the counting rule itself is broken or moved: exactly what this check reports
+        print(f"MISS counting rule {spec} failed: {type(e).__name__}: {e}")
+        print("COUNTING FAIL: the counting rule cannot run")
+        return 1
+    funcs = [(fid, ln) for fid, ph, _, ln in functions_rows(ftext) if ph == phase]
+    if not funcs:
+        print(f"MISS phase {phase} has no rows in spec/FUNCTIONS.md")
+    misses, unfound = [], []
+    tree = Tree(repo, ref) if "--exists" in a else None
+    for fid, ln in funcs:
+        names = sorted(name_key(n) for n in (amap.get(fid) or ()))
+        if not names:
+            misses.append(f"{fid}: spec/FUNCTIONS.md:{ln}: the counting rule reads no named test, so it can never count")
+        elif tree:
+            for kind, key in names:
+                if not tree.defines(kind, key):
+                    unfound.append(f"{fid}: spec/FUNCTIONS.md:{ln}: named {kind} {key} is defined nowhere{' at ' + ref if ref else ''}")
+    for x in misses + unfound:
+        print("MISS", x)
+    ok = bool(funcs) and not misses and not unfound
+    print(f"COUNTING {'OK' if ok else 'FAIL'} phase {phase}: {len(funcs) - len(misses)} of {len(funcs)} functions readable"
+          + (f", {len(unfound)} named tests not found" if tree else ""))
+    return 0 if ok else 1
+
+
 def main():
     a = sys.argv[1:]
+    if not a or a[0].startswith("--"):
+        print(__doc__)
+        return 2
     repo = Path(a[0])
-    phase = a[a.index("--phase") + 1] if "--phase" in a else None
-    cap = int(a[a.index("--cap") + 1]) if "--cap" in a else 300
-    text = (repo / "spec/UNITS.md").read_text(encoding="utf-8")
+    if "--counting" in a:
+        return counting(repo, a)
+    phase = arg(a, "--phase")
+    cap = int(arg(a, "--cap", "300"))
+    try:
+        text = (repo / "spec/UNITS.md").read_text(encoding="utf-8")
+        ftext = (repo / "spec/FUNCTIONS.md").read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        print(f"MISS {e.filename}: missing")
+        print("PLAN INVALID: plan data missing")
+        return 1
     m = re.search(r"^Phases:\s*(.+)$", text, re.M)
     order = [p.strip() for p in m.group(1).split(",")] if m else []
     rank = {p: i for i, p in enumerate(order)}
-    owners = {r[0]: (int(r[1]) if r[1].isdigit() else None, r[2] if len(r) > 2 else "") for r in rows(text, "owner")}
+    owners = {}
+    for r in rows(text, "owner"):
+        r += [""] * (3 - len(r))
+        owners[r[0]] = (int(r[1]) if r[1].isdigit() else None, r[2])
     units = {}
     misses = []
+    if phase and phase not in rank:
+        misses.append(f"phase {phase} is not in Phases: {', '.join(order) or 'none'}")
     for r in rows(text, "unit"):
         r += [""] * (10 - len(r))
         if r[0] in units:
             misses.append(f"{r[0]}: duplicate unit id")
         units[r[0]] = dict(zip(["unit", "function", "phase", "owner", "test", "calls", "needs", "ext", "allowed", "lines"], r))
     machines = (repo / "spec/MACHINES.md").read_text(encoding="utf-8", errors="replace") if (repo / "spec/MACHINES.md").exists() else ""
-    ftext = (repo / "spec/FUNCTIONS.md").read_text(encoding="utf-8", errors="replace")
     fphase = {r[0]: r[2] for r in rows(ftext, "id") if len(r) > 2}
     sel = {k: u for k, u in units.items() if not phase or u["phase"] == phase}
     tests = collections.defaultdict(list)
