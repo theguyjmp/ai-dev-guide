@@ -18,6 +18,10 @@ while its row named `report [--kind <kind>]`.
   back to the best audited tree and the next round works from that audit's list.
 - plan_validate.py (entry_match.py) fails a row whose acceptance tests never invoke its exact entry: a CLI call
   must match the entry's words, placeholders and optional groups; an HTTP call must hit the route and method.
+## v2 depth: a critical-path check in plan_validate, 2026-11-07
+plan_validate.py `check_depth` prints `critical path N functions, widest level W` and fails a deps chain longer than
+max(4, ceil(N/4)) unless `[plan] max_depth` is set: each link lands one after another (about 2 min each), so the chain
+is the build's floor. Trial 4: 7 deep, floor 29.8 of 41.7 min. Tests: DepthCheck.
 
 ## v2 speed: a file lock instead of a module lock, 2026-11-07
 Trial 4 built 21 functions in 41.7 min wall for 51.9 builder-minutes, 1.24 builders at once (runs/speed-fix-4.md).

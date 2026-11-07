@@ -9,8 +9,7 @@ The plan is four things that scripts check, not prose: FUNCTIONS (what to build)
 acceptance tests (when it is done) and overhaul.toml (how it is checked). overhaul-build counts a function only when
 its acceptance test goes red to green through land.py, so every test exists before any code. Size follows the
 project: one function per user-visible behaviour, one module per domain or data store; a 2k-line project plans in
-under 45 minutes into 10 to 30 functions and 2 to 5 modules, and bigger ones scale the same way, never toward a
-target. No other spec files, word budgets or audit rounds: plan_validate.py is the audit.
+under 45 minutes into 10 to 30 functions and 2 to 5 modules, never toward a target. plan_validate.py is the audit.
 
 `<old>` is the old project, `<rebuild>` is `<old>-rebuild` beside it, `<pkg>` the product's package or command name,
 `<overhaul-build>` the absolute path of the installed overhaul-build skill.
@@ -18,17 +17,15 @@ target. No other spec files, word budgets or audit rounds: plan_validate.py is t
 ## Step 1. Measure the old project (read-only, about 10 minutes)
 Reuse an overhaul-check report's sizes and duplication if one exists. Launch three read-only agents in ONE message
 (Explore type, Sonnet is enough), each capped at 40 tool calls, returning at most 60 lines and never whole files:
-1. Entries: every CLI command and flag (argparse, click, typer, `__main__`, console_scripts), HTTP route (method and
-   path) and page or UI action, one per line: `entry | file:line | what the user gets`.
+1. Entries: every CLI command and flag, HTTP route (method and path) and UI action: `entry | file:line | what it does`.
 2. Behaviours and data: per entry, inputs, output, errors and side effects; every data store (files, tables, env
    vars, config, outside services) with the entries that use it; user-visible fixes from `git log -i --grep=fix`.
 3. Size and duplication: lines per top folder, duplicate blocks (pylint duplicate-code, jscpd), dead code, old tests.
 
 ## Step 2. Create the rebuild repo
 `git init -b main <rebuild>`, same language and stack as `<old>` unless the owner says otherwise. Add `spec/`,
-`src/<pkg>/__init__.py` (empty), `tests/acceptance/`, `tests/unit/test_smoke.py` that imports `<pkg>` (so `test`
-collects something), a `.gitignore` with the Python caches and `.overhaul/` (runtime state, never committed), and
-`spec/OLD-ENTRIES.txt` with Step 1's entries, one per line. `pyproject.toml` holds only `[tool.pytest.ini_options]`
+`src/<pkg>/__init__.py` (empty), `tests/acceptance/`, `tests/unit/test_smoke.py` importing `<pkg>`, a `.gitignore`
+with the Python caches and `.overhaul/` (never committed), and `spec/OLD-ENTRIES.txt`, Step 1's entries one per line. `pyproject.toml` holds only `[tool.pytest.ini_options]`
 with `pythonpath = ["src", "tests/acceptance"]` and `addopts = "--import-mode=importlib"` (repeated test file names
 never collide). Never copy old code into the rebuild.
 
@@ -40,14 +37,14 @@ FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status 
   acceptance = `tests/acceptance/<f>.py::<test>`, `;`-separated; status = planned|building|review|landing|proven|needs-plan.
   Optional `files` column before status: the function's own files, comma-separated, inside its module's Paths.
 ```
-- files: give each function its own file(s) (`src/shop/cart/add.py`) so drive.py builds one module's functions at
-  once; two functions build together only when their files do not overlap. A file every function edits (an
-  `__init__.py` export list, a registry) goes on the module's `Shared:` line, never in a files cell. Without the column
-  a function locks its whole module and one module builds one function at a time.
+- files: give each function its own file(s) (`src/shop/cart/add.py`); siblings build at once only when their files do
+  not overlap. A file every function edits (an `__init__.py` export list, a registry) goes on the module's `Shared:`
+  line, never in a files cell. Without the column a function locks its whole module.
 - id: `F01`, `F02`, ... unique, never reused. Phase 1 is the smallest set that makes the product usable end to end
   (under 3k lines, use 1 or 2 phases).
-- module: one from ARCHITECTURE. deps: each in the same or an earlier phase, including every function that builds an
-  API item this one calls.
+- module: one from ARCHITECTURE. deps: each in the same or an earlier phase, and only the functions that build an API
+  item this one's code calls; shared types, the store and errors come from the foundation, never from a sibling. Over
+  the depth limit, move what siblings share into the foundation; never drop a real call.
 - entry: the public way a user does it: `cli: shop cart add <sku> <qty>`, `http: POST /cart/items`,
   `ui: /cart, click Add`. Never an internal function.
 - acceptance: `tests/acceptance/<file>.py::test_<id>_<what>`, the id in lower case so `-k` picks only it.
@@ -55,8 +52,10 @@ FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status 
 
 A function is one user-visible behaviour a builder can finish in about 300 lines or fewer, unit tests included;
 split bigger ones by sub-behaviour (`report --csv`, `report --pdf`). Helpers, refactors and infrastructure are never
-rows. F01 is the smallest entry that proves the product starts (`shop --help` exits 0, or `GET /healthz` answers
-200); every function reaches it through deps. Old entries that do the same thing become one function. Map each
+rows of their own: F01, the smallest entry that proves the product starts (`shop --help` exits 0, or `GET /healthz`
+answers 200), is the foundation and builds the shared types, store, errors and entry dispatch; if that is too big, the
+first data behaviour (`shop product add`) carries the domain types as a second foundation. Every function reaches a
+foundation through deps. Old entries that do the same thing become one function. Map each
 OLD-ENTRIES.txt line with ` -> F04` (or ` -> F04,F05`), or ` -> D3` when decision D3 drops it, until
 `grep -vE -- '-> [FD][0-9]+(,[FD][0-9]+)*$' spec/OLD-ENTRIES.txt` prints nothing.
 
@@ -92,17 +91,15 @@ Owns: the cart table.
   too, is atomic: unique temp file then replace), `Errors:` (typed errors, how the entry reports them, what is logged),
   `Untrusted input:` (HTTP framing: Content-Length missing, negative or malformed gives 400, over the body cap 413;
   files read from disk checked for encoding and schema, damage reported as corrupt; CSV and other exports neutralise
-  formula injection), `Retries:` (every retry loop bounded, with backoff). Then `Concurrent writers:` (each needs a
-  `test_<f>_concurrent`), `Boundaries:` (every function reading untrusted input; each needs a negative acceptance test,
-  e.g. `test_<f>_rejects_malformed`) and `Domain rules: <rule> -> <module>.<function>; ...`: each calculation or
-  validation rule (value = qty * price, qty must be positive) lives in that one function and all others call it.
+  formula injection), `Retries:` (bounded, with backoff). Then `Concurrent writers:` (each a `test_<f>_concurrent`), `Boundaries:`
+  (every function reading untrusted input; each a negative acceptance test, e.g. `test_<f>_rejects_malformed`) and
+  `Domain rules: <rule> -> <module>.<function>; ...`: each calculation or validation rule (value = qty * price, qty must be positive) lives in that one function and all others call it.
   `Public:` lists each domain rule home and each API bullet naming a dependent module [by plan_validate.py].
 - Policies opens with `Standard: overhaul-build/references/quality-standard.md`, the one bar every step checks by
   rule number. Decide the design rules here: stored invariants and atomic or recoverable multi-store writes (Q29-Q32)
   in Persistence, stale locks and network timeouts (Q34, Q35) in Concurrency, errors mapped by type (Q19, Q20).
 - Unit tests for module m go in `tests/unit/m/`. Each data store has one owning module; the others use its API.
-- Every module owns at least one function. The graph is acyclic: code two modules need lives in the lower one, as
-  an API item tagged with the function that builds it, and each user lists that function in its deps.
+- Every module owns a function. The graph is acyclic: code two modules need lives in the lower one or the foundation.
 - Entry wiring is discovered, never edited: the entry module (F01) finds each module's `register(sub)` or HTTP router
   by scanning the package, so builders stay in their Paths; its section gives the start command and env vars.
 
@@ -115,8 +112,7 @@ Owns: the cart table.
   plus at least one error case, and reads results back only through its own entry or a dep's entry.
 - No mocks, fakes, monkeypatching or product imports. For an outside service the test cannot reach, assert up to
   the product's boundary through a public entry and add one DECISIONS line.
-- It fails because the product is missing, never because the test is broken:
-  `py -3 -m pytest --collect-only -q tests/acceptance` exits 0 and lists every acceptance cell.
+- It fails because the product is missing, never a broken test: `pytest --collect-only -q tests/acceptance` exits 0.
 
 ## Step 6. overhaul.toml
 The commands are the gates land.py runs on the whole tree. Python, with `<overhaul-build>` filled in:
@@ -141,25 +137,20 @@ functions = "spec/FUNCTIONS.md"
 architecture = "spec/ARCHITECTURE.md"
 state = ".overhaul/state.json"
 ```
-Rust: `cargo clippy -- -D warnings`, `cargo test`, cycles from `cargo metadata`; JS: `npx eslint .`, `npx jscpd src`,
-`node --test`. Install what is missing now (`py -3 -m pip install ruff pylint pytest`); then test, lint, dup, literals,
-shape, cycles and entry_lint must each exit 0 on the skeleton.
+Rust: `cargo clippy -- -D warnings`, `cargo test`, `cargo metadata`; JS: `npx eslint .`, `npx jscpd src`, `node --test`.
+Install what is missing now (`py -3 -m pip install ruff pylint pytest`); every command but acceptance exits 0 on the skeleton.
 
 ## Step 7. Validate until PLAN OK
 Run `py -3 <overhaul-build>/scripts/plan_validate.py --repo <rebuild> --run`, fix the first reported line, repeat.
-Usual fixes: move a function to its dep's phase; move what two modules both need into the lower one; drive through
-`_entry.py` instead of importing; a test that passes now asserts nothing the product must do. Never loosen a check,
-skip or xfail a test to reach PLAN OK. Same failure three times: split or merge the function, with a DECISIONS line.
-
+Usual fixes: move a function to its dep's phase; move what two modules need into the lower one or the foundation;
+drive through `_entry.py`; a test that passes now asserts nothing. Never loosen a check, skip or xfail a test to reach
+PLAN OK. Same failure three times: split or merge the function, with a DECISIONS line.
 ## Step 8. Commit and report
 `git add -A` and `git commit -m "plan: N functions, M modules, PLAN OK"` on main; report three lines: the `<rebuild>`
-path, `PLAN OK, N functions, M modules`, and next: run overhaul-build. No dashboard to build: overhaul-build's
-dash.py writes the local `dash/index.html`; publishing it as an Artifact is optional when that tool exists.
-
+path, `PLAN OK, N functions, M modules`, and next: run overhaul-build (its dash.py writes `dash/index.html`).
 ## spec/DECISIONS.md
 One numbered line per decision, no ceremony: `D3: drop export-xml; nothing reaches it.` One for every dropped old
 entry, deliberate behaviour change, dependency added after the plan, and acceptance test changed after the plan.
-
 ## Re-plan a needs-plan function (drive.py exited 3)
 Read only its row, `.overhaul/reviews/<id>.txt` and its `.overhaul/log.jsonl` lines, never the diff. Do one, add one
 DECISIONS line, pass Step 7, make a plan commit on main touching only spec/, tests/acceptance/ and
@@ -178,7 +169,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-
 SRC = Path(__file__).resolve().parents[2] / "src"
 def run_cli(data, *args):
     env = {**os.environ, "PYTHONPATH": str(SRC), "SHOP_DATA": str(data)}
@@ -186,8 +176,6 @@ def run_cli(data, *args):
                           capture_output=True, text=True, timeout=60, check=False)
 # tests/acceptance/test_cart.py
 from _entry import run_cli
-
-
 def test_f04_cart_add(tmp_path):
     assert run_cli(tmp_path, "product", "add", "MUG1", "Mug", "4.50").returncode == 0
     added = run_cli(tmp_path, "cart", "add", "MUG1", "2")
@@ -207,5 +195,6 @@ checking only the exit code.
 - The module graph is acyclic and modules import each other only through `Public:` names [by check_cycles.py].
 - Each cross-cutting policy has one owner, each domain rule one function, every concurrent writer a concurrent test and every boundary a negative test [by plan_validate.py].
 - Lint enforces line length and the strict set, no 20+ char literal is written twice, functions stay within 30 lines, constants sit at the top and no fixture is copied [by plan_validate.py, dup_literals.py and shape_check.py].
+- The longest deps chain is at most max(4, ceil(N/4)) functions, or `[plan] max_depth`; each link lands one after another [by plan_validate.py].
 - A function counts only when its test is red on main, green after the merge, and every proven test stays green [by land.py].
 - Builders never edit tests/acceptance or leave their module's Paths [by drive.py's brief and the blind review].
