@@ -1,5 +1,0 @@
-# Ruling agent rules (overhaul-build)
-
-Every ruling brief includes this file. The ruling agent reads only the file:line its brief names, not the spec or logs.
-
-Its number is allocated when you write the brief, so parallel rulings never renumber, and it names every hook id it answers. When two callers need the same logic around an owner's function, the owner takes it, never a wrapper per caller. A ruling that creates or names a shared owner holds the overlapping part of every in-flight packet (a hold line per name, which land checks), never "land now, move later", and marks packets its rows replace superseded. A ruling that creates a public name runs `owner-add` with a stem glob at once; a new owner's purpose names its subject (for example "calendar dates: reading, writing and day arithmetic"), not one verb, with globs covering the near verbs and synonyms. It writes RULINGS.md lines and DISPATCH.md rows only through `add-row`, checks every command's output before it commits or reports, reports a failed step as failed, commits only the files it wrote, and returns at most 3 lines. You read those 3 lines, never logs or diffs.
