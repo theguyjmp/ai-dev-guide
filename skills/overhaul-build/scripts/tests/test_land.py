@@ -209,10 +209,10 @@ class LandTest(unittest.TestCase):
         lock = os.path.join(repo, ".overhaul", "lock")
         os.makedirs(os.path.dirname(lock))
         with open(lock, "w", encoding="utf-8") as f:
-            f.write("drive.py pid 1\n")
+            f.write(f"drive.py pid {os.getpid()}\n")
         code, out, _ = self.land(repo)
         self.assertEqual(code, 1)
-        self.assertEqual(out, "lock held: .overhaul/lock (drive.py pid 1)")
+        self.assertEqual(out, f"lock held: .overhaul/lock (drive.py pid {os.getpid()})")
         self.assertTrue(os.path.exists(lock))
         self.assertEqual(git(repo, "rev-parse", "main"), before)
         self.assertFalse(os.path.exists(os.path.join(repo, ".overhaul", "log.jsonl")))

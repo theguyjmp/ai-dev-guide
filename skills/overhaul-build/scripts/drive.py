@@ -11,6 +11,10 @@ in the brief, then parks the function as needs-plan for the manager.
     py -3 drive.py --repo R --mark-proven ID --evidence FILE
 
 Exit 0 = every function proven (or a command done), 3 = manager needed, 1 = error.
+
+state.json is shared with land.py under the lock file .overhaul/lock (land.py's acquire_lock and
+release_lock, imported). land.py holds it for a whole land, so drive.py holds it only around its own state.json write, never
+while land.py runs, and defers a write (retried every loop pass) while land.py has it.
 """
 from __future__ import annotations
 
@@ -33,6 +37,9 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import land as land_mod  # noqa: E402  the lock protocol is land.py's
+
 HERE = Path(os.path.abspath(__file__)).parent
 TEMPLATES = HERE / "templates"
 COLUMNS = ("id", "phase", "module", "deps", "entry", "acceptance", "status")
@@ -45,6 +52,7 @@ REVIEW_MAX_CALLS = 20
 REASON_MAX = 1500
 POLL_S = 0.25
 DASH_EVERY_S = 15
+LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py's lock
 DEFAULTS = {
     "limits": {"max_parallel": 4, "builder_max_calls": 60, "brief_max_tokens": 40000,
                "retries_per_function": 1, "builder_timeout_min": 30},
@@ -82,6 +90,7 @@ class Job:
     attempt: int
     head: str = ""
     timed_out: bool = False
+    log_at: int = 0  # size of log.jsonl when a land job started
 
 
 def now_iso() -> str:
@@ -255,6 +264,23 @@ def acc_file(acceptance: str) -> str:
     return acceptance.split("::")[0]
 
 
+def lock_path(repo: Path) -> Path:
+    return Path(land_mod.lock_path(str(repo)))
+
+
+def lock_holder(repo: Path) -> str:
+    return read_text(lock_path(repo)).strip()
+
+
+def acquire_lock(repo: Path, wait: float = 0.0, owner: str = "drive.py") -> bool:
+    """land.py's lock: .overhaul/lock, exclusive create; a dead holder's lock is broken. False if kept past `wait` s."""
+    return land_mod.acquire_lock(str(repo), wait, owner)
+
+
+def release_lock(repo: Path) -> None:
+    land_mod.release_lock(str(repo))
+
+
 def load_config(repo: Path) -> dict:
     path = repo / "overhaul.toml"
     if not path.is_file():
@@ -286,7 +312,6 @@ class Driver:
         self.scripts = scripts if scripts.is_absolute() else repo / scripts
         self.ov = repo / ".overhaul"
         self.state_path = repo / cfg["paths"]["state"]
-        self.lock_path = self.ov / "lock"
         self.jobs: dict[str, Job] = {}
         self.land_queue: list[str] = []
         self.land_job: Job | None = None
@@ -299,29 +324,9 @@ class Driver:
         self.last_cycle = self.last_dash = 0.0
         self.dash_due = False
         self.warned: set[str] = set()
+        self.dirty = False  # state.json is behind self.st (land.py held the lock)
 
-    # ---- state, shared with land.py under .overhaul/lock ----
-    def lock(self) -> None:
-        self.ov.mkdir(parents=True, exist_ok=True)
-        end = time.monotonic() + 1800
-        while True:
-            try:
-                fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode())
-                os.close(fd)
-                return
-            except FileExistsError:
-                try:
-                    stale = time.time() - self.lock_path.stat().st_mtime > 1800
-                except OSError:
-                    stale = False
-                if stale or time.monotonic() > end:
-                    self.lock_path.unlink(missing_ok=True)
-                time.sleep(0.05)
-
-    def unlock(self) -> None:
-        self.lock_path.unlink(missing_ok=True)
-
+    # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
         try:
             data = json.loads(read_text(self.state_path))
@@ -341,21 +346,32 @@ class Driver:
             self.st["proven_history"] = disk["proven_history"]
         self.st["cycle"] = max(self.st["cycle"], int(disk["cycle"] or 0))
 
-    def save(self) -> None:
-        self.lock()
-        try:
+    def save(self, wait: float = 0.0) -> bool:
+        """Write state.json under .overhaul/lock. False, with `dirty` set, if land.py keeps the lock past `wait`."""
+        if not acquire_lock(self.repo, wait):
+            self.dirty = True
+            return False
+        try:  # only our own read-merge-write happens under the lock, never a subprocess
             self.absorb(self.disk_state())
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.state_path.with_name(f".{self.state_path.name}.drive.tmp")
             tmp.write_text(json.dumps(self.st, indent=1), encoding="utf-8")
             for _ in range(50):
                 try:
                     os.replace(tmp, self.state_path)
-                    return
+                    self.dirty = False
+                    return True
                 except PermissionError:  # a reader holds it open on Windows
                     time.sleep(0.1)
             raise DriveError(f"cannot replace {self.state_path}")
         finally:
-            self.unlock()
+            release_lock(self.repo)
+
+    def flush(self) -> None:
+        """Write state.json now, waiting for land.py to release the lock."""
+        if not self.save(LOCK_WAIT_S):
+            raise DriveError(f"cannot write {self.state_path.name}: {lock_path(self.repo).as_posix()} is held by "
+                             f"{lock_holder(self.repo) or '?'} (delete it if that process is gone)")
 
     def set(self, fid: str, **fields) -> None:
         self.st["functions"][fid].update(fields, updated=now_iso())
@@ -411,7 +427,7 @@ class Driver:
                 rec["status"] = "proven"
             elif rec["status"] in IN_FLIGHT:
                 rec["status"] = "planned"  # a previous drive stopped mid-flight
-        self.save()
+        self.flush()
 
     def plan_problem(self, f: Fn) -> str:
         if not ID_RE.fullmatch(f.id):
@@ -444,6 +460,8 @@ class Driver:
                 changed = self.reap()
                 changed = self.pump_land() or changed
                 changed = self.launch() or changed
+                if self.dirty:
+                    self.save()  # a write that had to wait for land.py's lock
                 if not self.busy():
                     return self.finish()
                 self.dash_due = self.dash_due or changed
@@ -671,10 +689,14 @@ class Driver:
             return False
         fid = self.land_queue.pop(0)
         out = self.ov / "runs" / f"{fid}-a{self.st['functions'][fid]['attempts'] + 1}-land.out"
-        cmd = [sys.executable, str(self.scripts / "land.py"), "--repo", str(self.repo), "--fn", fid]
+        # land.py takes .overhaul/lock itself for the whole land, so drive.py must hold nothing while it runs.
+        cmd = [sys.executable, str(self.scripts / "land.py"), "--repo", str(self.repo), "--fn", fid,
+               "--main", self.main]
+        log = self.ov / "log.jsonl"
+        log_at = log.stat().st_size if log.exists() else 0
         start = time.monotonic()
         self.land_job = Job(fid, "land", spawn(cmd, self.repo, out), out, start,
-                            start + 2 * self.timeout_s, 0)
+                            start + 2 * self.timeout_s, 0, log_at=log_at)
         return True
 
     def after_land(self, job: Job) -> None:
@@ -686,18 +708,35 @@ class Driver:
             if row and row.status != "proven":
                 self.say(f"land.py exited 0 but {fid} is not proven in FUNCTIONS.md on {self.main}")
             self.set(fid, status="proven", last_reason="")
-            self.log(fid, "land_ok", last_line(out), secs)
             self.say(f"landed {fid}")
             self.record_proven()
             self.cycle(f"landed {fid}")
             return
         reason = "land.py timed out" if job.timed_out else (
             last_line(out) or last_line(err) or f"land.py exit {job.proc.returncode}")
-        self.log(fid, "land_fail", reason, secs)
+        if not self.land_logged(fid, job.log_at):  # killed or crashed before land.py wrote its own land_fail line
+            self.log(fid, "land_fail", reason, secs)
         if GREEN_BEFORE in reason:
             self.park(fid, f"land: {reason}")
         else:
             self.fail(fid, f"land: {reason}")
+
+    def land_logged(self, fid: str, since: int) -> bool:
+        """Whether land.py itself appended a land_ok or land_fail line for `fid` after byte offset `since`."""
+        try:
+            with (self.ov / "log.jsonl").open("rb") as fh:
+                fh.seek(since)
+                tail = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            return False
+        for line in tail.splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get("fn") == fid and rec.get("event") in ("land_ok", "land_fail"):
+                return True
+        return False
 
     # ---- outcomes ----
     def fail(self, fid: str, reason: str) -> None:
@@ -754,6 +793,8 @@ class Driver:
         blocked = [fid for fid in self.fns if recs[fid]["status"] not in ("proven", "needs-plan")]
         code = 3 if parked or blocked else 0
         self.cycle("exit")
+        if self.dirty:
+            self.flush()
         for fid in parked:
             self.say(f"needs-plan {fid}: {recs[fid]['last_reason']}")
         if blocked:
@@ -774,7 +815,7 @@ class Driver:
         self.land_queue.clear()
         self.land_job = None
         try:
-            self.save()
+            self.save(5.0)
         except (OSError, DriveError):
             pass
         if jobs:
@@ -783,6 +824,8 @@ class Driver:
     # ---- manager commands ----
     def reset(self, fid: str) -> None:
         self.set(fid, status="planned", attempts=0, last_reason="")
+        if self.dirty:
+            self.flush()
         self.log(fid, "cycle", "reset to planned, attempts 0")
         self.say(f"reset {fid}")
 
@@ -792,6 +835,8 @@ class Driver:
         self.set(fid, status="proven", last_reason="")
         self.log(fid, "land_ok", f"marked proven by the manager; evidence {evidence.as_posix()}")
         self.record_proven()
+        if self.dirty:
+            self.flush()
         self.say(f"marked proven {fid}")
 
 

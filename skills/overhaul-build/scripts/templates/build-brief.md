@@ -25,6 +25,7 @@ You may create or edit ONLY these paths. Every other file is off limits.
 
 Never edit `tests/acceptance/`, `spec/` or `overhaul.toml`. They are the contract. A change to any of them
 fails the build on sight, and so does any file outside the allowed paths.
+land.py also refuses any branch that edits them, so such an edit can never reach main.
 
 ## Acceptance test (read-only, already on main, currently FAILING)
 

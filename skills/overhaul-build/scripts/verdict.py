@@ -1,4 +1,4 @@
-"""verdict2.py: the overhaul v2 heartbeat. Pure measurement over files and commands, no judgement left to an agent.
+"""verdict.py: the overhaul v2 heartbeat. Pure measurement over files and commands, no judgement left to an agent.
 
 GOOD only when all of these hold:
   1 proven rose since the previous verdict, or every function is proven;
@@ -12,7 +12,7 @@ paths follow overhaul.toml [paths]. Writes .overhaul/verdict.json, appends a "ve
 and prints one line:
   VERDICT GOOD|BAD proven N/T rate X/h reds: ...
 The rate is proven per hour over the last 3 h of state.json proven_history, measured up to now.
-  py -3 verdict2.py --repo R [--no-checks] [--timeout S]     exit 0 GOOD, 1 BAD, 2 no repo
+  py -3 verdict.py --repo R [--no-checks] [--timeout S]     exit 0 GOOD, 1 BAD, 2 no repo
 """
 import argparse
 import datetime as dt

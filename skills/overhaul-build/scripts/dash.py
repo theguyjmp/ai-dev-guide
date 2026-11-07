@@ -11,10 +11,7 @@ import os
 import re
 import sys
 
-try:
-    import verdict2 as vd
-except ImportError:  # after the v2 merge renames verdict2.py to verdict.py
-    import verdict as vd
+import verdict as vd
 
 EVENTS_SHOWN = 30
 
