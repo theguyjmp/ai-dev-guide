@@ -23,6 +23,12 @@ You build ONE function of the rebuild. You work alone in a git worktree and hand
 {{policies}}
 `````
 
+## Quality rules for this function (from the quality standard `{{standard_path}}`)
+
+The audit that ends the build checks these by number. Run each rule's Check on your change before you finish.
+
+{{standard}}
+
 ## Allowed paths
 
 You may create or edit ONLY these paths. Every other file is off limits.

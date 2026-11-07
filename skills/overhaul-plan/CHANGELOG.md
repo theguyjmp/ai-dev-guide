@@ -1,5 +1,11 @@
 # overhaul-plan changelog
 
+## v2 one quality standard, 2026-11-07
+The Policies section opens with a `Standard:` line citing overhaul-build's quality-standard.md, and the design
+rules trial 4's judge found missing (stored invariants, atomic multi-store writes, stale locks, network timeouts,
+errors mapped by type) are decided in Persistence, Concurrency and Errors. plan_validate.py now fails a row whose
+acceptance tests do not invoke the exact entry it names (trial 4's F15).
+
 ## v2 speed, 2026-11-07
 FUNCTIONS.md may carry a `files` column (each function's own files) and a module a `Shared:` line, so drive.py builds
 one module's functions at once; in trial 4 the one-function-per-module lock cost about 12 of 42 minutes. overhaul.toml

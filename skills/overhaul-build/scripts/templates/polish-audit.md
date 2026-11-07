@@ -17,18 +17,15 @@ write one file.
 
 {{policies}}
 
-## Measure, don't guess
+## The bar and the method
 
+- The standard: `{{standard}}`. Read it first; it is the bar, and the final judge uses the same file.
+- The method: `{{audit_brief}}`, the same brief the final judge follows. Run its measurements and then every
+  rule's Check. Skip only its scoring and report format: your output is the JSON below.
 - The project's own commands: {{commands}}
-- Duplicate code (`pylint --disable=all --enable=duplicate-code --min-similarity-lines=4 src` or the
-  language's equivalent), repeated literals and re-implemented helpers.
-- An AST census: function size, complexity, broad excepts, dead code.
-- Cross-module imports that bypass a module's public API.
-- Every write path under concurrent use (1, 2, 4 and 8 clients: status codes and stored counts) and every
-  store fed a corrupt or missing file.
-- Tests that would still pass with a mutant: hand-make a few mutants against the unit tests.
 
-Be strict: the bar is perfect code. Report only real defects you measured, each once, with evidence.
+Report only real defects you measured, each once, with evidence and the rule number it breaks. A real defect no
+rule covers gets `"rule": "NEW-RULE"` and a one-line proposed rule in `evidence`.
 
 ## Output
 
@@ -36,7 +33,7 @@ Write `{{audit_file}}` as one JSON list, `[]` when you found nothing:
 
 ```json
 [{"module": "<a module name from the list above>", "file": "src/x/y.py", "line": 12,
-  "rule": "duplication", "evidence": "what you measured"}]
+  "rule": "Q8", "evidence": "what you measured"}]
 ```
 
 `module` must be one of the module names above. Your final message is the number of issues.

@@ -36,6 +36,10 @@ allowed.
 {{policies}}
 `````
 
+## Quality rules for this function (from the quality standard `{{standard_path}}`)
+
+{{standard}}
+
 ## Checklist: FAIL on any NO, and name the file:line
 
 1. Scope: every changed file is inside the allowed paths.
@@ -54,6 +58,8 @@ allowed.
    the existing one.
 7. Readability: clear names, functions under about 30 lines, no dead or commented-out code, no debug output,
    no line over the lint's line length.
+8. Quality standard: the change breaks none of the quality rules above. Name the rule number (`Q19`) with the
+   file:line of each break.
 
 Decide from the diff and your searches. A doubt you cannot clear is a FAIL.
 

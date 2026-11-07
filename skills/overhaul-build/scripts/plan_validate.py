@@ -23,6 +23,7 @@ overhaul.toml [commands] must hold test, acceptance (with a `{test}` placeholder
 Problems (each is one line):
   - a row is malformed (cells, id, phase, deps, acceptance, status, duplicate id);
   - an acceptance file or its `def <test>` is missing;
+  - a function's acceptance tests never invoke the exact entry its row names (entry_match.py);
   - deps are unknown, point to a later phase, or form a cycle;
   - a module is unknown, ARCHITECTURE is missing, or its module graph is broken (no Paths/Depends on, unknown module, cycle);
   - a function has no entry;
@@ -44,6 +45,8 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+
+import entry_match  # beside this script
 
 COLUMNS = ["id", "phase", "module", "deps", "entry", "acceptance", "status"]
 STATUSES = {"planned", "building", "review", "landing", "proven", "needs-plan"}
@@ -522,6 +525,8 @@ def validate(repo, run=False, timeout=600):
     else:
         rows = parse_functions(fun_file.read_text(encoding="utf-8", errors="replace"), problems, paths["functions"])
         check_rows(rows, mods, repo, problems, paths["functions"])
+        problems += entry_match.entry_problems(
+            repo, [r for r in rows if r["entry"].strip().strip("`").strip().lower() not in NO_ENTRY], paths["functions"])
     if arch_file.is_file():
         check_policies(arch_file.read_text(encoding="utf-8", errors="replace"), mods, rows, problems,
                        paths["architecture"])

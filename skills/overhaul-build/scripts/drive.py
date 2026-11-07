@@ -46,6 +46,17 @@ import land as land_mod  # noqa: E402  the lock protocol is land.py's
 
 HERE = Path(os.path.abspath(__file__)).parent
 TEMPLATES = HERE / "templates"
+STANDARD = HERE.parent / "references" / "quality-standard.md"
+AUDIT_BRIEF = TEMPLATES / "audit-brief.md"
+BASE_RULES = (2, 3, 8, 10, 13, 16, 17, 18, 19, 20, 21, 24, 25, 26, 27)
+RULE_TRIGGERS = (  # words in a function's row, module section or acceptance test -> the rules they bring in
+    (r"http|server|web|socket|request|port|url", (33, 35)),
+    (r"store|json|file|save|write|persist|database|\bdb\b|record", (23, 29, 30, 31, 32, 33, 34)),
+    (r"lock", (34,)),
+    (r"csv|export", (31, 36)),
+    (r"\bcli\b|argparse|command|argv", (5, 6)),
+    (r"total|tax|price|sum|report", (9, 11)),
+)
 COLUMNS = ("id", "phase", "module", "deps", "entry", "acceptance", "status")
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 PATHS_LINE = re.compile(r"\W*(?:paths?|files)\W*?[:=]\s*(.+)", re.I)
@@ -68,7 +79,7 @@ LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py'
 DEFAULTS = {
     "limits": {"builder_max_calls": 60, "brief_max_tokens": 40000,
                "retries_per_function": 1, "conflict_retries": 2, "builder_timeout_min": 30,
-               "polish_rounds": 2},
+               "polish_rounds": 3},
     "paths": {"functions": "spec/FUNCTIONS.md", "architecture": "spec/ARCHITECTURE.md",
               "state": ".overhaul/state.json"},
     "harness": {"builder_model": "opus", "review_model": "sonnet"},
@@ -146,6 +157,35 @@ def force_remove(func, path, _exc) -> None:
 def render(name: str, values: dict[str, str]) -> str:
     text = (TEMPLATES / name).read_text(encoding="utf-8")
     return re.sub(r"\{\{(\w+)\}\}", lambda m: values.get(m.group(1), m.group(0)), text)
+
+
+@lru_cache(maxsize=1)
+def standard_rules() -> dict[int, str]:
+    """Rule number -> one-line text, from references/quality-standard.md ({} if the file is missing)."""
+    rules: dict[int, str] = {}
+    num = 0
+    for line in read_text(STANDARD).splitlines():
+        m = re.match(r"- Q(\d+)\. ", line)
+        if m:
+            num = int(m.group(1))
+            rules[num] = line[2:].strip()
+        elif num and line.startswith("  ") and line.strip():
+            rules[num] += " " + line.strip()
+        else:
+            num = 0
+    return rules
+
+
+def relevant_rules(text: str) -> str:
+    """The quality-standard rules a function's builder and reviewer must cite: a base set plus keyword triggers."""
+    rules = standard_rules()
+    if not rules:
+        return f"(quality standard missing: {STANDARD.as_posix()})"
+    want = set(BASE_RULES)
+    for pattern, nums in RULE_TRIGGERS:
+        if re.search(pattern, text, re.I):
+            want.update(nums)
+    return "\n".join(f"- {rules[n]}" for n in sorted(want) if n in rules)
 
 
 def spawn(cmd: list[str], cwd: Path, out: Path) -> subprocess.Popen:
@@ -370,7 +410,7 @@ class Driver:
         self.main = str(har.get("main_branch", "main"))
         self.builder_model = str(har.get("builder_model") or "")  # also used by conflict passes
         self.review_model = str(har.get("review_model") or "")
-        self.audit_model = str(har.get("audit_model") or self.review_model)
+        self.audit_model = str(har.get("audit_model") or "opus")  # the final judge's model: one bar
         self.polish_rounds = int(lim["polish_rounds"])
         self.polish_queue: list[tuple[str, list[dict]]] = []  # (module, issues) fix passes waiting for a slot
         self.polish_lands: list[str] = []
@@ -710,7 +750,8 @@ class Driver:
             "module": f.module, "module_section": module_section(self.arch, f.module)
             or "(spec/ARCHITECTURE.md has no section naming this module)",
             "allowed_paths": self.allowed(f), "acceptance_source": self.acceptance_text(f),
-            "policies": self.policies(), "commands": self.commands_text(f), "max_calls": str(self.max_calls), "previous": previous})
+            "policies": self.policies(), "commands": self.commands_text(f), "max_calls": str(self.max_calls),
+            "previous": previous, **self.standard_values(f)})
         tokens = len(brief) // 4
         if tokens > self.max_tokens:
             self.park(f.id, f"brief is {tokens} tokens, over brief_max_tokens {self.max_tokens}; "
@@ -843,6 +884,11 @@ class Driver:
         return (module_section(self.arch, "Policies")
                 or "(spec/ARCHITECTURE.md declares no Policies section; re-run plan_validate.py)")
 
+    def standard_values(self, f: Fn) -> dict[str, str]:
+        """The quality-standard placeholders of a build or review brief for function f."""
+        text = "\n".join((self.row_table(f), module_section(self.arch, f.module), self.acceptance_text(f)))
+        return {"standard_path": STANDARD.as_posix(), "standard": relevant_rules(text)}
+
     def start_review(self, fid: str, attempt: int) -> None:
         f, branch = self.fns[fid], f"fn/{fid}"
         review_file = self.ov / "reviews" / f"{fid}.txt"
@@ -850,7 +896,7 @@ class Driver:
         brief = render("review-brief.md", {
             "id": fid, "branch": branch, "row": self.row_table(f), "allowed_paths": self.allowed(f),
             "acceptance_source": self.acceptance_text(f), "review_file": review_file.as_posix(),
-            "policies": self.policies(),
+            "policies": self.policies(), **self.standard_values(f),
             "diffstat": git(self.repo, "diff", "--stat", f"{self.main}...{branch}").rstrip(),
             "diff": git(self.repo, "diff", f"{self.main}...{branch}").rstrip(),
             "max_calls": str(REVIEW_MAX_CALLS)})
@@ -1034,6 +1080,7 @@ class Driver:
         brief = render("polish-audit.md", {
             "round": str(rnd), "main": self.main, "audit_file": audit.as_posix(), "max_calls": str(self.max_calls),
             "scratch": (self.ov / "polish").as_posix(), "policies": self.policies(), "commands": self.polish_commands(),
+            "standard": STANDARD.as_posix(), "audit_brief": AUDIT_BRIEF.as_posix(),
             "modules": "\n".join(f"- `{m}`: " + ", ".join(module_paths(module_section(self.arch, m), m)) for m in modules)})
         path = self.ov / "briefs" / f"polish-audit-{rnd}.md"
         path.write_text(brief, encoding="utf-8")
@@ -1067,8 +1114,9 @@ class Driver:
             return
         n = len(issues)
         pol["history"].append([rnd, n])
-        pol["issues"] = n
         self.log(None, "polish_audit", f"round {rnd}: {n} issues model={job.model}", secs, tokens)
+        issues, n = self.keep_best_polish(pol, rnd, issues)
+        pol["issues"] = n
         if not issues or rnd > self.polish_rounds:
             pol["status"] = "done"
             self.save()
@@ -1081,6 +1129,41 @@ class Driver:
         self.polish_queue = sorted(groups.items())
         pol["status"] = "fix"
         self.save()
+
+    def keep_best_polish(self, pol: dict, rnd: int, issues: list[dict]) -> tuple[list[dict], int]:
+        """A fix round that raised the issue count is reverted: main goes back to the best audited tree.
+
+        pol["best"] is [round, issues, sha] of the audit with the fewest issues so far. Returns the issue list
+        the next fix round works from (the best round's) and its count."""
+        sha, best = git(self.repo, "rev-parse", self.main).strip(), pol.get("best")
+        if not best or len(issues) <= best[1]:
+            pol["best"] = [rnd, len(issues), sha]
+            return issues, len(issues)
+        kept = self.read_audit(self.ov / "polish" / f"audit-{best[0]}.json")
+        if kept is None or not self.revert_main(best[2], sha, f"polish: revert round {rnd - 1} fixes "
+                                                f"({len(issues)} issues > {best[1]} after round {best[0]})"):
+            pol["best"] = [rnd, len(issues), sha]
+            return issues, len(issues)
+        self.log(None, "polish_revert", f"round {rnd - 1} fixes reverted: {len(issues)} issues > {best[1]}")
+        self.say(f"polish round {rnd - 1} raised issues {best[1]} -> {len(issues)}: reverted")
+        return kept, len(kept)
+
+    def revert_main(self, good: str, head: str, message: str) -> bool:
+        """Commit good's tree on top of main (head) under the land lock; False if main moved or the lock is busy."""
+        if good == head:
+            return False
+        if not acquire_lock(self.repo, LOCK_WAIT_S):
+            return False
+        try:
+            tree = git(self.repo, "rev-parse", f"{good}^{{tree}}").strip()
+            new = git(self.repo, "commit-tree", tree, "-p", head, "-m", message).strip()
+            land_mod.advance(str(self.repo), self.main, new, head)
+            return True
+        except (DriveError, land_mod.LandFail) as e:
+            self.say(f"polish revert failed: {e}")
+            return False
+        finally:
+            release_lock(self.repo)
 
     def start_polish_fix(self, module: str, items: list[dict]) -> None:
         rnd = self.polish_state()["round"]
@@ -1115,6 +1198,7 @@ class Driver:
                    f"The issues it must fix:\n\n{issues}",
             "acceptance_source": "(none: a polish fix adds no function; land.py re-runs every proven acceptance test)",
             "review_file": review_file.as_posix(), "policies": self.policies(),
+            "standard_path": STANDARD.as_posix(), "standard": relevant_rules(module + "\n" + issues),
             "diffstat": git(self.repo, "diff", "--stat", f"{self.main}...{branch}").rstrip(),
             "diff": git(self.repo, "diff", f"{self.main}...{branch}").rstrip(), "max_calls": str(REVIEW_MAX_CALLS)})
         if len(brief) // 4 > self.max_tokens:

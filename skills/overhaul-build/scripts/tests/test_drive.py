@@ -300,10 +300,10 @@ scripts_dir = "{scripts.as_posix()}"
 class TestTemplates(unittest.TestCase):
     def test_every_placeholder_is_one_drive_fills(self):
         build = "id attempt worktree branch row entry module module_section allowed_paths " \
-                "acceptance_source policies commands max_calls previous".split()
-        review = "id branch row allowed_paths acceptance_source review_file policies diffstat diff max_calls".split()
+                "acceptance_source policies commands max_calls previous standard_path standard".split()
+        review = "id branch row allowed_paths acceptance_source review_file policies diffstat diff max_calls "                  "standard_path standard".split()
         conflict = "id pass worktree branch main module reason row allowed_paths commands max_calls".split()
-        audit = "round main audit_file max_calls scratch modules policies commands".split()
+        audit = "round main audit_file max_calls scratch modules policies commands standard audit_brief".split()
         fix = "id round module branch max_calls issues allowed_paths policies commands".split()
         for name, keys in (("build-brief.md", build), ("review-brief.md", review),
                            ("conflict-brief.md", conflict), ("polish-audit.md", audit),
@@ -832,13 +832,39 @@ class TestPolish(Toy):
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 0, out)
         ev = self.polish_events(repo)
-        self.assertEqual(len([1 for e, _ in ev if e == "polish_audit"]), 3)  # polish_rounds 2, then the re-audit
-        self.assertEqual(len([1 for e, d in ev if e == "polish_fix" and d.startswith("landed")]), 4)
-        self.assertEqual(ev[-1], ("polish_done", "2 issues after 2 fix rounds"))
+        self.assertEqual(len([1 for e, _ in ev if e == "polish_audit"]), 4)  # polish_rounds 3, then the re-audit
+        self.assertEqual(len([1 for e, d in ev if e == "polish_fix" and d.startswith("landed")]), 6)
+        self.assertEqual(ev[-1], ("polish_done", "2 issues after 3 fix rounds"))
         line = self.verdict(repo)
         self.assertTrue(line.startswith("VERDICT BAD proven 2/2"), line)
         self.assertIn(" issues 2 ", line)
         self.assertIn("polish done: 2 issues", line)
+
+    def test_a_fix_round_that_raises_the_issue_count_is_reverted(self):
+        repo = self.make_repo({"audit": [[finding("alpha", 3), finding("beta", 7)],
+                                         [finding("alpha", 3), finding("beta", 7), finding("alpha", 9)]]})
+        before = git(repo, "rev-parse", "main").strip()
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.polish_events(repo)
+        self.assertEqual(len([1 for e, _ in ev if e == "polish_revert"]), 3, ev)
+        self.assertEqual(ev[-1], ("polish_done", "2 issues after 3 fix rounds"))
+        files = git(repo, "ls-tree", "-r", "--name-only", "main")
+        self.assertNotIn("src/alpha/tidy.py", files)  # every round made it worse: main keeps the round 1 tree
+        self.assertNotIn("src/beta/tidy.py", files)
+        self.assertNotEqual(git(repo, "rev-parse", "main").strip(), before)  # reverted forward, history kept
+        self.assertIn("dup 7", self.seen("polish-r2-beta-fix.md"))  # round 2 works from the best audit's issues
+        self.assertNotIn("x.py:9", self.seen("polish-r2-alpha-fix.md"))
+        pol = self.state(repo)["polish"]
+        self.assertEqual((pol["issues"], pol["best"][:2]), (2, [1, 2]))
+        audit = self.seen("polish-audit-1.md")
+        self.assertIn("quality-standard.md", audit)
+        self.assertIn("audit-brief.md", audit)
+
+    def test_polish_audit_defaults_to_the_judge_model(self):
+        repo = self.make_repo()
+        drv = drive.Driver(repo, drive.load_config(repo))
+        self.assertEqual((drv.audit_model, drv.polish_rounds), ("opus", 3))
 
     def test_polish_rounds_zero_skips_the_phase(self):
         repo = self.make_repo({"audit": [[finding("alpha", 3)]]})

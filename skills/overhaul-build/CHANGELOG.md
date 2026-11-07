@@ -2,6 +2,23 @@
 
 Why each rule exists, newest first. Full v1 history: `git log -- skills/overhaul-build` (71 commits, 2026-11-05 to 2026-11-07).
 
+## v2 one quality standard for every step, 2026-11-07
+Trial 4's polish audit (sonnet, a condensed brief) ended at 4 issues while the final judge (opus, AUDIT-BRIEF)
+found 18: polish optimised against a weaker, open-ended bar. The new issues were design-level (a two-store pay
+that is not atomic, no stale-lock recovery, no socket timeout, unmapped OSError and RecursionError, unchecked
+stored invariants, HTTP status chosen by message text). Proof marked F15 PARTIAL: its test drove `report sales`
+while its row named `report [--kind <kind>]`.
+- `references/quality-standard.md`: 36 numbered, checkable rules in the audit's 7 areas, covering every issue in
+  trials 1, 3 and 4. Each says how to check it. New defects become NEW-RULE candidates and grow the file.
+- Build and review briefs list the rules relevant to the function (a base set plus keyword triggers on its row,
+  module section and acceptance test); the reviewer fails a change that breaks one, citing the number.
+- Polish audits against the standard with the judge's model and method: `audit_model` defaults to opus, the
+  template points at the standard and `templates/audit-brief.md` (the judge's brief), findings cite rule numbers.
+  `polish_rounds` defaults to 3. A fix round that raises the issue count is reverted (polish_revert): main goes
+  back to the best audited tree and the next round works from that audit's list.
+- plan_validate.py (entry_match.py) fails a row whose acceptance tests never invoke its exact entry: a CLI call
+  must match the entry's words, placeholders and optional groups; an HTTP call must hit the route and method.
+
 ## v2 speed: a file lock instead of a module lock, 2026-11-07
 Trial 4 built 21 functions in 41.7 min wall for 51.9 builder-minutes, 1.24 builders at once (runs/speed-fix-4.md).
 The critical path of dependencies (build + review + land per function) was 29.8 min; the module lock added about 12:

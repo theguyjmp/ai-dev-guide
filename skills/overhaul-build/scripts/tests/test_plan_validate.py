@@ -136,6 +136,10 @@ class Base(unittest.TestCase):
     def problems(self, root, **kw):
         return pv.validate(root, **kw)[0]
 
+    def routed(self, root):
+        """Problems other than the entry match: the toy's acceptance tests drive a CLI, not these HTTP routes."""
+        return [p for p in self.problems(root) if "never invokes its entry" not in p]
+
     def has(self, problems, *needles):
         return any(all(n in p for n in needles) for p in problems)
 
@@ -184,7 +188,7 @@ class StaticChecks(Base):
 
     def test_deps(self):
         self.only(self.problems(self.make(table(R1, R2, r3(deps="F001, F999")))), "dep F999 is unknown")
-        later = table(R1, row("F002", deps="F003", acc=f"{CALC_T}::test_sub", status="planned"), r3(deps="F001"))
+        later = table(R1, row("F002", deps="F003", entry="`tiny sub A B`", acc=f"{CALC_T}::test_sub", status="planned"), r3(deps="F001"))
         self.only(self.problems(self.make(later)), "F002", "dep F003 is in phase 2", "later phase")
         same = table(R1, R2, r3(phase="1"))  # the same phase is allowed
         self.assertEqual(self.problems(self.make(same)), [])
@@ -208,6 +212,30 @@ class StaticChecks(Base):
         self.only(self.problems(self.make(arch=cyc)), "module cycle")
         styled = "## Module calc\n- **Paths:** `src/tiny.py`\n- **Depends on:** none\n### API\ntext\n## Module report\nPaths: src/r.py\nDepends on: calc\n"
         self.assertEqual(self.problems(self.make(arch=styled + POLICIES)), [])
+
+    def test_acceptance_must_invoke_the_exact_entry(self):
+        # trial 4, F15: the row named `report --kind <kind>` and the test drove `report sales`
+        self.only(self.problems(self.make(table(R1, R2, r3(entry="`cli: tiny report --kind <kind>`")))),
+                  "F003", "never invokes its entry", "it runs `report`")
+        sales = REPORT.replace('tiny("report", "--all")', 'tiny("report", "sales")')
+        root = self.make(table(R1, R2, r3(entry="`cli: tiny report [--kind <kind>]`",
+                                          acc=f"{REPORT_T}::test_report_b")))
+        (root / REPORT_T).write_text(sales, encoding="utf-8")
+        self.only(self.problems(root), "F003", "it runs `report sales`")
+        for entry in ("`cli: tiny report [--kind <kind>]`", "`tiny report [--all]`", "`report`", "`tiny report ...`"):
+            with self.subTest(entry=entry):
+                self.assertEqual(self.problems(self.make(table(R1, R2, r3(entry=entry)))), [])
+        self.only(self.problems(self.make(table(R1, R2, r3(entry="`tiny report --all <x>`")))), "never invokes")
+
+    def test_http_entry_must_be_requested(self):
+        web = HEAD + ('def test_report_a():\n    http(base, "POST", f"/orders/{oid}/pay?x=1")\n\n\n'
+                      'def test_report_b():\n    http(base, "GET", "/stock")\n')
+        for entry, bad in (("`http: POST /orders/<id>/pay`", False), ("`POST /orders/<id>/cancel`", True),
+                           ("`http: GET /stock (tiny serve)`", False), ("`http: DELETE /stock`", True)):
+            with self.subTest(entry=entry):
+                root = self.make(table(R1, R2, r3(entry=entry)))
+                (root / REPORT_T).write_text(web, encoding="utf-8")
+                self.assertEqual(self.has(self.problems(root), "F003", "never invokes"), bad)
 
     def test_no_entry(self):
         for entry in ("", "-", "`-`", "TBD"):
@@ -273,7 +301,7 @@ class RunChecks(Base):
         self.only(self.problems(self.make(rows), run=True), "F009", f"{CALC_T}::test_add", "already PASSES")
 
     def test_proven_whose_acceptance_fails_fails(self):
-        rows = table(R1, row("F002", deps="F001", acc=f"{CALC_T}::test_sub", status="proven"))
+        rows = table(R1, row("F002", deps="F001", entry="`tiny sub A B`", acc=f"{CALC_T}::test_sub", status="proven"))
         self.only(self.problems(self.make(rows), run=True), "F002", "proven", "FAILS")
 
     def test_run_skips_tests_that_do_not_exist(self):
@@ -342,9 +370,9 @@ class QualityPolicies(Base):
 
     def test_http_write_route_must_be_a_concurrent_writer(self):
         threaded = ARCH.replace("single-threaded CLI; one process per command", "threaded HTTP server; one lock")
-        found = self.problems(self.make(functions=table(row(entry="`DELETE /add`"), R2, r3()), arch=threaded))
+        found = self.routed(self.make(functions=table(row(entry="`DELETE /add`"), R2, r3()), arch=threaded))
         self.only(found, "F001 is an HTTP write (`DELETE /add`) but not in Concurrent writers")
-        self.assertEqual(self.problems(self.make(functions=table(row(entry="`DELETE /add`"), R2, r3()))), [])
+        self.assertEqual(self.routed(self.make(functions=table(row(entry="`DELETE /add`"), R2, r3()))), [])
 
     def test_ruff_lint_must_be_strict(self):
         found = self.problems(self.make(lint="py -3 -m ruff check ."))
@@ -383,7 +411,7 @@ class QualityPolicies(Base):
         self.assertEqual(self.problems(root), [])
 
     def test_http_body_route_must_be_a_boundary(self):
-        found = self.problems(self.make(functions=table(row(entry="`POST /add`"), R2, r3())))
+        found = self.routed(self.make(functions=table(row(entry="`POST /add`"), R2, r3())))
         self.assertEqual(len(found), 2, found)
         self.assertTrue(self.has(found, "F001 takes an HTTP body (`POST /add`) but is not in Boundaries"), found)
         self.assertTrue(self.has(found, "F001 reads untrusted input but has no negative acceptance test"), found)
