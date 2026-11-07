@@ -9,11 +9,15 @@ FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status 
   phase = integer from 1; deps = comma-separated ids or `-`; entry = the public CLI command, route or UI action;
   acceptance = `tests/acceptance/<f>.py::<test>`, `;`-separated; status = planned|building|review|landing|proven|needs-plan.
 ARCHITECTURE.md: `## Module <name>` sections, each with `Paths:` and `Depends on:` (`-` or `none` = none), and one
-  `## Policies` section: `Concurrency:`, `Persistence:` and `Errors:` lines, each `<owner module> - <policy>`, and a
-  `Concurrent writers:` line naming every function that writes shared state reachable concurrently (`-` for none).
-overhaul.toml [commands] must hold test, acceptance (with a `{test}` placeholder), lint, dup, literals, cycles and
-  entry_lint. A ruff lint must select E501 (or E) and the strict set E W F I B UP SIM RUF, in the command or the
-  ruff config (ruff.toml, .ruff.toml or pyproject.toml [tool.ruff]).
+  `## Policies` section: `Concurrency:`, `Persistence:`, `Errors:`, `Untrusted input:` and `Retries:` lines, each
+  `<owner module> - <policy>`; a `Concurrent writers:` line naming every function that writes shared state reachable
+  concurrently and a `Boundaries:` line naming every function that reads untrusted input (HTTP bodies, files, imports),
+  both `-` for none; and a `Domain rules:` line, `<rule> -> <module>.<function>` joined by `;` (`-` for none), so
+  each calculation or validation rule has exactly one home.
+overhaul.toml [commands] must hold test, acceptance (with a `{test}` placeholder), lint, dup, literals, shape, cycles
+  and entry_lint. A ruff lint must select E501 (or E) and the strict set E W F I B UP SIM RUF ARG A ANN201 PLR0915,
+  in the command or the ruff config (ruff.toml, .ruff.toml or pyproject.toml [tool.ruff]). Python acceptance tests
+  need a shared tests/conftest.py.
 
 Problems (each is one line):
   - a row is malformed (cells, id, phase, deps, acceptance, status, duplicate id);
@@ -24,8 +28,11 @@ Problems (each is one line):
   - an overhaul.toml command is missing, or a ruff lint misses the line-length rule or the strict set;
   - a policy line is missing, names an unknown owner module, or a concurrent writer has no acceptance test whose name
     holds `concurrent`; an HTTP write route (POST, PUT, PATCH, DELETE) not listed as a concurrent writer, unless the
-    Concurrency policy says single-threaded or serial;
-  - the cycles, entry_lint or literals command exits non-zero (run from the repo root, through overhaul.toml);
+    Concurrency policy says single-threaded or serial; a boundary function (or an HTTP route with a body) without a
+    negative acceptance test (a name holding invalid, malformed, bad, reject, corrupt, oversize, too_large, missing,
+    negative, empty or injection); a domain rule without one `<module>.<function>` home, or named twice;
+  - tests/conftest.py is missing;
+  - the cycles, entry_lint, literals or shape command exits non-zero (run from the repo root, through overhaul.toml);
   - with --run: a non-proven function's acceptance test PASSES (it must be red before the build), or a proven one FAILS.
 Python standard library only.
 """
@@ -39,13 +46,18 @@ from pathlib import Path
 
 COLUMNS = ["id", "phase", "module", "deps", "entry", "acceptance", "status"]
 STATUSES = {"planned", "building", "review", "landing", "proven", "needs-plan"}
-COMMANDS = ["test", "acceptance", "lint", "dup", "literals", "cycles", "entry_lint"]
-POLICIES = ("concurrency", "persistence", "errors")
-POLICY_LINE = re.compile(r"^[\s>*-]*\**\s*(concurrency|persistence|errors|concurrent writers)\s*\**\s*:\s*(.*)$", re.I)
+COMMANDS = ["test", "acceptance", "lint", "dup", "literals", "shape", "cycles", "entry_lint"]
+POLICIES = ("concurrency", "persistence", "errors", "untrusted input", "retries")
+ID_LISTS = ("concurrent writers", "boundaries")
+POLICY_LINE = re.compile(r"^[\s>*-]*\**\s*(concurrency|persistence|errors|untrusted input|retries|concurrent writers"
+                         r"|boundaries|domain rules)\s*\**\s*:\s*(.*)$", re.I)
+RULE_HOME = re.compile(r"^(\S.*?)\s*->\s*`?([\w\-]+)\.([A-Za-z_]\w*)`?$")
+NEGATIVE = re.compile(r"invalid|malformed|bad|reject|corrupt|oversize|too_large|missing|negative|empty|injection", re.I)
+BODY_ROUTE = re.compile(r"\b(POST|PUT|PATCH)\b")
 OWNER_TEXT = re.compile(r"^`?([\w.\-]+)`?\s+[-–—]\s+(\S.*)$")
 WRITE_ROUTE = re.compile(r"\b(POST|PUT|PATCH|DELETE)\b")
 SERIAL = re.compile(r"single[- ]threaded|serial", re.I)
-RUFF_STRICT = ("E", "W", "F", "I", "B", "UP", "SIM", "RUF")
+RUFF_STRICT = ("E", "W", "F", "I", "B", "UP", "SIM", "RUF", "ARG", "A", "ANN201", "PLR0915")
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ACCEPT = re.compile(r"^tests/acceptance/[\w./-]+\.py(::[A-Za-z_]\w*)+$")
 NO_ENTRY = {"", "-", "--", "none", "n/a", "na", "tbd", "todo", "?"}
@@ -271,8 +283,9 @@ def check_architecture(mods, problems, alabel):
 
 
 def parse_policies(text):
-    """({policy: (owner or None, text, line)}, (line, [function ids]) or None) from the `## Policies` section."""
-    pol, writers, inside = {}, None, False
+    """({policy: (owner or None, text, line)}, {id list: (line, [ids])}, (line, [rule entries]) or None) from the
+    `## Policies` section."""
+    pol, lists, rules, inside = {}, {}, None, False
     for n, line in enumerate(text.splitlines(), 1):
         if re.match(r"^#{1,2}\s", line):
             inside = bool(re.match(r"^#{1,2}\s+Policies\b", line, re.I))
@@ -281,30 +294,32 @@ def parse_policies(text):
         if not m:
             continue
         key, rest = m.group(1).lower(), m.group(2).strip()
-        if key == "concurrent writers":
+        if key in ID_LISTS:
             ids = [x.strip("`") for x in re.split(r"[,;\s]+", rest)]
-            writers = (n, [x for x in ids if x and x.lower() not in ("-", "none")])
+            lists[key] = (n, [x for x in ids if x and x.lower() not in ("-", "none")])
+        elif key == "domain rules":
+            rules = (n, [x.strip() for x in rest.split(";") if x.strip() and x.strip().lower() not in ("-", "none")])
         else:
             o = OWNER_TEXT.match(rest)
             pol[key] = (o.group(1), o.group(2), n) if o else (None, rest, n)
-    return pol, writers
+    return pol, lists, rules
 
 
-def check_policies(text, mods, rows, problems, alabel):
-    """One owner per cross-cutting policy, and a concurrent acceptance test for every concurrent writer."""
-    pol, writers = parse_policies(text)
+def check_owners(pol, mods, problems, alabel):
+    """Every cross-cutting policy line exists and names one owner module."""
     for key in POLICIES:
         if key not in pol:
             problems.append(f"{alabel}: ## Policies has no `{key.capitalize()}: <owner module> - <policy>` line")
             continue
-        owner, body, n = pol[key]
+        owner, _, n = pol[key]
         if not owner:
             problems.append(f"{alabel}:{n} policy {key}: write `<owner module> - <policy>`")
         elif mods is not None and owner not in mods:
             problems.append(f"{alabel}:{n} policy {key}: owner {owner} is no module")
-    if writers is None:
-        problems.append(f"{alabel}: ## Policies has no `Concurrent writers:` line (write - for none)")
-        return
+
+
+def check_writers(pol, writers, rows, problems, alabel):
+    """A concurrent acceptance test for every concurrent writer, and every threaded HTTP write listed."""
     by_id = {r.get("rid"): r for r in rows}
     for fid in writers[1]:
         r = by_id.get(fid)
@@ -319,6 +334,58 @@ def check_policies(text, mods, rows, problems, alabel):
         if r.get("rid") and r["rid"] not in writers[1] and WRITE_ROUTE.search(r.get("entry", "")):
             problems.append(f"{alabel}:{writers[0]} {r['rid']} is an HTTP write ({r['entry']}) but not in "
                             "Concurrent writers; list it, or declare the Concurrency policy single-threaded")
+
+
+def check_boundaries(bounds, rows, problems, alabel):
+    """Every function that reads untrusted input, and every HTTP route with a body, has a negative acceptance test."""
+    by_id = {r.get("rid"): r for r in rows}
+    for fid in bounds[1]:
+        if fid not in by_id:
+            problems.append(f"{alabel}:{bounds[0]} Boundaries: unknown function {fid}")
+    for r in rows:
+        fid = r.get("rid")
+        if not fid or not (fid in bounds[1] or BODY_ROUTE.search(r.get("entry", ""))):
+            continue
+        if fid not in bounds[1]:
+            problems.append(f"{alabel}:{bounds[0]} {fid} takes an HTTP body ({r['entry']}) but is not in Boundaries")
+        if not any(NEGATIVE.search(name) for _, name in r.get("tests", [])):
+            problems.append(f"{alabel}:{bounds[0]} {fid} reads untrusted input but has no negative acceptance test "
+                            "(a name holding invalid, malformed, oversize, corrupt, ...: bad input is rejected cleanly)")
+
+
+def check_rules(rules, mods, problems, alabel):
+    """Each domain rule names exactly one `<module>.<function>` home, and no rule is listed twice."""
+    seen = set()
+    for entry in rules[1]:
+        m = RULE_HOME.match(entry)
+        if not m:
+            problems.append(f"{alabel}:{rules[0]} domain rule {entry!r}: write `<rule> -> <module>.<function>`")
+            continue
+        rule, mod = m.group(1).strip().lower(), m.group(2)
+        if mods is not None and mod not in mods:
+            problems.append(f"{alabel}:{rules[0]} domain rule {entry!r}: {mod} is no module")
+        if rule in seen:
+            problems.append(f"{alabel}:{rules[0]} domain rule {m.group(1)!r} is listed twice; give it one home")
+        seen.add(rule)
+
+
+def check_policies(text, mods, rows, problems, alabel):
+    """One owner per cross-cutting policy, tests for concurrent writers and boundaries, one home per domain rule."""
+    pol, lists, rules = parse_policies(text)
+    check_owners(pol, mods, problems, alabel)
+    if "concurrent writers" in lists:
+        check_writers(pol, lists["concurrent writers"], rows, problems, alabel)
+    else:
+        problems.append(f"{alabel}: ## Policies has no `Concurrent writers:` line (write - for none)")
+    if "boundaries" in lists:
+        check_boundaries(lists["boundaries"], rows, problems, alabel)
+    else:
+        problems.append(f"{alabel}: ## Policies has no `Boundaries:` line (write - for none)")
+    if rules is None:
+        problems.append(f"{alabel}: ## Policies has no `Domain rules: <rule> -> <module>.<function>; ...` line "
+                        "(write - for none)")
+    else:
+        check_rules(rules, mods, problems, alabel)
 
 
 def ruff_selected(repo, cmd):
@@ -346,6 +413,13 @@ def ruff_selected(repo, cmd):
     return codes
 
 
+def ruff_covers(codes, code):
+    """True when a selected ruff code or prefix enables `code` (A selects flake8-builtins, not ANN; PL selects PLR)."""
+    linter = re.match(r"[A-Z]+", code).group(0)
+    return any(code.startswith(c) and (c.startswith(linter) or (linter.startswith("PL") and c == "PL"))
+               for c in codes)
+
+
 def check_ruff(repo, cmd, problems):
     """A ruff lint must enforce line length and the strict rule set before builders land."""
     if "ruff" not in cmd:
@@ -353,8 +427,8 @@ def check_ruff(repo, cmd, problems):
     codes = ruff_selected(repo, cmd)
     if codes is None or "ALL" in codes:
         return
-    missing = [c for c in RUFF_STRICT if c not in codes]
-    if "E501" not in codes and "E" not in codes:
+    missing = [c for c in RUFF_STRICT if not ruff_covers(codes, c)]
+    if not ruff_covers(codes, "E501"):
         problems.append("overhaul.toml: [commands].lint (ruff) does not select E501; enable the line-length rule")
     if missing:
         problems.append(f"overhaul.toml: [commands].lint (ruff) misses the strict set: select {' '.join(missing)}")
@@ -405,7 +479,9 @@ def validate(repo, run=False, timeout=600):
     if "lint" in cmd:
         check_ruff(repo, cmd["lint"], problems)
 
-    for k in ("cycles", "entry_lint", "literals"):
+    if (repo / "tests" / "acceptance").is_dir() and not (repo / "tests" / "conftest.py").is_file():
+        problems.append("tests/conftest.py: missing; scaffold the shared fixtures there, once, for every test file")
+    for k in ("cycles", "entry_lint", "literals", "shape"):
         if k in cmd:
             code, tail = run_cmd(cmd[k], repo, timeout)
             if code:

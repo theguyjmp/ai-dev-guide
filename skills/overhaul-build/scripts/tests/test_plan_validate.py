@@ -81,7 +81,11 @@ Depends on: calc
 Concurrency: calc - single-threaded CLI; one process per command
 Persistence: calc - none; nothing is stored
 Errors: calc - usage errors print one line to stderr and exit 2
+Untrusted input: calc - argv only; a non-number prints usage and exits 2
+Retries: calc - none; no retry loops
 Concurrent writers: -
+Boundaries: -
+Domain rules: sum is a + b -> calc.add; difference is a - b -> calc.sub
 """
 POLICIES = ARCH[ARCH.index("## Policies"):]
 CALC_T = "tests/acceptance/test_calc.py"
@@ -108,7 +112,7 @@ def r3(**kw):
 
 
 def toml(**over):
-    cmds = {"test": OK, "acceptance": ACCEPT, "lint": OK, "dup": OK, "literals": FAST, "cycles": FAST, "entry_lint": FAST}
+    cmds = {"test": OK, "acceptance": ACCEPT, "lint": OK, "dup": OK, "literals": FAST, "shape": FAST, "cycles": FAST, "entry_lint": FAST}
     cmds.update(over)
     body = "\n".join(f"{k} = '{v}'" for k, v in cmds.items() if v is not None)
     return f"[commands]\n{body}\n[limits]\nmax_parallel = 4\n[paths]\nfunctions = 'spec/FUNCTIONS.md'\n"
@@ -119,6 +123,7 @@ class Base(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="pv_toy_"))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         files = {"src/tiny.py": CLI, "tests/acceptance/test_calc.py": CALC, "tests/acceptance/test_report.py": REPORT,
+                 "tests/conftest.py": "",
                  "spec/FUNCTIONS.md": functions if functions is not None else table(R1, R2, r3()),
                  "overhaul.toml": toml_text if toml_text is not None else toml(**cmds)}
         if arch is not None:
@@ -316,7 +321,8 @@ class Cli(Base):
 class QualityPolicies(Base):
     def test_policies_required(self):
         found = self.problems(self.make(arch=ARCH[:ARCH.index("## Policies")]))
-        for key in ("`Concurrency:", "`Persistence:", "`Errors:", "`Concurrent writers:"):
+        for key in ("`Concurrency:", "`Persistence:", "`Errors:", "`Untrusted input:", "`Retries:",
+                    "`Concurrent writers:", "`Boundaries:", "`Domain rules:"):
             self.assertTrue(self.has(found, "## Policies has no", key), found)
 
     def test_policy_owner_must_be_a_module(self):
@@ -336,25 +342,59 @@ class QualityPolicies(Base):
 
     def test_http_write_route_must_be_a_concurrent_writer(self):
         threaded = ARCH.replace("single-threaded CLI; one process per command", "threaded HTTP server; one lock")
-        found = self.problems(self.make(functions=table(row(entry="`POST /add`"), R2, r3()), arch=threaded))
-        self.only(found, "F001 is an HTTP write (`POST /add`) but not in Concurrent writers")
-        self.assertEqual(self.problems(self.make(functions=table(row(entry="`POST /add`"), R2, r3()))), [])
+        found = self.problems(self.make(functions=table(row(entry="`DELETE /add`"), R2, r3()), arch=threaded))
+        self.only(found, "F001 is an HTTP write (`DELETE /add`) but not in Concurrent writers")
+        self.assertEqual(self.problems(self.make(functions=table(row(entry="`DELETE /add`"), R2, r3()))), [])
 
     def test_ruff_lint_must_be_strict(self):
         found = self.problems(self.make(lint="py -3 -m ruff check ."))
         self.assertEqual(len(found), 2, found)
         self.assertTrue(self.has(found, "does not select E501"), found)
-        self.assertTrue(self.has(found, "misses the strict set: select E W F I B UP SIM RUF"), found)
+        self.assertTrue(self.has(found, "misses the strict set: select E W F I B UP SIM RUF ARG A ANN201 PLR0915"),
+                        found)
         self.only(self.problems(self.make(lint="ruff check --select E501,F .")), "misses the strict set: select E W I")
-        self.assertEqual(self.problems(self.make(lint="ruff check --select E,W,F,I,B,UP,SIM,RUF .")), [])
+        strict = "ruff check --select E,W,F,I,B,UP,SIM,RUF,ARG,A,ANN201,PLR0915 ."
+        self.assertEqual(self.problems(self.make(lint=strict)), [])
+        self.only(self.problems(self.make(lint=strict.replace("ANN201,", ""))), "select ANN201")
+        self.assertEqual(self.problems(self.make(lint=strict.replace("ANN201,PLR0915", "ANN,PL"))), [])
         root = self.make(lint="py -3 -m ruff check .")
         (root / "pyproject.toml").write_text('[tool.ruff]\nline-length = 88\n[tool.ruff.lint]\n'
-                                             'select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "C90"]\n',
+                                             'select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "C90",'
+                                             ' "ARG", "A", "ANN201", "PLR0915"]\n',
                                              encoding="utf-8")
         self.assertEqual(self.problems(root), [])
 
     def test_literals_command_required(self):
         self.only(self.problems(self.make(literals=None)), "[commands].literals is missing")
+
+    def test_shape_command_and_conftest_required(self):
+        self.only(self.problems(self.make(shape=None)), "[commands].shape is missing")
+        root = self.make()
+        (root / "tests" / "conftest.py").unlink()
+        self.only(self.problems(root), "tests/conftest.py: missing")
+
+    def test_boundary_needs_negative_test(self):
+        arch = ARCH.replace("Boundaries: -", "Boundaries: F001")
+        self.only(self.problems(self.make(arch=arch)), "F001 reads untrusted input but has no negative acceptance test")
+        acc = f"{CALC_T}::test_add; {CALC_T}::test_add_rejects_malformed"
+        root = self.make(functions=table(row(acc=acc), R2, r3()), arch=arch)
+        (root / CALC_T).write_text(CALC + "\n\ndef test_add_rejects_malformed():\n    assert tiny('add', 'x', '1')\n",
+                                   encoding="utf-8")
+        self.assertEqual(self.problems(root), [])
+
+    def test_http_body_route_must_be_a_boundary(self):
+        found = self.problems(self.make(functions=table(row(entry="`POST /add`"), R2, r3())))
+        self.assertEqual(len(found), 2, found)
+        self.assertTrue(self.has(found, "F001 takes an HTTP body (`POST /add`) but is not in Boundaries"), found)
+        self.assertTrue(self.has(found, "F001 reads untrusted input but has no negative acceptance test"), found)
+
+    def test_domain_rule_needs_one_home(self):
+        found = self.problems(self.make(arch=ARCH.replace("-> calc.sub", "-> nowhere.sub")))
+        self.only(found, "domain rule 'difference is a - b -> nowhere.sub': nowhere is no module")
+        found = self.problems(self.make(arch=ARCH.replace("-> calc.sub", "")))
+        self.only(found, "write `<rule> -> <module>.<function>`")
+        found = self.problems(self.make(arch=ARCH.replace("difference is a - b", "sum is a + b")))
+        self.only(found, "domain rule 'sum is a + b' is listed twice")
 
 
 if __name__ == "__main__":

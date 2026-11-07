@@ -80,11 +80,15 @@ Owns: the cart table.
 - `lines() -> list[Line]` [F03]
 - `register(sub)` adds the `cart` commands [F03, F04]
 ```
-- One `## Policies` section, each line `<owner module> - <policy>` [by plan_validate.py]: `Concurrency:` (server
-  model, what locks), `Persistence:` (the ONE module that reads and writes stored state; atomic writes through a
-  unique temp file then replace), `Errors:` (typed errors, how the entry reports them, what is logged), and
-  `Concurrent writers:` listing every function that writes shared state two clients can reach at once; each needs
-  an acceptance test named `test_<f>_concurrent` (parallel clients through the entry, every write kept).
+- One `## Policies` section [by plan_validate.py], each line `<owner module> - <policy>`: `Concurrency:` (server
+  model, what locks), `Persistence:` (the ONE module that reads and writes stored state; every non-temp write, exports
+  too, is atomic: unique temp file then replace), `Errors:` (typed errors, how the entry reports them, what is logged),
+  `Untrusted input:` (HTTP framing: Content-Length missing, negative or malformed gives 400, over the body cap 413;
+  files read from disk checked for encoding and schema, damage reported as corrupt; CSV and other exports neutralise
+  formula injection), `Retries:` (every retry loop bounded, with backoff). Then `Concurrent writers:` (each needs a
+  `test_<f>_concurrent`), `Boundaries:` (every function reading untrusted input; each needs a negative acceptance test,
+  e.g. `test_<f>_rejects_malformed`) and `Domain rules: <rule> -> <module>.<function>; ...`: each calculation or
+  validation rule (value = qty * price, qty must be positive) lives in that one function and all others call it.
 - Unit tests for module m go in `tests/unit/m/`. Each data store has one owning module; the others use its API.
 - Every module owns at least one function. The graph is acyclic: code two modules need lives in the lower one, as
   an API item tagged with the function that builds it, and each user lists that function in its deps.
@@ -96,7 +100,7 @@ Owns: the cart table.
   <pkg>`; `server(data)` starts `-m <pkg> serve --port <free port>`, yields the base URL once `/healthz` answers and
   fails at once if the process exits; UI tests drive that URL with Playwright. Rust or JS: the same, via its binary.
 - One test per function, named as in its row; more cases are `@pytest.mark.parametrize` cases of that test.
-- Each test uses its own `tmp_path` data dir, asserts what the user sees (output, exit code, HTTP body, page text)
+- Shared fixtures live once in `tests/conftest.py` (copies fail shape_check.py). Each test uses its own `tmp_path` data dir, asserts what the user sees (output, exit code, HTTP body, page text)
   plus at least one error case, and reads results back only through its own entry or a dep's entry.
 - No mocks, fakes, monkeypatching or product imports. For an outside service the test cannot reach, assert up to
   the product's boundary through a public entry and add one DECISIONS line.
@@ -109,9 +113,10 @@ The commands are the gates land.py runs on the whole tree. Python, with `<overha
 [commands]
 test       = "py -3 -m pytest -q tests/unit"
 acceptance = "py -3 -m pytest -q tests/acceptance -k {test}"
-lint       = "py -3 -m ruff check --line-length 88 --select E,W,F,I,B,UP,SIM,C4,RET,PIE,RUF,C90 ."
+lint       = "py -3 -m ruff check --line-length 88 --select E,W,F,I,B,UP,SIM,C4,RET,PIE,RUF,C90,ARG,A,ANN201,PLR0915 ."
 dup        = "py -3 -m pylint --disable=all --enable=duplicate-code --min-similarity-lines=6 --recursive=y src"
 literals   = "py -3 <overhaul-build>/scripts/dup_literals.py src"
+shape      = "py -3 <overhaul-build>/scripts/shape_check.py src tests"
 cycles     = "py -3 <overhaul-build>/scripts/check_cycles.py src"
 entry_lint = "py -3 <overhaul-build>/scripts/entry_lint.py tests/acceptance"
 [limits]
@@ -126,7 +131,7 @@ state = ".overhaul/state.json"
 ```
 Rust: `cargo clippy -- -D warnings`, `cargo test`, cycles from `cargo metadata`; JS: `npx eslint .`, `npx jscpd src`,
 `node --test`. Install what is missing now (`py -3 -m pip install ruff pylint pytest`); then test, lint, dup, literals,
-cycles and entry_lint must each exit 0 on the skeleton.
+shape, cycles and entry_lint must each exit 0 on the skeleton.
 
 ## Step 7. Validate until PLAN OK
 Run `py -3 <overhaul-build>/scripts/plan_validate.py --repo <rebuild> --run`, fix the first reported line, repeat.
@@ -188,7 +193,7 @@ checking only the exit code.
 - The plan is done only at PLAN OK: every function has a public entry, an acceptance test that exists and fails now, and deps in the same or an earlier phase [by plan_validate.py --run].
 - Acceptance tests reach the product only through `_entry.py`: no product imports, mocks or fakes [by entry_lint.py].
 - The module graph is acyclic and modules import each other only through `Public:` names [by check_cycles.py].
-- Each cross-cutting policy has one owner, and every concurrent writer has a concurrent acceptance test [by plan_validate.py].
-- Lint enforces line length and the strict set, and no 20+ char literal is written twice [by plan_validate.py and dup_literals.py].
+- Each cross-cutting policy has one owner, each domain rule one function, every concurrent writer a concurrent test and every boundary a negative test [by plan_validate.py].
+- Lint enforces line length and the strict set, no 20+ char literal is written twice, functions stay within 30 lines, constants sit at the top and no fixture is copied [by plan_validate.py, dup_literals.py and shape_check.py].
 - A function counts only when its test is red on main, green after the merge, and every proven test stays green [by land.py].
 - Builders never edit tests/acceptance or leave their module's Paths [by drive.py's brief and the blind review].

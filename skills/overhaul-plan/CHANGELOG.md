@@ -1,5 +1,8 @@
 # overhaul-plan changelog
 
+## v2 quality fixes 2 from trial 3's blind audit, 2026-11-07
+The Policies section now also requires `Untrusted input:` (HTTP framing 400/413 with a body cap, files checked for encoding and schema, export formula injection neutralised, atomic non-temp writes), `Retries:` (bounded, with backoff), `Boundaries:` (each listed function and each HTTP route with a body needs a negative acceptance test) and `Domain rules: <rule> -> <module>.<function>` (one home per rule). tests/conftest.py is required and scaffolded; the toml template adds the `shape` command and the wider ruff set.
+
 ## v2 quality fixes from trial 1's blind audit, 2026-11-07
 Trial 1's rebuild scored 8/10 for concurrency-unsafe persistence, two error styles, imports past a module's API, repeated message literals and 76 long lines. The plan now declares a `## Policies` section (Concurrency, Persistence, Errors, one owner module each; Concurrent writers with a `test_<f>_concurrent` acceptance test), a `Public:` line per module (enforced by check_cycles.py), a strict ruff lint with line length 88, and the `literals` gate (dup_literals.py); plan_validate.py checks all of it.
 

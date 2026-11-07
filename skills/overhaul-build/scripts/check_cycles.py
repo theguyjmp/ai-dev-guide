@@ -9,7 +9,8 @@ Paths: repo-relative, comma-separated; a trailing / is a directory; * ? [ make a
 whose matching path is the longest. Depends on: the modules it may import, comma-separated; - or none for none.
 Public (optional, Python): the dotted modules and names other modules may import; a whole module listed allows every
 name in it. Without it, a module's public face is the __init__.py of each Paths directory and each Paths file, and an
-__init__.py with a literal __all__ exports only those names.
+__init__.py with a literal __all__ exports only those names. A Public entry deeper than a Paths directory whose
+__init__.py has a literal __all__ must name a submodule or name in that __all__, and no entry may be _private.
 Fails, printing `file:line: message` per violation, on a malformed module section, a cycle in the declared graph,
 a real import between modules that the declared deps do not allow, a cycle in the real module graph, an import
 cycle between Python files, and a Python import into another module past its public API (Public, else its face).
@@ -324,6 +325,30 @@ def dunder_all(text):
     return None
 
 
+def face_all(repo, alls, face):
+    """The cached literal __all__ of a face __init__.py, or None."""
+    if face not in alls:
+        alls[face] = dunder_all(read(os.path.join(repo, face)))
+    return alls[face]
+
+
+def private_entry(repo, mod, hit, entry, alls):
+    """Why a Public entry exposes a private name: a _name, or a name past a face __all__; None when it is public."""
+    if any(part.startswith("_") and not part.startswith("__") for part in entry.split(".")):
+        return "is private (a _name); export a public name instead"
+    tgt, name = hit
+    for p, _ in mod["paths"]:
+        face = p + "__init__.py"
+        if not p.endswith("/") or not tgt.startswith(p) or tgt == face:
+            continue
+        exported = face_all(repo, alls, face)
+        sub = tgt[len(p):].split("/")[0].removesuffix(".py")
+        if exported is not None and sub not in exported and (name is None or name not in exported):
+            return (f"reaches past its face {face}: its __all__ has neither {sub} nor {name or sub}; "
+                    f"export it there and import it from the face")
+    return None
+
+
 def public_problems(repo, mods, idx, arch, py_edges_out):
     """Python imports into another module that miss its Public entries (or, without them, its face files)."""
     out, listed, alls = [], {}, {}
@@ -334,6 +359,10 @@ def public_problems(repo, mods, idx, arch, py_edges_out):
             hit = py_public(idx, entry)
             if hit and owner(mods, hit[0]) == name and (
                     hit[1] is None or hit[1] in top_names(read(os.path.join(repo, hit[0])))):
+                why = private_entry(repo, mod, hit, entry, alls)
+                if why:
+                    out.append(f"{arch}:{n}: Public entry {entry} of module {name} {why}")
+                    continue
                 listed[name].add(hit)
             elif any(owner(mods, f) == name for cands in idx.values() for _, f in cands):
                 out.append(f"{arch}:{n}: Public entry {entry} of module {name} is no module or name it owns")
@@ -345,9 +374,8 @@ def public_problems(repo, mods, idx, arch, py_edges_out):
             face = any(p.rstrip("/") == tgt or (p.endswith("/") and tgt == p + "__init__.py")
                        for p, _ in mods[b]["paths"])
             if face and name not in (None, "*") and tgt.endswith("__init__.py"):
-                if tgt not in alls:
-                    alls[tgt] = dunder_all(read(os.path.join(repo, tgt)))
-                face = alls[tgt] is None or name in alls[tgt]
+                exported = face_all(repo, alls, tgt)
+                face = exported is None or name in exported
             ok = face
         if not ok:
             what = f"{name} from {tgt}" if name else tgt

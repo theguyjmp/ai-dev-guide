@@ -142,6 +142,21 @@ class CyclesTest(ToyCase):
         self.write("src/toy/api/routes.py", "from toy.core.money import CURRENCY\n")
         self.assertIn("imports CURRENCY from src/toy/core/money.py", self.assert_fails(CYCLES))
 
+    def test_public_entry_past_dunder_all_fails(self):
+        # trial 3: `Public: toy.core.money.CURRENCY` let api import a name the core face does not export
+        self.public_toy("toy.core.cents, toy.core.money.CURRENCY")
+        self.write("src/toy/api/routes.py", "from toy.core.money import CURRENCY\n")
+        out = self.assert_fails(CYCLES)
+        self.assertIn("Public entry toy.core.money.CURRENCY of module core reaches past its face "
+                      "src/toy/core/__init__.py", out)
+        self.assertIn("src/toy/api/routes.py:1: imports CURRENCY from src/toy/core/money.py", out)
+
+    def test_private_public_entry_fails(self):
+        self.public_toy("toy.core.money._hidden")
+        self.write("src/toy/core/money.py", "def _hidden():\n    return 1\n")
+        self.write("src/toy/api/routes.py", "")
+        self.assertIn("Public entry toy.core.money._hidden of module core is private", self.assert_fails(CYCLES))
+
     def test_unknown_public_entry_fails(self):
         self.public_toy("toy.core.nothing_here.x")
         self.write("src/toy/api/routes.py", "")
@@ -282,6 +297,39 @@ class DupLiteralsTest(ToyCase):
         self.write("src/web/b.ts", 'throw new Error("no such item in stock");\n')
         self.assert_fails(LITERALS)
         self.assert_clean(LITERALS, "--min", "40")
+
+
+SHAPE = os.path.join(SCRIPTS, "shape_check.py")
+FIXTURE = "import pytest\n\n\n@pytest.fixture\ndef data(tmp_path):\n    return tmp_path / \"data.json\"\n"
+
+
+class ShapeCheckTest(ToyCase):
+    def test_long_function_fails(self):
+        body = "".join(f"    x{i} = {i}\n" for i in range(30))
+        self.write("src/toy/a.py", f"def long():\n{body}    return 0\n")
+        self.assertIn("src/toy/a.py:1: function long is 32 lines, over 30", self.assert_fails(SHAPE))
+        self.assert_clean(SHAPE, "--max-lines", "40")
+
+    def test_constant_after_def_fails_unless_it_uses_a_def(self):
+        self.write("src/toy/a.py", "TOP = 1\n\n\ndef f():\n    return 1\n\n\nTABLE = {\"f\": f}\nLATE = 2\n")
+        out = self.assert_fails(SHAPE)
+        self.assertIn("src/toy/a.py:9: constant LATE is defined after the first def or class", out)
+        self.assertNotIn("TABLE", out)
+        self.assertNotIn("TOP", out)
+
+    def test_copied_fixture_fails(self):
+        self.write("tests/unit/test_a.py", FIXTURE)
+        self.write("tests/unit/test_b.py", FIXTURE)
+        out = self.assert_fails(SHAPE)
+        self.assertIn("tests/unit/test_a.py:5: fixture data is copied at tests/unit/test_b.py:5; define it once in "
+                      "a shared conftest.py", out)
+
+    def test_shared_conftest_and_long_tests_pass(self):
+        self.write("tests/conftest.py", FIXTURE)
+        body = "".join(f"    assert {i} == {i}\n" for i in range(40))
+        self.write("tests/unit/test_a.py", f"def test_many(data):\n{body}")
+        self.write("src/toy/a.py", "LIMIT = 3\n\n\ndef f():\n    return LIMIT\n")
+        self.assertIn("SHAPE OK 3 files", self.assert_clean(SHAPE))
 
 
 if __name__ == "__main__":

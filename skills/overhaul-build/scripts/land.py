@@ -10,7 +10,7 @@ R/.overhaul/wt/land, never in R's own working tree.
      commit on main.
   2. RED BEFORE: the function's acceptance must FAIL on main. If it passes: `acceptance already green before change`.
   3. Merge main into fn/<ID> (no force, no rewrite).
-  4. The whole-tree commands test, lint, dup, literals, cycles and entry_lint from overhaul.toml [commands] must
+  4. The whole-tree commands test, lint, dup, literals, shape, cycles and entry_lint from overhaul.toml [commands] must
      pass on the merged tree. A pytest exit of 5 (no tests collected) counts as pass.
   5. GREEN AFTER: the function's acceptance passes on the merged tree, and every row already `proven` still passes.
   6. One commit sets the row's status cell to `proven` in FUNCTIONS.md; main fast-forwards to it (and fn/<ID> too).
@@ -35,7 +35,7 @@ import time
 import tomllib
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WHOLE_TREE = ("test", "lint", "dup", "literals", "cycles", "entry_lint")
+WHOLE_TREE = ("test", "lint", "dup", "literals", "shape", "cycles", "entry_lint")
 PLAN_PATHS = ("spec/", "tests/acceptance/", "overhaul.toml")
 GREEN_BEFORE = "acceptance already green before change"
 
