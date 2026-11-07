@@ -1,296 +1,169 @@
 ---
 name: overhaul-plan
-description: Dissect an existing platform or project and write a short, strict, audited plan to rebuild it from the ground up with a fleet of agents, timed in agent hours from measured throughput, with a live progress dashboard. Use when the owner asks to overhaul, rewrite or re-plan a whole platform or project, or after overhaul-check returns OVERHAUL.
+description: Plan a ground-up rebuild of an existing project as a new <name>-rebuild repo of checked contracts - spec/FUNCTIONS.md (one row per user-visible behaviour), an acyclic spec/ARCHITECTURE.md, acceptance tests written now that drive only the public entry and fail, and overhaul.toml with the real toolchain - done only when plan_validate.py prints PLAN OK. Use when the owner asks to overhaul, rewrite or re-plan a whole project, after overhaul-check returns OVERHAUL, or when overhaul-build's drive.py exits 3 with a needs-plan function to split or fix.
 ---
 
 # overhaul-plan
 
-**Skills check (once a day, first step):** run `python3 ~/.claude/skills/dev-setup/scripts/check_skills.py` (Windows: `py -3 %USERPROFILE%/.claude/skills/dev-setup/scripts/check_skills.py`). It prints one line and checks the ai-dev-guide repo at most once a day; every later call that day only reads its note, so do not run it again in this session. If it says UPDATED, re-read this SKILL.md before going on. If the script is missing or fails, carry on.
+The plan is four things that scripts check, not prose: FUNCTIONS (what to build), ARCHITECTURE (where it goes),
+acceptance tests (when it is done) and overhaul.toml (how it is checked). overhaul-build counts a function only when
+its acceptance test goes red to green through land.py, so every test exists before any code. Size follows the
+project: one function per user-visible behaviour, one module per domain or data store; a 2k-line project plans in
+under 45 minutes into 10 to 30 functions and 2 to 5 modules, and bigger ones scale the same way, never toward a
+target. No other spec files, word budgets or audit rounds: plan_validate.py is the audit.
 
-You produce a rebuild plan that a master agent and 20 to 40 builders can execute fast without making the old mistakes. You plan; you never build product code here. Do not ask the owner questions: take the recommended option and note it in one line. **Exception:** anything that spends money, deletes, publishes publicly or changes an account other than the one the owner named still needs the owner's yes. Creating the private repo on the account the owner named is covered by the request.
+`<old>` is the old project, `<rebuild>` is `<old>-rebuild` beside it, `<pkg>` the product's package or command name,
+`<overhaul-build>` the absolute path of the installed overhaul-build skill.
 
-The builders are agents, not people. Every duration in the plan is in hours and comes from the throughput math in Step 4, as a projection health.py computes for the owner's dashboard only. No agent is given a time limit, target hour, rate or plan curve: agents get call caps, exit checks (the gate, Acceptance, lints) and ordering gates. The words day-estimate, person-day, sprint and week are banned from the spec. The real limits are check runs per hour, merge-queue throughput, tokens and review latency, never typing speed.
+## Step 1. Measure the old project (read-only, about 10 minutes)
+Reuse an overhaul-check report's sizes and duplication if one exists. Launch three read-only agents in ONE message
+(Explore type, Sonnet is enough), each capped at 40 tool calls, returning at most 60 lines and never whole files:
+1. Entries: every CLI command and flag (argparse, click, typer, `__main__`, console_scripts), HTTP route (method and
+   path) and page or UI action, one per line: `entry | file:line | what the user gets`.
+2. Behaviours and data: per entry, inputs, output, errors and side effects; every data store (files, tables, env
+   vars, config, outside services) with the entries that use it; user-visible fixes from `git log -i --grep=fix`.
+3. Size and duplication: lines per top folder, duplicate blocks (pylint duplicate-code, jscpd), dead code, old tests.
 
-If an overhaul-check report exists for OLD (`<OLD>/OVERHAUL-CHECK.md` or the path the owner gives), read it first. Its measurements replace Step 1's code half (use its OVERHAUL-CHECK-data/measure.json; do not re-measure), and its per-area verdicts (keep, refactor, rewrite) seed the salvage list.
+## Step 2. Create the rebuild repo
+`git init -b main <rebuild>`, same language and stack as `<old>` unless the owner says otherwise. Add `spec/`,
+`src/<pkg>/__init__.py` (empty), `tests/acceptance/`, `tests/unit/test_smoke.py` that imports `<pkg>` (so `test`
+collects something), a `.gitignore` with the Python caches and `.overhaul/` (runtime state, never committed), and
+`spec/OLD-ENTRIES.txt` with Step 1's entries, one per line. `pyproject.toml` holds only `[tool.pytest.ini_options]`
+with `pythonpath = ["src", "tests/acceptance"]` and `addopts = "--import-mode=importlib"` (repeated test file names
+never collide). Never copy old code into the rebuild.
 
-## Inputs (find them all yourself)
-- OLD: path of the existing project. NEW: name and folder of the rebuild (a sibling folder, never inside OLD). FLEET: NEW-fleet beside it, for paper.
-- Git host account for the new private repo. Check which account is active (`gh auth status`) and switch to the one the owner named before creating it. Also check what that account's plan gives a private repo: GitHub's merge queue needs an organization on Enterprise Cloud, and branch protection needs a paid plan. Write down "native" or "custom" for each; a custom merge queue and gate bot are sized into M0.
-- Machines that will build: measure cores, threads, RAM and free disk on each (PowerShell CIM or ssh). Never guess.
-- Owner rules: read the owner's CLAUDE.md files and memory; every owner rule becomes a standard or a tripwire.
-- Language and toolchain of OLD and NEW. Every size limit, lint and check command below is stated for that toolchain, not copied from another project.
+## Step 3. spec/FUNCTIONS.md
+One table, exactly `| id | phase | module | deps | entry | acceptance | status |`:
+- id: `F01`, `F02`, ... unique, never reused. phase: an integer from 1; phase 1 is the smallest set that makes the
+  product usable end to end (under 3k lines, use 1 or 2 phases).
+- module: one from ARCHITECTURE. deps: function ids joined by commas, `-` for none, each in the same or an earlier
+  phase, including every function that builds an API item this one calls.
+- entry: the public way a user does it: `cli: shop cart add <sku> <qty>`, `http: POST /cart/items`,
+  `ui: /cart, click Add`. Never an internal function.
+- acceptance: `tests/acceptance/<file>.py::test_<id>_<what>`, the id in lower case so `-k` picks only it.
+- status: `planned`; only land.py writes `proven`, in its land commit.
 
-## Permissions first
-Before Step 1, and again when MACHINES.md is written: run `py -3 ~/.claude/skills/dev-setup/scripts/permissions.py` with `--repo <NEW repo>`, `--dir` for the fleet folder, worktree folder and test data folder, `--host` for every ssh machine, `--cli` for the check CLI, and `--guard <fleet>/bin/burn-guard.py`. If it prints a line, that line is the first thing in your next message to the owner: one paste, nothing else asked. Keep working while it waits; nothing that needs those rules is attempted before it prints `all set`.
+A function is one user-visible behaviour a builder can finish in about 300 lines or fewer, unit tests included;
+split bigger ones by sub-behaviour (`report --csv`, `report --pdf`). Helpers, refactors and infrastructure are never
+rows. F01 is the smallest entry that proves the product starts (`shop --help` exits 0, or `GET /healthz` answers
+200); every function reaches it through deps. Old entries that do the same thing become one function. Map each
+OLD-ENTRIES.txt line with ` -> F04` (or ` -> F04,F05`), or ` -> D3` when decision D3 drops it, until
+`grep -vE -- '-> [FD][0-9]+(,[FD][0-9]+)*$' spec/OLD-ENTRIES.txt` prints nothing.
 
-## Step 1. Measure the old project and the old fleet (read-only, numbers only)
-- Code: lines per module and package, the largest files, file and function sizes over limits, duplicate capabilities (two stores, registries, pickers, undo paths), style tokens versus raw values, test counts and gate steps, the bug history (count by status), the feature map or ledger. `py -3 -I ~/.claude/skills/overhaul-check/scripts/measure.py <OLD> --out <scratchpad>/measure.json` gives most of this in one run (skip it when overhaul-check data exists). Read the JSON by key, never whole.
-- Fleet: items landed per hour, tokens per landed item, rework passes per item, share of agent calls that only read or waited, launch-to-PR time. Take them from the old fleet's burn, outcome and context-watch scripts and transcripts where they exist. These are "the measured failures" the audit prompt quotes.
-- **No old fleet** (the project was built by people or one agent): use the defaults 1 function per builder-hour, 2 M tokens per function, 1.5 passes per function, and mark every one ASSUMED wherever it appears.
-- Write the numbers into a scratch file, not into chat. Decide per area: rewrite, salvage, keep as data, or integrate a proven library.
+## Step 4. spec/ARCHITECTURE.md
+One section per module in exactly this form; check_cycles.py parses `## Module`, `Paths:` and `Depends on:`:
+```
+## Module cart
+Paths: src/shop/cart/
+Depends on: app, catalog
+Owns: the cart table.
+Public API:
+- `add_line(sku: str, qty: int) -> Line` [F04]
+- `lines() -> list[Line]` [F03]
+- `register(sub)` adds the `cart` commands [F03, F04]
+```
+- `Depends on: none` when it has none. Paths are folders or files, never name globs; unit tests for module m go in
+  `tests/unit/m/`. Each data store has one owning module; the others use its API.
+- Every module owns at least one function. The graph is acyclic: code two modules need lives in the lower one, as
+  an API item tagged with the function that builds it, and each user lists that function in its deps.
+- Entry wiring is discovered, never edited: the entry module (F01) finds each module's `register(sub)` or HTTP router
+  by scanning the package, so builders stay in their Paths; its section gives the start command and env vars.
 
-## Step 2. Turn history into data
-- spec/FUNCTIONS.md: one table, `| Id | System | Phase | Function | Acceptance |`. It lists every function of every system from the master plan or feature map. Acceptance is the real-user drive (mouse, keyboard or API steps) that proves it. Drop rows that are defects, owner decisions or research tracks. It also carries the bug and feedback rows (Step 4, after item 6). The row count is the progress denominator.
-- spec/PATTERNS.md: one table, `| Id | Pattern | Rule |`, every recurring bug pattern from the bug history and audits, each mapped to the STANDARDS rule id (`S<n>`) that prevents it. No pattern may map to nothing.
-- Both are generated by a script from the old files; keep recipes, branch names and old ledger notes out.
+## Step 5. tests/acceptance, written now, failing now
+- `tests/acceptance/_entry.py` is the only door into the product: `run_cli(data, *args)` runs `sys.executable -m
+  <pkg>`; `server(data)` starts `-m <pkg> serve --port <free port>`, yields the base URL once `/healthz` answers and
+  fails at once if the process exits; UI tests drive that URL with Playwright. Rust or JS: the same, via its binary.
+- One test per function, named as in its row; more cases are `@pytest.mark.parametrize` cases of that test.
+- Each test uses its own `tmp_path` data dir, asserts what the user sees (output, exit code, HTTP body, page text)
+  plus at least one error case, and reads results back only through its own entry or a dep's entry.
+- No mocks, fakes, monkeypatching or product imports. For an outside service the test cannot reach, assert up to
+  the product's boundary through a public entry and add one DECISIONS line.
+- It fails because the product is missing, never because the test is broken:
+  `py -3 -m pytest --collect-only -q tests/acceptance` exits 0 and lists every acceptance cell.
 
-## Step 3. Quarantine
-Create NEW as its own folder and private repo with its own CLAUDE.md. No agent works with OLD as its working directory; OLD is never cloned, mounted or added as a remote. Old material enters only by a SALVAGE PR naming file, commit and changes, and a fingerprint lint refuses copied code without one. Delete or replace any stale copies of the plan left in OLD.
+## Step 6. overhaul.toml
+The commands are the gates land.py runs on the whole tree. Python, with `<overhaul-build>` filled in:
+```toml
+[commands]
+test       = "py -3 -m pytest -q tests/unit"
+acceptance = "py -3 -m pytest -q tests/acceptance -k {test}"
+lint       = "py -3 -m ruff check ."
+dup        = "py -3 -m pylint --disable=all --enable=duplicate-code --min-similarity-lines=6 --recursive=y src"
+cycles     = "py -3 <overhaul-build>/scripts/check_cycles.py src"
+entry_lint = "py -3 <overhaul-build>/scripts/entry_lint.py tests/acceptance"
+[limits]
+max_parallel = 4
+builder_max_calls = 60
+brief_max_tokens = 40000
+retries_per_function = 1
+[paths]
+functions = "spec/FUNCTIONS.md"
+architecture = "spec/ARCHITECTURE.md"
+state = ".overhaul/state.json"
+```
+Rust: `cargo clippy -- -D warnings`, `cargo test`, cycles from `cargo metadata`; JS: `npx eslint .`, `npx jscpd src`,
+`node --test`. Install what is missing now (`py -3 -m pip install ruff pylint pytest`); then test, lint, dup, cycles
+and entry_lint must each exit 0 on the skeleton.
 
-## Step 4. Write the spec: exactly these files, 5,200 words of prose at most
-Tables do not count toward the word cap, but no spec table may have more than 40 rows. The exceptions are the tripwire table, FUNCTIONS.md and PATTERNS.md, which are data.
+## Step 7. Validate until PLAN OK
+Run `py -3 <overhaul-build>/scripts/plan_validate.py --repo <rebuild> --run`, fix the first reported line, repeat.
+Usual fixes: move a function to its dep's phase; move what two modules both need into the lower one; drive through
+`_entry.py` instead of importing; a test that passes now asserts nothing the product must do. Never loosen a check,
+skip or xfail a test to reach PLAN OK. Same failure three times: split or merge the function, with a DECISIONS line.
 
-1. **CLAUDE.md:** read order per role, confirmation line, quarantine, owner-module-only, where paper goes, hand-back pointer, paths of every file agents need. It is under 400 words, because every agent loads it at start. Builder read order: the brief, then code; the brief already carries the rules and INDEX files the packet needs. Auditor read order: the template, then its target. It also carries the hook rule: "Before any new public item, search the INDEX files. If another owner has it or should have it, file FLEET/hooks/<packet>.md and hand back that part; reimplementing another owner's capability fails the PR, asking passes."
-2. **spec/STANDARDS.md:** numbered rules `S1`, `S2`, …, each one line or two, each ending with `Lint: <name>` (the lint that checks it) or `Review`.
-   - Sections: where code goes; size limits; operations and state; interface; code; proof; working together.
-   - Size limits are set for NEW's language: file 500 lines, function 75, module 4,000, package 25,000 (a crate, an npm package or a Python package), PR under 400 lines and a 6,000-line reading radius. Tighten them for the language if needed; never loosen them.
-   - The proof section covers the red pin first, the gate as the only proof, tests that wait on results and not proxies, and that a function counts only when its Acceptance passes on the deployed main build. **The Acceptance spec for a function is written by a different agent from the one that builds it**, one packet per system covering 5 to 10 functions. It lands before the build packet is dispatched, marked expected-fail with its FUNCTIONS id so main stays green. The build PR removes the mark, and the gate fails an expected-fail spec that passes.
-   - Every pattern id appears in a rule.
-   - Whatever the project, STANDARDS also carries these rules:
-     - Every model (LLM) call the product makes sets prompt caching, and a test asserts cache reads on the second call.
-     - Nothing leaves the owner's machine unless the owner allows it.
-     - Before a capability ships, an agent uses it the way a real user would (mouse, keyboard or API), drawing on the bug history.
-     - Humanoid assets are clothed or excluded before any render.
-     - Every realm (window, dialog, canvas) shows the bug and feedback button from M0, above every layer; reports carry picked elements, screenshots and redacted repro data (never credentials) and go only to the project's inbox.
-     - Every PR cites a FUNCTIONS id, a bug id or a red tripwire.
-     - No PR copies or re-implements a capability another owner's INDEX lists.
-     - Each capability's owners.toml row lists its forbidden names as stem globs (for example `*Undo*`, `*History*`, `*Journal*` for the undo owner), and the duplicate-capability lint fails any new public name outside the owner that matches them.
-     - No catch-all modules: utils, helpers, common, shared, misc, tmp, legacy, v2 and the like are refused by a name lint, so every shared function has a named owner.
-     - A look-alike lint flags any new function, component or type, private helpers included, whose name tokens (public items) or body hashes match another owner's INDEX entry or code, on main or in flight. The slots index a body hash of every function, public or private: normalized line windows plus one whole-function shape hash with local names and literals blanked, so a renamed private copy is caught. A field-only record gets no body hash and is never flagged: a class whose methods only store or return fields (an `__init__` that only assigns fields, simple properties, dataclass or record syntax, or one trivial method). A class with real logic is hashed on its methods alone, so only a matching body of real logic counts as a look-alike, never fields alike. The PR goes to the risky-PR auditor, who merges it only with a hook request to that owner or a written reason it differs.
-     - Only the callers an owner row lists may import that owner (an import-allowlist lint), and layers depend only downward.
-     - Every module starts with a header naming its purpose and owner id.
-     - Before new public code, the builder runs the check CLI's `find <words>` and pastes its output in the PR. In seconds it searches what exists (every owner's INDEX), what is planned (owners.toml rows, forbidden_types and FUNCTIONS rows, with owner and id) and what is in flight (open DISPATCH packets and new public items on open PR branches, which the check slots write to FLEET/inflight-index.tsv on every check). Planned and in-flight rows are matched on their inputs, outputs and examples (the kinds of value they take and give, such as a time range, a length or an id) as well as on words, so two packets that need one thing in different words still meet. An unclear result is a hook request answered by the ruling agent; builders never ask the master. find ranks and caps its output: the top 8 hits, one-word hits on common words hidden when stronger hits exist, owners.toml rows labelled [owner] rather than planned, the caller's own packet left out, and its footer printed once per call.
-     - The hook rule is hook-first: a planned or in-flight find hit for the code, an owner that has or covers it, or the builder's own view that it is not its owner's, means stop and file the hook before writing it. A full-word find hit on an owner is a hook unless the builder quotes that owner's purpose excluding the need ("it only does Y, so I do it here" is the miss). The check CLI refuses the land of a packet whose hook has no ruling yet or whose branch adds a name a ruling holds. A builder never reshapes code to get past a lint (bare tuples for a flagged class, a renamed helper); it files a hook, and a ruling decides; if the lint is wrong, the ruling fixes the lint in the protected batch (never a waiver).
-     - Text files are LF: the seed commits `.gitattributes` with `* text=auto eol=lf`, and every tool that writes files writes LF, so diffs, lints and body hashes never see whole-file CRLF churn.
-     - Plain words in code, comments, docs, UI text and hand-backs: no filler phrases, no comment that restates the next line, no emoji. A slop lint checks it, using the phrase list in overhaul-check's measure.py.
-3. **spec/ARCHITECTURE.md:**
-   - The layer table (owns, depends on).
-   - The owner table: one owner per shared capability, and its callers.
-   - The owners.toml schema and the limits the lints read. Each capability row has `id`, `owner`, `callers` (the import allowlist) and `forbidden_types`. Build an operation map by script: for every FUNCTIONS row, the operations it needs (algorithms, solvers, data models, services and UI controls, for example kinematics, flattening, meshing, constraint solving, patterns, path following, offsets, spatial index, diff, validation, a timeline, a picker). Every operation two or more systems need gets one owner row, with `forbidden_types` written as case-insensitive stem globs (for example `*Scrub*`, `*Timeline*`, `*Player*` for a timeline owner; hand-listed names always miss synonyms) and the full list of functions that must call it. The map also records each operation's dependencies (an operation that reads another operation's output); each shared packet's `follows` is set from them, so a shared piece lands before the packets that call it and those packets wait for it, never launched in parallel with it. When copying a story's rule into an operation row, check the rule against the story's own examples and raise a contradiction as a question. No two owners' globs may match the same name. Write FLEET/bin/owners_check.py for NEW: it fails on any operation in the operation map, or in an auditor's own operation list, with no owner or two owners, on a calling function missing from its owner's caller list, on two owners' globs matching one sample name, and on an owner a caller's layer cannot import. It must report 0 before Step 6 and again after each fix round. Add every duplicate the old platform's history shows. Group shared functions into at most about 40 owners by capability, so the owner table stays under the 40-row cap and each INDEX under 150 lines; an owner that would pass 150 is split.
-   - The bug and feedback owner row (Step 4, after item 6).
-   - The INDEX rule: each owner has a generated INDEX.md, one line per public function, under 150 lines, regenerated by the check slots and never hand-edited.
-   - The stub rule: each stub is marked `STUB(owner, packet-id)`, and a stub with callers gets its real implementation dispatched before any caller packet.
-4. **spec/PLAN.md:**
-   - **Goal and the one number:** functions proven on main of the total.
-   - **M0, in this order:** check CLI and slots, merge queue and gate bot, deploy of main, health.py, dispatcher; then the bug and feedback button and its inbox, so reports flow from the first deploy; then traits and stubs, owners.toml, lints, red-team suite, salvage. Phase 0 cannot be proven without the first five, so they come first.
-   - **Phase 0, the risk slice:** the 3 to 5 highest technical risks (kernel, renderer, solver, file format, whatever this project's are), built as one thin end-to-end path, for example open, model, render, save. Its briefs are listed here, hand-written, because they go out before the dispatcher is trusted. It is gated, not timed: no build packet of a later phase is dispatched until Phase 0 is proven on deployed main (the Phase 0 gate).
-   - **Phases** with exit tests and ordering gates; their hours are a projection (dashboard only).
-   - **The systems table:** functions, phase, exactly one owner each, and write or integrate. Integrate a proven library before writing one; say which library and why.
-   - **The throughput math:**
-     - Finish hours = functions ÷ (functions per builder-hour × fleet size), capped by check runs per hour and merge-queue merges per hour.
-     - Until the pilots measure the rate, use the old fleet's measured rate × 3, marked ASSUMED.
-     - health.py re-derives the projection by this formula only, after the pilots' first PRs and then every 24 h of active fleet time, and logs it in RULINGS.md. No agent acts on it.
-     - Any phase longer than the math names its bottleneck.
-   - **The token budget:** a target number of tokens per proven function, and a total against the account's weekly limit.
-   - **Also:** the shared-hub line, the salvage list pinned to a commit (at most 30 files; more files mean more rewrite), the team, and the definition of done (every function proven, full gate green, final blind audit passed).
-   - Seams for future systems go into owners, not new systems.
-5. **spec/MASTER-AGENT.md:**
-   - **The master is the main chat, never a subagent** (agents a subagent starts run one at a time). MASTER-AGENT says so in its first line.
-   - **The main chat stays thin.** health.py runs every 10 minutes from an external scheduler (Windows Task Scheduler on the owner's PC, or a cloud routine), not from the main chat. It writes HEALTH.tsv, the dashboard data files and COORD-STATE's mechanical fields. One in-session Monitor prints only new HEALTH.tsv red lines and is the main chat's wake path. The main chat wakes only on a red, a gate result, or a heartbeat at most hourly. It may read each agent's and packet's start, end and duration and progress over time in HEALTH.tsv and COORD-STATE, and acts on them only by process fixes (stop and WIP, a fresh pass, a smaller packet, a better brief, more slots, the stall gate), never by passing a time to an agent. Hand-back notices get no tool call and are handled together each loop. It reads MASTER-CARD and COORD-STATE only at session start and after a compaction. Rulings and design-note answers are written by a short-lived ruling agent (Opus for design, Sonnet otherwise), which returns 3 lines; the master never reads a log or diff itself.
-   - **If the master stops:** there is no pager. The master refreshes the dashboard every 20 minutes and its status dataset goes stale 2 hours after the last upload, so a stopped master shows on the dashboard. health.py keeps running from the scheduler, and a new session resumes from MASTER-CARD and COORD-STATE.
-   - **Soft launch:** 3 pilot builders, checked at first edit (by call 15), first check (by call 40) and first PR (within the call cap). The external health run is every 10 minutes. Ramp 3, 10, 20, 40 only when the pilot gate is green.
-   - **The tripwire table:** columns `| Id | Red when | Source | Action |`, the fixed ids below, each with a numeric threshold, the source it is measured from (transcripts, git, the gate log or the machines), and the action.
-   - **Gates** on progress and order, checked by health.py (no fixed-hour checkpoints):
-     - Pilot gate: every pilot's first PR merged green before any ramp step.
-     - Phase 0 gate: no build packet of a later phase is dispatched until Phase 0 is proven on deployed main, M0 has landed and every red-team violation is refused.
-     - Stall gate: the proven rate under 70% of the projection's rate for 2 runs in a row (H24), or tokens per proven function over budget for 2 runs (H03).
-     - Freeze gate: a module frozen twice.
-     - A red stall or freeze gate stops the phase and sends a digest to the owner. A fresh blind auditor approves the re-plan; the master never approves its own and never sees the target, only the red.
-   - **Auditor briefs are fixed templates** in FLEET/templates/, written in Step 4b and on the protected list. The master fills only the target (a PR, batch or function list) and cannot change the instructions.
-   - **Management check:** every 3 hours. Mechanical items are checked by script; a fresh agent samples briefs and rejections.
-   - **Design notes:** written per system early, with a blind review before its system's first build packet.
-   - **Scripted briefs:** self-contained, with fixed contents: the packet's FUNCTIONS id and Acceptance, its owner module and allowed files, the text of each STANDARDS rule it touches, the INDEX of every owner it calls inlined, the project's test style (the framework and base class, taken from its existing tests or the plan, for example unittest.TestCase classes and no bare pytest functions), the hook rule, the call cap, the wait rule, the hand-back format, the work-style block below (word for word), and for a follow-on pass the previous pass's hand-off file (done, left, files touched, next step). Builders never read spec/ or FLEET logs, and a follow-on pass does not re-explore what its hand-off already says.
-   - **Work style**, carried word for word by the scripted brief template and every auditor template (it may sit in the brief template table or FLEET/templates when prose space is tight):
-     > Work style:
-     > (1) The brief is the plan. Do not restate it, re-derive its facts or weigh options. When two ways meet the acceptance, take the simpler one.
-     > (2) Think one step ahead in a line or two: what next and why. No essays, no recaps.
-     > (3) Read only what the brief names and what find returns. Open a file to edit or call it, not to learn the codebase. First edit by call 15.
-     > (4) Batch independent tool calls in one message, and ask for small outputs.
-     > (5) Stop when the exit check passes: no polish, extra tests or while-I'm-here changes.
-     > (6) The same step failing twice means hand back with the error.
-     > (7) Write nothing extra: comments say why, and hand-backs are the fixed three lines.
-   - **The wait rule:** an agent waits on a check as ONE foreground wait, at most 9 minutes per call (a tool timeout), never a background wait that re-wakes it. No agent is launched just to wait.
-   - **Review:** lints on every PR. An auditor before merge on risky PRs (new module, hook in another owner, unsafe code, security, dependency) and on a random sample after merge. A blind auditor also checks 10% of proven functions every 12 hours for stubs and thin fakes.
-   - **Rulings:** a ruling names every hook id it answers; its number is allocated when its brief is written, so parallel rulings never renumber. When two callers need the same logic around an owner's function (a coercion, a wrapper), the owner takes it; a ruling never tells each caller to keep its own wrapper. A ruling that creates or names a shared owner holds the overlapping part of every in-flight packet (one hold line per name, which the land checks); never "land now, move later". A ruling that creates a public name adds that name's stem glob to its owner at once (`owner-add`), so the duplicate-capability lint guards it from then on. A new owner's purpose names its subject (for example "calendar dates: reading, writing and day arithmetic"), not one verb, and its globs cover the near verbs and synonyms. The brief of a packet a ruling created quotes the ruling whole, every item of it, so its builder builds instead of re-hooking. A packet its rows replace is superseded: the master starts the replacement (first, if it starts from the old branch), runs supersede, and launches the replacement in the old packet's place.
-   - **Measured state:** every count in COORD-STATE (calls, passes, packets, stale rows) is copied from health.py, the check CLI or git, never estimated. The finish needs a clean end state: no open or in-flight DISPATCH rows, no in-flight index rows, and no branch or worktree but main.
-   - **Fixes and stalls:**
-     - One fix pass, then a design change.
-     - A waste hunt when the rate stalls: one analyst per red episode, never one per health run.
-     - Bugs travel as fix packets, one agent per bug through to its queued audit, inside its call cap (H15 is a health.py measurement only). The merge queue's batched gate is the build-once train for an overhaul: builders never run full builds, and a fix counts only when the gate proves it red on main before and green after.
-     - A frozen module (H23) gets one fresh Opus architect who redesigns or splits it, never more fix passes.
-   - **Bottleneck watch:** every health run, health.py measures the wait at each stage of the bottleneck table below, from the transcripts, git, the gate log and the fleet files, and writes FLEET/dash/bottleneck.json: per stage its queue length, median and p90 wait, its share of the total waiting, and `top` on the stage with the largest share, named as the current bottleneck. The master applies that stage's fix from the table and logs one line in RULINGS.md: stage, measured wait, fix, expected wait. On the next run health.py compares that stage's median wait with the logged one. If it did not drop, the fix is reverted or changed, and one Sonnet analyst per episode measures why. The same top stage for 3 runs, or a fix that did not reduce its wait, is H26: a capacity re-plan (fleet size, slots, packet size), approved by a fresh blind auditor like any re-plan. MASTER-AGENT carries the table and the duty; PLAN's M0 health.py item names bottleneck.json.
-   - **Inbox triage:** health.py lists new inbox reports each run, and one untriaged after a run is red (a tripwire row). One Sonnet ruling agent triages them in a batch: a bug becomes a fix packet (red pin first), feedback becomes a FUNCTIONS row with an Acceptance (by ruling) or an owner ruling, with owner feedback ahead of new functions. It fills each report's pattern-id field and writes the status the panel shows.
-   - **The mechanic:** one Sonnet agent with a merge-only brief. It merges audited M0 PRs until the merge queue runs, then ends.
-   - **What binds the master:**
-     - No push to main.
-     - Protected files change only in a protected batch, run every 3 hours or at once when 3 or more items are queued. A fresh blind auditor approves it, the gate bot applies it, and a digest goes to the owner. No work waits on the batch, and the owner is never asked to sign.
-     - A blind auditor reports to the owner every 12 hours.
-   - **The dashboard** (Step 5): its URL. health.py writes the data files each run; the master uploads them at every 20-minute heartbeat, all in one message, because a script cannot call the Artifact tool.
-   - **Model per job:** sonnet for merge, paperwork, checks, analysts and rulings that are not design; opus for build, debug, audits, design and design rulings. No agent exists only to wait. Effort per job, set on every launch next to the model, and carried on every DISPATCH line: low for merges, paperwork, status, holds and unskip; medium for builders on a scripted brief and for analysts; high only for design notes, debugging after a red, architecture rulings and audits.
-6. **spec/MACHINES.md:**
-   - Each machine's measured resources and its role. The owner's own PC runs at low priority under RAM and disk floors.
-   - The check CLI's name and its commands (lint, check, fix, handback, wip, find, supersede, add-row, owner-add, unskip, holds), for NEW's toolchain. `wip` saves a stopped agent's worktree as a pushed WIP commit plus a hand-off file (done, left, files touched, next step), so the next pass starts from it instead of re-reading. `supersede <old> <new>` clears the old packet's in-flight rows, sets its DISPATCH status to superseded and removes its worktree and branch, so a replaced packet leaves no phantom find hits or look-alike reds. find's ranking and cap (above) are part of the command. `add-row` is the only way an agent writes a DISPATCH row. The follow-on brief that `start` writes names the `wip` hand-off file of the pass it follows. `check` fails a story or acceptance test file that collects 0 tests, and refuses a packet that adds or changes a def when its hand-back holds no find output (follow-on passes included). `owner-add` adds an owner, or the stem globs a ruling names to an existing one; land refuses while a ruling's glob is not in owners.toml. `unskip <hook>` removes main's skips that name a hook once its fix lands, and commits only when the tests pass, so no agent pass exists for it. `holds <packet>` closes a packet whose pins already pass on main before any change as "already holds": it records the main tests that already cover the item, lands only the pins no main test covers (as regression guards), and the story count counts the row as passing through those tests.
-   - Agents never run the compiler themselves. They get a local lint in seconds, shared warm check slots, affected-only checks plus reverse dependencies, and browser specs of the affected surfaces.
-   - Build speed setup for NEW's toolchain (for example compile cache, dependency unification, fast linker, test runner), plus a nightly cache sweep.
-   - Generated files (INDEX.md included) are written by the slots, never committed by builders, and there are no hand-edited central lists.
-   - The merge queue (native or custom, from the Inputs check) is batched. It ejects only the PRs owning a failure, never bisects, runs the full gate on every batch, and deploys main to the rebuild port after each green batch.
-   - Fleet size = check runs per hour × 0.85 ÷ runs per builder-hour, with the disk math checked against free space.
-   - Dispatch is scripted: packets whose owner modules overlap nothing in flight. Hook requests jump the queue.
-   - The external scheduler entries: health.py, the 12-hourly blind auditor and the deploy, each with its scheduler and command.
-   - The red-team suite runs on every lint change and every 24 hours.
-   - Old-fleet scripts (context watch, burn, outcome watch) are reused through a SALVAGE PR where they exist, not rewritten.
+## Step 8. Commit and report
+`git add -A` and `git commit -m "plan: N functions, M modules, PLAN OK"` on main; report three lines: the `<rebuild>`
+path, `PLAN OK, N functions, M modules`, and next: run overhaul-build. No dashboard to build: overhaul-build's
+dash.py writes the local `dash/index.html`; publishing it as an Artifact is optional when that tool exists.
 
-**The bug and feedback button (every plan; its rows go into the files above).** A small round button, bottom right, on the highest layer of every realm the app has (windows, dialogs, canvases, above modals and overlays). It never covers app controls: it drags aside and remembers where it was put, and it follows both themes and reduced motion. Its panel has the type (bug or feedback), an element picker (hover highlights, click selects, Esc cancels, several picks; each records its stable selector, owner or component name, text and bounds), a description, and screenshots taken automatically (the whole window, plus a crop of each picked element with the highlight drawn), which the owner can add or remove before sending. Repro data is attached automatically: route or screen, app version and git sha, build and environment, OS, browser or runtime, viewport and scale, theme, user role (never credentials), the last 50 user actions with their arguments, the last 100 console or log lines and errors, failed network calls (method, path and status, no bodies), the relevant state ids (document, selection) and the time. Secrets and personal data are redacted before anything is saved. The app writes each report with its screenshots to the project's inbox: by default FLEET/INBOX through the app's local API, or the owner's tracker if the plan names one. Nothing leaves the owner's machine unless the owner allowed it. Each report gets an id, a type, a pattern-id field (filled at triage) and repro steps generated from the action log; the reporter sees its id and status in the panel.
-- FUNCTIONS: one system, "Bug and feedback capture", phase M0 (or Phase 0), new ids at the end, at least these rows (adapt the names to the app):
+## spec/DECISIONS.md
+One numbered line per decision, no ceremony: `D3: drop export-xml; nothing reaches it.` One for every dropped old
+entry, deliberate behaviour change, dependency added after the plan, and acceptance test changed after the plan.
 
-| Function | Acceptance |
-|---|---|
-| Button on top of every layer and realm, dragged aside and remembered, both themes, reduced motion | Open a modal and a second window or dialog: the button shows bottom right above each; drag it aside and reload: it stays put; switch theme and turn on reduced motion: it follows both |
-| Report panel: type, element picker, description | Click the button, choose Bug, click Pick, hover Save (it highlights), click it, pick a second element, press Esc on a third: the panel lists 2 elements, each with its selector, component name, text and bounds |
-| Screenshots | With Save picked, the panel shows the window shot and a crop of Save with the highlight drawn; remove the window shot and add it back: 2 shots remain |
-| Repro data and redaction | Click three controls, cause a failed network call, type `sk-test-123` into a field, send: the report has the route, sha, build, OS, runtime, viewport and scale, theme, role, the 3 actions in order, the log lines, the failed call's method, path and status with no body, the state ids and the time, and no `sk-test-123` |
-| Inbox writer | Click the bug button, pick the Save button, type 'does nothing', send: the inbox has the report with 2 screenshots, the selector, the last actions and the sha, plus its id, type, empty pattern-id field and repro steps; nothing left the machine |
-| Report status | After triage, reopen the panel: it shows the report's id and its status |
+## Re-plan a needs-plan function (drive.py exited 3)
+Read only its row, `.overhaul/reviews/<id>.txt` and its `.overhaul/log.jsonl` lines, never the diff. Do one, add one
+DECISIONS line, pass Step 7, make a plan commit on main touching only spec/, tests/acceptance/ and
+overhaul.toml, then run `drive.py --repo <rebuild> --reset <id>` and restart drive.py:
+1. Split it: new ids with one new failing test each; update deps and OLD-ENTRIES lines naming it; drop its row and test.
+2. Fix its acceptance test, only where it contradicts OLD-ENTRIES or DECISIONS, never to make it easier.
+3. Fix the plan: add the missing API item or dependency, or move the function to the module that owns the code.
+Acceptance already green before the change: strengthen the test in a plan commit or, if a dep truly delivered
+it, have a blind reviewer confirm and run `drive.py --repo <rebuild> --mark-proven <id> --evidence <review file>`.
 
-- ARCHITECTURE: one owner row, "Bug and feedback capture": the capture UI in the UI kit, the inbox writer (redaction, ids, status) in the server or app layer; callers are every realm root. Its forbidden_types are stem globs such as `*Feedback*`, `*BugReport*`, `*ElementPicker*`, `*Screenshot*`, `*ReproStep*`, `*Redact*`. Where another owner already holds a stem (a render screenshot, a viewport picker, a log sink), narrow the glob, write the boundary in both rows, and call that owner instead of copying it (log lines from the telemetry owner, selectors from a UI target registry if one exists).
-- PLAN: an M0 item for the button and its inbox, right after the first five. MASTER-AGENT: the inbox triage above and its tripwire row.
+## What good looks like (a CLI app; F02 is `shop product add`, F03 is `shop cart show`)
+`| F04 | 1 | cart | F02,F03 | cli: shop cart add <sku> <qty> | tests/acceptance/test_cart.py::test_f04_cart_add | planned |`
+```python
+# tests/acceptance/_entry.py: the only door from a test into the product
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-Fixed tripwire ids (overhaul-build acts on these ids; the thresholds below are defaults the plan may tighten, never loosen). health.py measures every row unless the row names another source; the agent measured is never told a time:
+SRC = Path(__file__).resolve().parents[2] / "src"
+def run_cli(data, *args):
+    env = {**os.environ, "PYTHONPATH": str(SRC), "SHOP_DATA": str(data)}
+    return subprocess.run([sys.executable, "-m", "shop", *args], cwd=data, env=env,
+                          capture_output=True, text=True, timeout=60, check=False)
+# tests/acceptance/test_cart.py
+from _entry import run_cli
 
-| Id | Red when | Action |
-|---|---|---|
-| H01 | No function proven on main for 60 min while builders run | Analyst finds where time went; fix that step |
-| H02 | Agent context over 150k | WIP commit, stop, fresh pass |
-| H03 | Tokens per proven function over budget for 2 runs (stall gate) | Stop the phase; analyst fixes the costliest step |
-| H04 | Reader: 30 or more calls since the agent's last edit (mid-pass) | WIP commit, stop, fresh pass with a better brief |
-| H05 | Spinner: 3 or more wakes on waiting | WIP commit, stop, fresh pass |
-| H06 | Pass over 100 build calls or 60 review calls | WIP commit, stop, fresh pass with a smaller packet |
-| H07 | Third pass on one PR | Ruling or design change |
-| H08 | Same red twice | Change the plan, not the agent |
-| H09 | Paper offered as proof | Reject; the gate is the proof |
-| H10 | Merge wait over 30 min | Add slots or shrink batches |
-| H11 | Idle check slots, or builders under three quarters of FLEET/FLEET-TARGET for 10 min while work is left (ready or held rows, the follow-on queue, the next phase unwritten) | A dispatcher pass fills the fleet to the target the same wake; follows on open PRs are land gates, so those packets start stacked |
-| H12 | PR over the size limit | Split |
-| H13 | Duplicate-capability lint red | Reject; route to the owner as a hook packet |
-| H14 | Slow start: first edit later than call 15 of a pass (the brief left the builder searching) | Fix the brief template |
-| H15 | Launch-to-PR over 60 min | Analyst; shrink packets or fix tooling |
-| H16 | New module without approval | Reject |
-| H17 | Protected file changed outside the batch | Revert |
-| H18 | Machine under a RAM or disk floor | Remove its slots; clean whole target dirs |
-| H19 | Any work waiting on the owner that is not spend, delete, public publish or account change | Decide it yourself; write a ruling |
-| H20 | HEALTH.tsv stale past 2 cadences (checked by the master at every 20-minute heartbeat) | Re-register the scheduler entry; run health.py once |
-| H30 | Token waste (not spend): main-chat context, main-chat turns per hour, the share of tokens spent by the main chat and by agents 30+ calls past their last edit or commit, or tokens since the last landed merge, over FLEET/BUDGET.json (burn.py); tokens and agents per hour are info only | BURN-STOP is written and the launch guard refuses new agents; the master fixes the cause (hand-off, land first, batch reviews) and logs it before deleting BURN-STOP |
-| H21 | Master idle: a red open 2 runs with no action, no launch or ruling for 30 min while reds are open, no agent in flight for 10 min while work is left (no PAUSE.md, Finish not reached), or a PR whose review is PASS at its head still unmerged after 30 min; an open owner ask does not excuse it (health.py, and the pre-health heartbeat) | Red on the dashboard; the master routes around the blocker and launches the same wake; the next session acts on it first |
-| H22 | Churn: over 30% of merged PRs move no function, or one file changed 3 or more times with no function moved | Stop those packets; ruling |
-| H23 | Module rot: over 2 fix PRs per proven function, or a gate-red rate over 20% | Freeze the module; one Opus architect redesigns |
-| H24 | Proven rate under 70% of the projection's rate for 2 runs (stall gate) | Stop the phase; waste hunt; blind-audited re-plan |
-| H25 | Verbose pass: a pass's output tokens (thinking plus text) over twice the median for its job type, from the transcripts | Fix that job's brief template |
-| H26 | Bottleneck unresolved: the same top stage in bottleneck.json for 3 runs, or a fix that did not reduce its wait | Capacity re-plan (fleet size, slots, packet size), approved by a fresh blind auditor |
 
-Fixed bottleneck table (MASTER-AGENT carries it as `| Stage | Red when | Fix |`; the plan may add stages or tighten numbers, never drop a stage). health.py measures every stage each run; the master applies the fix for the top stage:
+def test_f04_cart_add(tmp_path):
+    assert run_cli(tmp_path, "product", "add", "MUG1", "Mug", "4.50").returncode == 0
+    added = run_cli(tmp_path, "cart", "add", "MUG1", "2")
+    assert added.returncode == 0, added.stderr
+    cart = run_cli(tmp_path, "cart", "show").stdout  # read back through dep F03
+    assert "MUG1" in cart and "9.00" in cart
+    bad = run_cli(tmp_path, "cart", "add", "NOPE", "1")
+    assert bad.returncode != 0 and "unknown sku" in bad.stderr.lower()
+```
+Good: only public commands of F04 and its deps, its own data dir, what the user sees plus an error case, red today
+(`shop` does not exist), and `-k test_f04_cart_add` runs exactly it. Bad: importing `shop.cart`, a mocked store, or
+checking only the exit code.
 
-| Stage | Red when | Fix |
-|---|---|---|
-| Dispatch queue | A packet ready but not launched for 10 min while a slot is free | Launch up to the slot count |
-| Check slots | Median check-slot queue wait over 5 min | Add a slot under the machine floors, or shrink the affected-test sets |
-| Merge queue | Median merge wait over 30 min (H10) | Smaller batches or more gate runners |
-| Audits | A pre-merge, design-note or protected-batch audit waiting over 30 min | More auditors; Sonnet for samples |
-| Rulings and hooks | A ruling or hook waiting over 30 min | A second ruling agent, or rulings batched per owner |
-| `follows` | Over 20% of ready packets blocked on `follows` | Dispatch the shared piece first |
-| Machine floors | A machine under its RAM or disk floor for 1 run (H18) | Clean whole target dirs, or move slots to the other machine |
-| Master latency | A red open over 1 run with no master action | Smaller wake batches |
-| Builder reading | Reading over 50% of a job type's median pass (calls before the first edit) | Fix the brief template |
-| Builder check wait | Waiting on checks over 30% of a job type's median pass | Add check slots or shrink the affected-test sets |
-
-Writing rules: plain sentences, no diagrams, no summaries, no "why" paragraphs, no charts, every line something a person or agent acts on. Prefer cutting to adding. Respect the owner's machine limits (for example the owner's own PC at low priority with RAM and disk floors).
-
-## Step 4b. Auditor templates
-Write one file per auditor kind into FLEET/templates/, named by kind: m0-pr, risky-pr, post-merge-sample, design-note, management, stub-check, protected-batch, replan, final. No template holds a time limit, target hour or rate. Each holds:
-- the fixed instructions and a `<TARGET>` slot, which is the only thing the master fills;
-- exactly what to read: the target, the STANDARDS rules it cites (ids with their text), and the INDEX of the owners involved, never the whole spec;
-- its call cap, its model, its effort, the work-style block (Step 4) word for word, and the three-line hand-back.
-They are FLEET paper, outside the word cap, and on the protected list.
-
-## Step 5. Dashboard (the same page every overhaul uses)
-The dashboard is a Dashboard-type artifact whose page is `~/.claude/skills/overhaul-plan/assets/dashboard-index.html`. Do not design a new one.
-1. Run Artifact `quickstart` with intent `other` to get the Dashboard type's `type_url`. Create the dashboard with that `type_url`, title "<NEW> Rebuild" and `auto_open: "after_first_write"`, then follow the type's instructions it returns.
-2. Write nine JSON files into FLEET/dash, generated by a script from FUNCTIONS.md, PLAN.md and FLEET/accounts.json:
-   - functions.json: `[{id, phase, system, function, status, pct}]`, one row per FUNCTIONS row. `status` is planned, building, review, blocked or landed; landed means Acceptance passed on deployed main.
-   - phases.json: `[{phase, name, hours, state, detail}]`, from M0 and P0 to the last phase. Every row uses the same short id pattern (M0, P0, M1, M2, ...) and a short name, so the risk slice shows as `P0` with name "Risk slice", never "Phase 0". `state` is one short word: planned, building (a packet of the phase has an open unreviewed PR or a running agent), in review, blocked or done; `detail` is a short count line (such as "129 merged · 25 open · 17 passed review") or null, shown under the phase name and as the state's tooltip.
-   - status.json: one row `[{phase, phase_state, health_at, health_red, health_total, mgmt_at, mgmt_red, mgmt_total, proven, total, rate_per_hour, finish_hour, plan_finish_hour, sha, agents}]`. `phase_state` is the current phase's short word, as in phases.json; `health_total` is 26 (the tripwires); `mgmt_total` is the management check's item count. Optional `prs_open` and `prs_merged` show in the phase tile beside `agents`; a missing or null field hides its line.
-   - rates.json: `[{metric, per_hour, per_hour_total, done, total, peak_per_hour, measured_at}]`, one row each for functions, systems, phases and tokens; the tokens row also has `per_function` and a null `total`. `per_hour` is the count completed in the last 24 active fleet hours divided by the active hours in that window; `per_hour_total` is the count since hour 0 divided by active hours since hour 0; `peak_per_hour` is the highest 24-hour value seen; `measured_at` is ISO. A system or phase is done when all its functions are proven. Tokens are input + cache_read + cache_write + output from the transcripts, and `per_function` is tokens so far divided by functions proven. health.py measures them; the baseline has nulls, which the page shows as "not measured yet". Never write a plan or projection number here.
-   - accounts.json: `[{account, active, spent, refresh_dow, refresh_hour, tz}]`, copied from FLEET/accounts.json (`[]` if it is missing). `account` is the email's local part and "@" only (such as `name@`), never the full email; `refresh_dow` is 0 (Sunday) to 6, `refresh_hour` 0 to 23 in `tz`. FLEET/accounts.json stays local and is never committed to the spec repo.
-   - bottleneck.json: `[{stage, queue, median_min, p90_min, share, top, fix, fix_at, measured_at}]`, one row per bottleneck-table stage; `top` is true on the stage with the largest share of the total waiting, `fix` and `fix_at` are the last fix logged for it in RULINGS.md (null if none). health.py measures it; the baseline has one row per stage with nulls.
-   - pipeline.json: `[{bar, stage, count, total, measured_at}]`, so the owner sees work done but not on main yet. `bar` is functions or packets. The functions rows have one row per stage, each function counted once: proven (Acceptance passed on deployed main), else the least advanced stage among the started packets that name it, so it is landed only when all of them are: landed (merged to main, not yet proven), waiting_land (PASS review at the PR head, not merged), in_review (open PR or desk row without PASS), building (running or in-flight dispatch row); else not_started; `total` is the FUNCTIONS row count and the counts sum to it. The packets rows are merged, waiting_land, in_review and building, from the PR list and the land queue, `total` their sum. Stages map from evidence (dispatch rows and briefs naming FUNCTIONS ids, reviews, the land queue, the PR list, git on main), never from plans. The dashboard data script writes it every run and checks the sums; the page draws it as the Pipeline panel at the top.
-   - gate.json: `[{gate, condition, value, done, packet, next, measured_at}]`, one row per condition of the current phase gate, in the gate's order (such as "Red-team violations refused" `51/51`, "Phase 0 functions proven on deployed main" `0/4`, "M0 landed", "Last green deploy" `<sha> <time>` or `none`). `gate` is the gate's short name (such as `P0 entry`), the same on every row; `value` is the live value as display text; `done` is true or false; `packet` is the packet that blocks a not-done row, or null; `next` is optional plain text for the blocking item. Every value comes from local evidence (the red-team result, PLAN.md's gate function ids with their proven state in pipeline.json, the phase's landed state, the deploy record, the land order in COORD-STATE.md); a missing source gives `not measured` and false, never a guess. The page draws it as the Current gate panel at the very top: the checklist, then "Next blocking:" the first not-done row with its packet.
-   - history.json: `[{hour, merged_in_hour, merged_total, functions_proven, phase, agents_running, agents_active, merge_waiting, tokens, tokens_per_hour}]`, one row per UTC hour (`hour` as `2026-01-01T13:00Z`) from hour 0, written by FLEET/bin/dashhistory.py (copied from `~/.claude/skills/overhaul-build/scripts/dashhistory.py`). It is rebuilt from the logs on every run (git merges on main, HEARTBEAT.tsv, the transcripts, functions.json and status.json), never appended, so a missed run leaves no gap; a missing value is left out, never zero-filled. The page's History section draws functions proven, merges per hour, agents running and tokens per hour from it.
-3. Upload each as an asset of the dashboard. In one batch, write `dash/meta` `{title}`, then `datasets/functions`, `datasets/phases`, `datasets/status`, `datasets/rates`, `datasets/accounts`, `datasets/bottleneck`, `datasets/history`, `datasets/pipeline` and `datasets/gate` as `kind: "file"` sources with `updated`, `edit` and `staleAfterHours` (24 for functions, 2 for the others). Then write `files/index.html` with the template's text and `{{TITLE}}` replaced. Run the type's check read.
-   After publishing or changing the dashboard, check it once at desktop and phone width, with real and with empty data, for overflow and blank template text, and fix it before reporting it done.
-4. Put the dashboard URL and the refresh recipe in MASTER-AGENT.md: upload the new file, then one `update` of the dataset's `url`, `name`, `updated` and `edit`.
-
-The page shows the Current gate panel at the very top (the phase gate as a checklist with live values and the next blocking item), then the Pipeline panel (each bar with a plain title and a one-line "what this counts" caption: Product functions (N), proven only when its acceptance test passes on the deployed build; Work packets (N), every PR and queue row, tooling included; one stacked bar over all functions by stage, darkest to lightest: proven, landed on main, waiting to land, in review, building, not started, each with count and percent, the not-on-main stages in greys; and a small bar for packets: merged, waiting to land, in review, building); five tiles (percent complete with landed of total, last health check with reds, last management check with reds, phase, and the bottleneck: the top stage, its median and p90 wait and the fix applied); the measured rates as four gauges (functions, systems, phases and tokens per hour, each with its rate since start and its done count); the account list, one line per account with its state and refresh countdown, shown only with 2 or more accounts; and one table, in which each phase opens to its systems and each system to its functions. Every value has a written empty state ("not measured yet", "not run yet"), never a blank. Nothing else.
-
-## Step 6. Audit round (Opus, report only)
-Write FLEET/REVIEW-GOAL.md from this template and launch one Opus agent with "Read and do <path>":
-"You are an independent auditor of the <NEW> rebuild plan. You did not write it. Read CLAUDE.md, the spec files and FLEET/templates/; use FUNCTIONS.md and PATTERNS.md as data. Do not edit. The old platform failed because <the measured failures from Step 1>. Check:
-1. Bloat: anything no one acts on, and repeats.
-2. Holes: write your own list of operations two or more systems need into FLEET/audit-ops.tsv first, without reading the planner's operation map, then check it against the owner tables (owners_check.py reads it). Also: functions without a phase or owner, capabilities two owners could claim, controls or services several systems need with no owner row (each one becomes N copies), phases that need later work, patterns without a rule.
-3. Management: do builders start with the right information, including the INDEX of every owner they call, and work with their neighbours? Would the tripwires stop the old failures in the first hour? Can anyone get around a rule, including the master rewriting its own limits, re-deriving its own plan rate, or steering its own auditors?
-4. Feasibility: which systems exceed what this fleet can build and verify? Does Phase 0 cover the real top risks? Where should a proven library be integrated instead of written?
-5. Timeline: is every projected duration in hours, backed by the throughput math and kept to health.py and the dashboard? Flag any time limit, target hour or rate given to an agent, any estimate that assumes human speed, and any ASSUMED number presented as measured.
-Write FLEET/REVIEW-r1.md: the verdict, then at most 30 findings ranked, one line each (file:line, defect, fix). Stop at 80 tool calls. Hand back three lines."
-
-When the salvage list has files, launch a second Opus agent at the same time, with FLEET/SALVAGE-GOAL.md: "Audit every file on the salvage list in spec/PLAN.md against spec/STANDARDS.md. Verdict per file: keep, salvage with named changes, or rewrite, with rule ids and file:line. Write FLEET/SALVAGE-r1.md. Stop at 80 tool calls. Hand back three lines."
-
-Then re-plan: apply every finding you agree with, write the ones you reject with a one-line reason into FLEET/REVIEW-r1-replies.md, keep the word cap, commit, push.
-
-## Step 6b. Verify round (Sonnet, report only)
-Launch one Sonnet agent: "For each finding in FLEET/REVIEW-r1.md and FLEET/SALVAGE-r1.md, check the spec at HEAD. Write FLEET/VERIFY-r1.md with one line per finding: fixed (file:line), rejected (the reply is in REVIEW-r1-replies.md), or open. Stop at 60 tool calls. Hand back three lines." Fix every open item, then commit and push.
-
-## Step 7. Bottleneck round (Opus, edits on a branch)
-Launch one Opus agent with these instructions:
-- Find every place work waits: master, auditors, gate, build and browser slots, protected batches, phase order and critical path, merge conflicts and hot files, context and rework.
-- Estimate each wait with numbers, check the machine math, and recompute the finish hours from the throughput formula.
-- Edit the spec on branch speed/r1, with one commit per file. The word total must not grow past the cap, and no quality bar may be lowered.
-- List the bottlenecks in FLEET/SPEED-r1.md, one line each (where, cost in hours, fix).
-- Stop at 80 tool calls and hand back three lines.
-
-Review its `diff --stat`, then the diff of each file it touched. Reject any change that drops a quality guard or breaks an owner rule (restore it), then fast-forward main and push.
-
-## Step 8. Consistency check (by script, before reporting)
-Run `py -3 ~/.claude/skills/overhaul-plan/scripts/spec_check.py <NEW> <FLEET>`. It checks:
-- every cited rule id and file path exists (a path PLAN's M0 list names counts, because M0 builds it);
-- every STANDARDS rule ends with `Lint: <name>` or Review, and CLAUDE.md is under 400 words;
-- the ownership guards are present: `forbidden_types` and `callers` in the owners.toml schema, plus the catch-all name ban, the import allowlist, module headers, the pasted search, the hook-first rule, no reshaping to get past a lint, the look-alike lint over private helpers, LF line endings and the slop lint in STANDARDS;
-- MASTER-AGENT or STANDARDS says agents that write fleet files check every command's output before committing or reporting, report a failed step as failed, and write DISPATCH rows only through `add-row`;
-- MACHINES names find and supersede with the in-flight index and find's cap, and MASTER-AGENT names ruling holds, owner globs added by rulings, briefs that quote their ruling, the superseded-packet path, measured counts and the clean end state;
-- every auditor template exists in FLEET/templates/ with a `<TARGET>` slot and the work-style block;
-- MASTER-AGENT says the master is the main chat, never a subagent, and the spec carries `holds` recording the main tests that cover an item, the field-only record skip, the full-word owner hit rule, check refusing a def change with no find output, ruling numbers allocated with the brief, the owner taking a shared wrapper, a new owner's purpose naming its subject, effort per job and the verbose-pass tripwire;
-- FUNCTIONS rows, the PLAN total and the dashboard agree, and every row has an Acceptance;
-- every PATTERNS row maps to an existing rule;
-- every STANDARDS lint is in the M0 list, including the duplicate-capability lint;
-- H01 to H26 have a number, a source and an action, and the bottleneck tripwire row exists;
-- MASTER-AGENT has the `| Stage | Red when | Fix |` table with every fixed stage, each with a number and a fix, the RULINGS line for each fix, and bottleneck.json in the health.py duties;
-- Phase 0 exists, MASTER-AGENT names the Phase 0 gate and the stall gate, and no template or brief text in MASTER-AGENT holds a time limit;
-- no human-time words appear;
-- the brief template has every fixed field, the work-style block and effort per job;
-- the word cap and the 40-row table cap hold.
-
-Also check by hand that the phases' hours agree in PLAN, MASTER-AGENT and phases.json. Fix every miss, rerun until the script reports 0 misses, then commit and push.
-
-## Step 9. Report
-Four lines at most: the repo URL, spec words and file count, the projected finish in hours (with "ASSUMED" if it is not from a measured rate), the dashboard URL.
-
-## Your own context
-Stay under 150k tokens. Read with grep, head and diff --stat. Read the agents' findings files, never their transcripts. Do not re-read a spec file you wrote this session: grep it, or use spec_check's word count. After Step 6b is committed, write FLEET/PLAN-STATE.md (the step reached, open items, the repo and dashboard URLs). Compaction is automatic: never ask the owner for /compact.
-
-## Never
-- Build product code.
-- Ask the owner questions, except about spending, deleting, public publishing or account changes.
-- Let the spec grow past the cap.
-- Write charts or overview pages, or a dashboard other than the bundled template.
-- Estimate in human time.
-- Leave a tripwire without a number.
-- Launch agents beyond the rounds above (audit, salvage audit, verify, bottleneck).
-- Launch any round with a stale goal file (check its first line before launching).
-- Leave a stale plan copy anywhere.
+## Rules
+- The plan is done only at PLAN OK: every function has a public entry, an acceptance test that exists and fails now, and deps in the same or an earlier phase [by plan_validate.py --run].
+- Acceptance tests reach the product only through `_entry.py`: no product imports, mocks or fakes [by entry_lint.py].
+- The module graph is acyclic [by check_cycles.py].
+- A function counts only when its test is red on main, green after the merge, and every proven test stays green [by land.py].
+- Builders never edit tests/acceptance or leave their module's Paths [by drive.py's brief and the blind review].
