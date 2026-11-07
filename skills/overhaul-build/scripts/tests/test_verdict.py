@@ -1,4 +1,4 @@
-"""verdict2.py and dash.py on temp toy repos with fake commands.
+"""verdict.py and dash.py on temp toy repos with fake commands.
 
 Run from the scripts dir: py -3 -m unittest
 """
@@ -14,10 +14,7 @@ import unittest
 
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SCRIPTS)
-try:
-    import verdict2 as vd
-except ImportError:  # after the v2 merge renames verdict2.py to verdict.py
-    import verdict as vd
+import verdict as vd
 import dash  # noqa: E402
 
 HEAD = "| id | phase | module | deps | entry | acceptance | status |\n|---|---|---|---|---|---|---|\n"
@@ -34,7 +31,7 @@ def ago(**kw):
 
 class VerdictTest(unittest.TestCase):
     def repo(self, statuses, commands=None, state=None, prev=None, events=None):
-        d = tempfile.mkdtemp(prefix="verdict2-")
+        d = tempfile.mkdtemp(prefix="verdict-")
         self.addCleanup(shutil.rmtree, d, True)
         os.makedirs(os.path.join(d, "spec"))
         os.makedirs(os.path.join(d, ".overhaul"))

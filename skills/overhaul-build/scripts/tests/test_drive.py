@@ -114,36 +114,6 @@ if mode == "ok":
 finish("DONE")
 '''
 
-FAKE_LAND = '''
-import argparse, json, re, subprocess, sys
-from pathlib import Path
-
-ap = argparse.ArgumentParser()
-ap.add_argument("--repo", required=True)
-ap.add_argument("--fn", required=True)
-a = ap.parse_args()
-sc = json.loads((Path(__file__).resolve().parent.parent / "scenario.json").read_text(encoding="utf-8")).get(a.fn, {})
-mode = (sc.get("land") or ["ok"])[0]
-if mode == "green_before":
-    print(a.fn + ": acceptance already green before change")
-    sys.exit(1)
-
-
-def git(*args):
-    subprocess.run(["git", *args], cwd=a.repo, check=True, capture_output=True)
-
-
-git("merge", "--no-edit", "fn/" + a.fn)
-spec = Path(a.repo) / "spec" / "FUNCTIONS.md"
-text = re.sub(r"^(\\| " + re.escape(a.fn) + r" \\|.*)\\| planned \\|[ \\t]*$", r"\\1| proven |",
-              spec.read_text(encoding="utf-8"), flags=re.M)
-spec.write_text(text, encoding="utf-8", newline="\\n")
-git("add", "spec/FUNCTIONS.md")
-git("commit", "-q", "-m", "land " + a.fn)
-print("landed " + a.fn)
-'''
-
-
 def put(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8", newline="\n")
@@ -186,7 +156,8 @@ class Toy(unittest.TestCase):
         repo, scripts = self.root / "repo", self.root / "scripts"
         put(self.root / "fake_worker.py", FAKE_WORKER)
         put(self.root / "scenario.json", json.dumps(scenario or {}))
-        put(scripts / "land.py", FAKE_LAND)
+        scripts.mkdir(parents=True, exist_ok=True)
+        shutil.copy(Path(__file__).with_name("fake_land.py"), scripts / "land.py")
         put(scripts / "verdict.py", "print('VERDICT GOOD fake')\n")
         put(scripts / "dash.py", "pass\n")
         put(repo / ".gitignore", ".overhaul/\n__pycache__/\n")
@@ -281,7 +252,7 @@ class TestReadiness(Toy):
         build, review = (repo / ".overhaul" / "briefs" / "F1.md"), (repo / ".overhaul" / "briefs" / "review-F1.md")
         brief = build.read_text(encoding="utf-8")
         for needle in ("fn/F1", "`src/alpha/`", "tests/acceptance/test_f1.py", "def test_add", "-k test_add",
-                       "None. This is the first attempt."):
+                       "None. This is the first attempt.", "land.py also refuses"):
             self.assertIn(needle, brief)
         diff = review.read_text(encoding="utf-8")
         self.assertIn("diff --git a/src/alpha/f1.py", diff)
@@ -399,6 +370,81 @@ class TestManagerCommands(Toy):
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 1, out)
         self.assertIn("land.py not found", out)
+
+
+class TestLock(Toy):
+    def test_land_runs_while_drive_holds_no_lock(self):
+        repo = self.make_repo({"F1": {"land": ["slow"]}})
+        rc, out = self.drive_cli(repo)  # the fake land fails with "lock held" if drive kept the lock
+        self.assertEqual(rc, 0, out)
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["attempts"]), ("proven", 0))
+        self.assertFalse(drive.lock_path(repo).exists())
+        landed = [e for e in self.events(repo) if e["fn"] == "F1" and e["event"] == "land_ok"]
+        self.assertEqual(len(landed), 1)  # land.py logs its own land_ok; drive.py must not add a second
+        argv = json.loads((repo / ".overhaul" / "land-argv.json").read_text(encoding="utf-8"))
+        self.assertEqual(argv[argv.index("--main") + 1], "main")  # land.py supports --main, so drive.py passes it
+
+    def test_land_fail_is_logged_once(self):
+        repo = self.make_repo({"F1": {"land": ["green_before"]}})  # the fake logs its own land_fail
+        self.drive_cli(repo)
+        fails = [e for e in self.events(repo) if e["fn"] == "F1" and e["event"] == "land_fail"]
+        self.assertEqual(len(fails), 1)
+
+    def test_land_that_dies_without_logging_gets_one_land_fail_from_drive(self):
+        repo = self.make_repo({"F1": {"land": ["die"]}}, retries=0)
+        self.drive_cli(repo)
+        fails = [e for e in self.events(repo) if e["fn"] == "F1" and e["event"] == "land_fail"]
+        self.assertEqual(len(fails), 1)
+        self.assertIn("land died", fails[0]["detail"])
+
+    def test_state_write_is_deferred_while_land_holds_the_lock(self):
+        repo = self.make_repo()
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        self.assertTrue(drive.acquire_lock(repo, 0, "land.py"))
+        t0 = time.monotonic()
+        drv.set("F1", status="building")
+        self.assertLess(time.monotonic() - t0, 2)  # no waiting on land.py
+        self.assertTrue(drv.dirty)
+        self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "planned")
+        drive.release_lock(repo)
+        self.assertTrue(drv.save())
+        self.assertEqual((drv.dirty, self.state(repo)["functions"]["F1"]["status"]), (False, "building"))
+
+    def test_absorbs_what_land_wrote_and_breaks_a_dead_holders_lock(self):
+        repo = self.make_repo()
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        st = self.state(repo)
+        st["functions"]["F1"]["status"] = "proven"  # what land.py writes
+        put(repo / ".overhaul" / "state.json", json.dumps(st))
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        put(drive.lock_path(repo), f"land.py pid {dead.pid} since long ago\n")  # land.py killed hard
+        self.assertTrue(drv.save())
+        self.assertEqual(drv.st["functions"]["F1"]["status"], "proven")
+        put(drive.lock_path(repo), f"land.py pid {os.getpid()} since now\n")  # a live holder is respected
+        self.assertFalse(drive.acquire_lock(repo, 0))
+        drive.release_lock(repo)
+
+    def test_land_py_breaks_a_dead_holders_lock_and_respects_live_and_fresh_ones(self):
+        import land
+        repo = self.make_repo()
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        put(Path(land.lock_path(str(repo))), f"land.py pid {dead.pid} since long ago\n")
+        self.assertTrue(land.acquire_lock(str(repo), 0))  # broken, then ours
+        self.assertFalse(drive.acquire_lock(repo, 0))  # drive.py and land.py share one lock
+        land.release_lock(str(repo))
+        put(Path(land.lock_path(str(repo))), f"land.py pid {os.getpid()} since now\n")
+        self.assertFalse(land.acquire_lock(str(repo), 0))  # a live holder keeps it
+        put(Path(land.lock_path(str(repo))), "")
+        self.assertFalse(land.acquire_lock(str(repo), 0))  # created a moment ago, not written yet
+        land.release_lock(str(repo))
+        self.assertTrue(drive.acquire_lock(repo, 0))
+        drive.release_lock(repo)
+        self.assertEqual(drive.lock_path(repo), Path(land.lock_path(str(repo))))
 
 
 if __name__ == "__main__":

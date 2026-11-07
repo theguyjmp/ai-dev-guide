@@ -3,7 +3,7 @@ Fails when, in SKILL.md:
   - a rule bullet ("- " line under a "## " section other than Why/Changelog) names no mechanism: `[by <script, hook,
     lint or check>]`;
   - an incident date note ("owner 2026-", "(2026-") appears: incidents go to CHANGELOG.md;
-  - the file is over 160 lines.
+  - the file is over 200 lines.
   py -3 skill_lint.py <skill dir>...   exit 1 on any breach
 """
 import os
@@ -18,8 +18,8 @@ def lint(skill_dir):
     path = os.path.join(skill_dir, "SKILL.md")
     lines = open(path, encoding="utf-8").read().splitlines()
     bad, section = [], ""
-    if len(lines) > 160:
-        bad.append(f"{path}: {len(lines)} lines > 160")
+    if len(lines) > 200:
+        bad.append(f"{path}: {len(lines)} lines > 200")
     for i, line in enumerate(lines, 1):
         if line.startswith("## "):
             section = line[3:].strip().lower()

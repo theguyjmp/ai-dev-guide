@@ -33,15 +33,20 @@ with `pythonpath = ["src", "tests/acceptance"]` and `addopts = "--import-mode=im
 never collide). Never copy old code into the rebuild.
 
 ## Step 3. spec/FUNCTIONS.md
-One table, exactly `| id | phase | module | deps | entry | acceptance | status |`:
-- id: `F01`, `F02`, ... unique, never reused. phase: an integer from 1; phase 1 is the smallest set that makes the
-  product usable end to end (under 3k lines, use 1 or 2 phases).
-- module: one from ARCHITECTURE. deps: function ids joined by commas, `-` for none, each in the same or an earlier
-  phase, including every function that builds an API item this one calls.
+plan_validate.py checks the table in exactly this form:
+```
+FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status |`
+  phase = integer from 1; deps = comma-separated ids or `-`; entry = the public CLI command, route or UI action;
+  acceptance = `tests/acceptance/<f>.py::<test>`, `;`-separated; status = planned|building|review|landing|proven|needs-plan.
+```
+- id: `F01`, `F02`, ... unique, never reused. Phase 1 is the smallest set that makes the product usable end to end
+  (under 3k lines, use 1 or 2 phases).
+- module: one from ARCHITECTURE. deps: each in the same or an earlier phase, including every function that builds an
+  API item this one calls.
 - entry: the public way a user does it: `cli: shop cart add <sku> <qty>`, `http: POST /cart/items`,
   `ui: /cart, click Add`. Never an internal function.
 - acceptance: `tests/acceptance/<file>.py::test_<id>_<what>`, the id in lower case so `-k` picks only it.
-- status: `planned`; only land.py writes `proven`, in its land commit.
+- status: write `planned`; only land.py writes `proven`, in its land commit.
 
 A function is one user-visible behaviour a builder can finish in about 300 lines or fewer, unit tests included;
 split bigger ones by sub-behaviour (`report --csv`, `report --pdf`). Helpers, refactors and infrastructure are never
@@ -51,7 +56,16 @@ OLD-ENTRIES.txt line with ` -> F04` (or ` -> F04,F05`), or ` -> D3` when decisio
 `grep -vE -- '-> [FD][0-9]+(,[FD][0-9]+)*$' spec/OLD-ENTRIES.txt` prints nothing.
 
 ## Step 4. spec/ARCHITECTURE.md
-One section per module in exactly this form; check_cycles.py parses `## Module`, `Paths:` and `Depends on:`:
+check_cycles.py states the format (`py -3 <overhaul-build>/scripts/check_cycles.py --help`):
+```
+ARCHITECTURE.md format: one section per module; any other line in it (public API, notes) is free text.
+    ## Module <name>
+    Paths: src/shop/core/, src/shop/money.py
+    Depends on: base, util
+Paths: repo-relative, comma-separated; a trailing / is a directory; * ? [ make a glob; a file belongs to the module
+whose matching path is the longest. Depends on: the modules it may import, comma-separated; - or none for none.
+```
+For example (the Owns and Public API lines are free text):
 ```
 ## Module cart
 Paths: src/shop/cart/
@@ -62,8 +76,7 @@ Public API:
 - `lines() -> list[Line]` [F03]
 - `register(sub)` adds the `cart` commands [F03, F04]
 ```
-- `Depends on: none` when it has none. Paths are folders or files, never name globs; unit tests for module m go in
-  `tests/unit/m/`. Each data store has one owning module; the others use its API.
+- Unit tests for module m go in `tests/unit/m/`. Each data store has one owning module; the others use its API.
 - Every module owns at least one function. The graph is acyclic: code two modules need lives in the lower one, as
   an API item tagged with the function that builds it, and each user lists that function in its deps.
 - Entry wiring is discovered, never edited: the entry module (F01) finds each module's `register(sub)` or HTTP router

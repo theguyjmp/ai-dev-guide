@@ -62,8 +62,46 @@ def lock_path(repo):
     return os.path.join(repo, ".overhaul", "lock")
 
 
+def pid_alive(pid):
+    """Whether this pid is running. Never signals it: on Windows os.kill would terminate the process."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.GetLastError() == 5  # access denied: the process exists
+        code = ctypes.c_ulong()
+        known = k32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code))
+        k32.CloseHandle(ctypes.c_void_p(handle))
+        return bool(known) and code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def lock_is_stale(path):
+    """True if the recorded holder pid is gone (a holder killed hard never removes its lock), or if the lock was
+    created but never written for a minute."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            m = re.search(r"\bpid (\d+)", f.read())
+        if m:
+            return not pid_alive(int(m.group(1)))
+        return time.time() - os.path.getmtime(path) > 60
+    except OSError:
+        return False
+
+
 def acquire_lock(repo, wait=30.0, owner="land.py"):
-    """Create .overhaul/lock exclusively, waiting up to `wait` seconds. Returns False if another holder keeps it."""
+    """Create .overhaul/lock exclusively, waiting up to `wait` seconds. Returns False if another holder keeps it.
+    A lock whose holder is dead is broken."""
     path = lock_path(repo)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     deadline = time.monotonic() + max(wait, 0)
@@ -71,6 +109,12 @@ def acquire_lock(repo, wait=30.0, owner="land.py"):
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
+            if lock_is_stale(path):
+                try:
+                    os.remove(path)
+                    continue
+                except OSError:
+                    pass
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.2)

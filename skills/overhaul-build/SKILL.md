@@ -29,8 +29,8 @@ The harness is the machinery. M0 adds no scheduler entry, bot, hook, guard, wait
 
 ## Run
 In a POSIX shell (Git Bash on Windows): `mkdir -p R/.overhaul; py -3 <skill>/scripts/drive.py --repo R > R/.overhaul/drive.out 2>&1; echo "drive exit $?"; tail -n 5 R/.overhaul/drive.out`
-- Interactive: one background command, then one long wait for its exit. Never poll, never read drive.out or `.overhaul/log.jsonl` while it runs; a still-running notice gets no tool call. Asked for status meanwhile, copy the VERDICT line from `.overhaul/verdict.json`; never run verdict.py by hand (it compares against its own last run).
-- Headless: the same command in the foreground. A foreground call is cut at 10 minutes unless the headless session starts with `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` above the run (14400000 is 4 hours).
+- Interactive: run drive.py as one background command, then make one long wait for its exit. Never poll, never read drive.out or `.overhaul/log.jsonl` while it runs; a still-running notice gets no tool call. Asked for status meanwhile, copy the VERDICT line from `.overhaul/verdict.json`; never run verdict.py by hand (it compares against its own last run).
+- Headless: run drive.py directly, in the foreground. A foreground call is cut at 10 minutes unless the headless session starts with `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` above the run (14400000 is 4 hours).
 - Exit 0: every function is proven. Run the proof-check, then report.
 - Exit 3: the manager is needed (below); after the fixes, run again.
 - Any other exit: run once more; the same failure twice is a harness defect. Report its last error line and stop; never do the harness's work by hand.
@@ -42,6 +42,10 @@ drive.py exits 3 when nothing is READY and some function is needs-plan: its retr
 2. Fix its acceptance, when the test cannot go red before and green after through the public entry (it already passes on main, reaches an internal, or is flaky).
 3. Fix the plan, when ARCHITECTURE.md blocks it (a missing dep, a cycle, a public API the function cannot reach).
 Change nothing else: no other function's row or test, no re-cut of modules or phases, no raised limit, no loosened check, no edit to harness state. Then plan_validate must print PLAN OK; commit `plan: <id> split|acceptance|architecture: <why>` and run again. If drive.py does not pick the fixed function up, that is a harness defect: report it. A function at needs-plan again after two plan fixes: stop and report it as the deciding item.
+
+State changes go only through drive.py's own commands, never by editing `.overhaul/state.json`; each exits at once:
+- `py -3 <skill>/scripts/drive.py --repo R --reset <id>`: the function goes back to planned with attempts 0, a fresh start after your plan fix.
+- `py -3 <skill>/scripts/drive.py --repo R --mark-proven <id> --evidence <file>`: the function is marked proven, only when main already satisfies it; `<file>` is the non-empty blind review that backs it. The proof-check at the end still has to find it REAL.
 
 ## Exit 0: blind proof-check
 Launch one Opus agent whose whole prompt is `Read and do <skill>/references/proof-check.md for repo R.` (interactive: the Agent tool, in the background; headless: `claude -p --model opus --dangerously-skip-permissions`). It reads the plan and the code on main only, never `.overhaul/`, a review or this chat, and writes `.overhaul/proof-check.txt`; read its line 1 and its non-REAL lines only. UNCHECKED functions get one more pass with the prompt ending `, only <ids>.`. A PARTIAL or STAND-IN function goes back through Exit 3 option 2: its acceptance is rewritten to drive the real entry and to fail on the current code, its row returns to planned, PLAN OK, and drive.py runs again. The build is finished when the proof-check finds every function REAL; report then, and launch nothing more.
