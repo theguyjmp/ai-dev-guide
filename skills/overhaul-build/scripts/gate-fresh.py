@@ -10,7 +10,7 @@ REPO = r"Z:\Documents\AppDevelopment\VOIDCAD"
 LOG = r"C:\vc\gatebot.log"
 JOBS = r"Z:\vc-local\jobs"
 QUIET = 120
-DEPLOY_LOCK = r"Z:c-deploy\deploy.lock"
+DEPLOY_LOCK = "Z:/vc-deploy/deploy.lock"
 DEPLOYED = r"Z:\Documents\AppDevelopment\VOIDCAD-fleet\gate-deployed.txt"
 
 
