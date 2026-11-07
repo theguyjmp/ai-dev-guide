@@ -18,7 +18,8 @@ Exit code 0. The stop hook master-stop-guard.py imports status() from here.
 import glob, json, os, re, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DASH_UPLOAD_MAX, DASH_DATA_MAX, HEALTH_MAX, WAIT_MAX = 35, 20, 35, 3
+DASH_UPLOAD_MAX, DASH_DATA_MAX, HEALTH_MAX, WAIT_MAX = 25, 20, 25, 3
+BEAT_MAX = 25  # owner 2026-11-06: heartbeat incl. management every 20 min, heavily enforced
 
 
 def age_min(path):
@@ -241,6 +242,11 @@ def status(fleet, check_scheduler=True):
     s["has_health"] = os.path.exists(health)
     s["health_age"] = age_min(health if s["has_health"] else os.path.join(fleet, "HEARTBEAT.tsv"))
     s["health_stale"] = s["health_age"] is None or s["health_age"] > HEALTH_MAX
+    beats = glob.glob(os.path.join(fleet, "heartbeat", "*.md"))
+    mgmts = glob.glob(os.path.join(fleet, "reviews", "management-*.md"))
+    s["beat_age"] = min((age_min(f) for f in beats), default=None)
+    s["mgmt_age"] = min((age_min(f) for f in mgmts), default=None)
+    s["beat_stale"] = any(a is None or a > BEAT_MAX for a in (s["beat_age"], s["mgmt_age"]))
     repo = b.get("repo") or fleet
     s["health_task"] = b.get("health_task") or os.path.basename(os.path.normpath(repo)) + "-health"
     s["health_sched"] = health_entry(s["health_task"]) if (check_scheduler and s["has_health"]) else None
@@ -282,6 +288,11 @@ def lines(s, fleet, mark=True):
         ok.append("wait armed")
     else:
         out.append(f"WAIT unarmed (.wait-armed {fmt(s['wait_age'])}): arm FLEET/bin/wait.sh in the background before ending this turn")
+    if s["beat_stale"]:
+        out.append(f"BEAT heartbeat {fmt(s['beat_age'])}, management {fmt(s['mgmt_age'])} (red over {BEAT_MAX} min): "
+                   f"launch the heartbeat (FLEET/briefs/heartbeat.md) now, then dash-refresh and red-fix (FLEET/briefs/red-fix.md) on its hand-back")
+    else:
+        ok.append(f"beat {fmt(s['beat_age'])}")
     if s["dash_stale"]:
         out.append(f"DASH upload {fmt(s['upload_age'])}, data {fmt(s['data_age'])}: launch dash-refresh "
                    f"(FLEET/briefs/dash-refresh.md) now; if data is stale fix the writer or its scheduler entry")
@@ -290,7 +301,7 @@ def lines(s, fleet, mark=True):
     sched_missing = s["health_sched"] is False
     if s["health_stale"] or sched_missing:
         name = "HEALTH.tsv" if s["has_health"] else "HEARTBEAT.tsv (no HEALTH.tsv yet)"
-        fix = (f"register it: schtasks /create /tn {s['health_task']} /tr \"wscript //B hidden.vbs py -3 <FLEET>/bin/health.py\" /sc minute /mo 10 /it /f"
+        fix = (f"register it: schtasks /create /tn {s['health_task']} /tr \"pyw -3 <FLEET>/bin/health.py\" /sc minute /mo 10 /it /f"
                if sched_missing else "run health.py once and fix its scheduler entry")
         out.append(f"HEALTH {name} {fmt(s['health_age'])} old, scheduler entry {s['health_task']} "
                    f"{'MISSING' if sched_missing else 'present' if s['health_sched'] else 'unchecked'}: {fix}")
