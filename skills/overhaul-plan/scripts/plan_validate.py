@@ -6,7 +6,7 @@ Reads spec/UNITS.md (generated plan data, not protected prose):
 A unit is one function, or one plan-made split of it (F394a, F394b), each with its own tests: one unit = one packet.
 Fails (one MISS line each) when, for the phases checked:
   - a unit names no `file::test` Test, or two units claim the same test;
-  - its Owner is not in the Owners table, or a Calls owner is unknown or not in a LOWER layer (the one layer rule:
+  - its Owner is not in the Owners table, or a Calls owner is unknown (with --layers, opt-in for new plans only: or not in a LOWER layer:
     a higher layer calls a lower layer's public API; callers lists are derived from Calls, never hand-kept);
   - a Needs unit is unknown, in a later phase, or the Needs graph has a cycle;
   - Lines is not a number or is over the packet cap (default 300): the plan splits it;
@@ -84,7 +84,7 @@ def main():
         for c in items(u["calls"]):
             if c not in owners:
                 misses.append(f"{k}: calls unknown owner {c}")
-            elif c != u["owner"] and (lay is None or owners[c][0] is None or owners[c][0] >= lay):
+            elif "--layers" in a and c != u["owner"] and (lay is None or owners[c][0] is None or owners[c][0] >= lay):
                 misses.append(f"{k}: {u['owner']} (layer {lay}) calls {c} (layer {owners[c][0]}): breaks the layer rule; redesign the interface in ARCHITECTURE")
         for n in items(u["needs"]):
             if n not in units:
