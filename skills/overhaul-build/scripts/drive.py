@@ -64,7 +64,7 @@ RULE_TRIGGERS = (  # words in a function's row, module section or acceptance tes
     (r"store|json|file|save|write|persist|database|\bdb\b|record", (23, 29, 30, 31, 32, 33, 34)),
     (r"lock", (34,)),
     (r"csv|export", (31, 36)),
-    (r"output|--out|save as|write to", (36,)),  # a user-named output target must not clobber (C33)
+    (r"output|--out\b|save as|write to", (36,)),  # a user-named output target must not clobber (C33)
     (r"\bcli\b|argparse|command|argv", (5, 6)),
     (r"total|tax|price|sum|report", (9, 11)),
 )
@@ -298,16 +298,19 @@ def checklist() -> tuple[str, dict[str, Item]]:
 
 def applicable_items(text: str | None, project_rules: bool = False) -> list[Item]:
     """Contract items always, plus the items whose rules apply to the text; None means the whole checklist. The
-    project-rules item (C30) only for a row that cites project rules; whole-tree (W) items only for None."""
+    project-rules item (C30) only for a row that cites project rules; whole-tree (W) items only for None, or for a
+    text that names the item (the review of a polish fix of that finding)."""
     items = [i for i in checklist()[1].values() if project_rules or not i.project]
     if text is None:
         return items
     want = wanted_rules(text)
-    return [i for i in items if not i.whole and (not i.rules or want.intersection(i.rules))]
+    return [i for i in items if (i.whole and re.search(rf"\b{i.id}\b", text))  # the review of a polish fix of a W finding
+            or (not i.whole and (not i.rules or want.intersection(i.rules)))]
 
 
 def checklist_text(items: list[Item]) -> str:
-    lines = [f"- {i.id} [{i.severity}] {i.question} Decide: {i.decide}" for i in items]
+    whole = " (whole tree: judge it on the whole tree, not only the scope)"
+    lines = [f"- {i.id} [{i.severity}]{whole if i.whole else ''} {i.question} Decide: {i.decide}" for i in items]
     return "\n".join(lines) or f"(checklist missing: {CHECKLIST.as_posix()})"
 
 
@@ -2342,11 +2345,14 @@ class Driver:
                "repolishes": done + 1, "checklist": checklist()[0]}
         if old.get("gaps"):
             new["gaps"] = old["gaps"]
+        before = json.loads(json.dumps(self.st))
         self.st["polish"] = new
         for ph in (self.st.get("polish_phases") or {}).values():  # per-phase polish: audit each phase again
             ph.update(round=0, status="idle", issues=None, best=None, audit_retry=None)
-        self.dirty = True
-        self.flush()
+        if not self.save():  # a run (or its land) holds the lock: never wait, never race its state write
+            self.st = before
+            raise DriveError(f"{lock_path(self.repo).as_posix()} is held by {lock_holder(self.repo) or '?'}: "
+                             "stop the run (or let its land finish), then --repolish")
         self.log(None, "polish_repolish", f"polish reset ({done + 1} of {self.polish_rounds}), checklist "
                  f"{checklist()[0]}")
         self.say(f"repolish: the next run audits again with checklist {checklist()[0]}")
