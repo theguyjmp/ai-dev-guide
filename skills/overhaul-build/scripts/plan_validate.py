@@ -14,7 +14,8 @@ ARCHITECTURE.md: `## Module <name>` sections, each with `Paths:` and `Depends on
   `## Policies` section: `Concurrency:`, `Persistence:`, `Errors:`, `Untrusted input:` and `Retries:` lines, each
   `<owner module> - <policy>`; a `Concurrent writers:` line naming every function that writes shared state reachable
   concurrently and a `Boundaries:` line naming every function that reads untrusted input (HTTP bodies, files, imports),
-  both `-` for none; and a `Domain rules:` line, `<rule> -> <module>.<function>` joined by `;` (`-` for none), so
+  both `-` for none; a `Multi-store writes:` line naming every function whose one operation saves more than once
+  (two stores, or one store twice), `-` for none; and a `Domain rules:` line, `<rule> -> <module>.<function>` joined by `;` (`-` for none), so
   each calculation or validation rule has exactly one home. A module with a `Public:` line must list on it each
   domain rule home and each API bullet that names a module depending on it ("orders parses quantities with it").
 overhaul.toml [commands] must hold test, acceptance (with a `{test}` placeholder), lint, dup, literals, shape, cycles
@@ -64,8 +65,8 @@ COLUMNS = ["id", "phase", "module", "deps", "entry", "acceptance", "status"]
 STATUSES = {"planned", "building", "review", "landing", "proven", "needs-plan"}
 COMMANDS = ["test", "acceptance", "lint", "dup", "literals", "shape", "cycles", "entry_lint"]
 POLICIES = ("concurrency", "persistence", "errors", "untrusted input", "retries")
-ID_LISTS = ("concurrent writers", "boundaries")
-POLICY_LINE = re.compile(r"^[\s>*-]*\**\s*(concurrency|persistence|errors|untrusted input|retries|concurrent writers"
+ID_LISTS = ("concurrent writers", "boundaries", "multi-store writes")
+POLICY_LINE = re.compile(r"^[\s>*-]*\**\s*(concurrency|persistence|errors|untrusted input|retries|concurrent writers|multi-store writes"
                          r"|boundaries|domain rules)\s*\**\s*:\s*(.*)$", re.I)
 RULE_HOME = re.compile(r"^(\S.*?)\s*->\s*`?([\w\-]+)\.([A-Za-z_]\w*)`?$")
 NEGATIVE = re.compile(r"invalid|malformed|bad|reject|corrupt|oversize|too_large|missing|negative|empty|injection", re.I)
@@ -481,13 +482,28 @@ def check_writers(pol, writers, rows, problems, alabel):
             problems.append(f"{alabel}:{writers[0]} Concurrent writers: unknown function {fid}")
         elif not any("concurrent" in name.lower() for _, name in r.get("tests", [])):
             problems.append(f"{alabel}:{writers[0]} {fid} writes shared state concurrently but has no acceptance test "
-                            "whose name holds `concurrent` (parallel clients, then check every write was kept)")
+                            "whose name holds `concurrent` (parallel writers with readers running alongside, then "
+                            "check every write was kept and no reader or writer failed)")
     if SERIAL.search(pol.get("concurrency", (None, "", 0))[1]):
         return
     for r in rows:
         if r.get("rid") and r["rid"] not in writers[1] and WRITE_ROUTE.search(r.get("entry", "")):
             problems.append(f"{alabel}:{writers[0]} {r['rid']} is an HTTP write ({r['entry']}) but not in "
                             "Concurrent writers; list it, or declare the Concurrency policy single-threaded")
+
+
+def check_crash_safe(multi, rows, problems, alabel):
+    """Every operation that saves more than once has a crash test: fail between the saves, then the stored state is
+    consistent and a retry applies the change once (trial 11: pay crashed between saves took the stock twice)."""
+    by_id = {r.get("rid"): r for r in rows}
+    for fid in multi[1]:
+        r = by_id.get(fid)
+        if r is None:
+            problems.append(f"{alabel}:{multi[0]} Multi-store writes: unknown function {fid}")
+        elif not any("crash" in name.lower() for _, name in r.get("tests", [])):
+            problems.append(f"{alabel}:{multi[0]} {fid} saves more than once per operation but has no acceptance "
+                            "test whose name holds `crash` (make the second save fail, then check the stored state "
+                            "is consistent and a retry applies the change exactly once)")
 
 
 def check_boundaries(bounds, rows, problems, alabel):
@@ -566,6 +582,10 @@ def check_policies(text, mods, rows, problems, alabel):
         check_writers(pol, lists["concurrent writers"], rows, problems, alabel)
     else:
         problems.append(f"{alabel}: ## Policies has no `Concurrent writers:` line (write - for none)")
+    if "multi-store writes" in lists:
+        check_crash_safe(lists["multi-store writes"], rows, problems, alabel)
+    else:
+        problems.append(f"{alabel}: ## Policies has no `Multi-store writes:` line (write - for none)")
     if "boundaries" in lists:
         check_boundaries(lists["boundaries"], rows, problems, alabel)
     else:

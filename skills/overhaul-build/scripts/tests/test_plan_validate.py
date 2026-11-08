@@ -102,6 +102,7 @@ Errors: calc - usage errors print one line to stderr and exit 2
 Untrusted input: calc - argv only; a non-number prints usage and exits 2
 Retries: calc - none; no retry loops
 Concurrent writers: -
+Multi-store writes: -
 Boundaries: -
 Domain rules: sum is a + b -> calc.add; difference is a - b -> calc.sub
 """
@@ -395,7 +396,7 @@ class QualityPolicies(Base):
     def test_policies_required(self):
         found = self.problems(self.make(arch=ARCH[:ARCH.index("## Policies")]))
         for key in ("`Concurrency:", "`Persistence:", "`Errors:", "`Untrusted input:", "`Retries:",
-                    "`Concurrent writers:", "`Boundaries:", "`Domain rules:"):
+                    "`Concurrent writers:", "`Multi-store writes:", "`Boundaries:", "`Domain rules:"):
             self.assertTrue(self.has(found, "## Policies has no", key), found)
 
     def test_policy_owner_must_be_a_module(self):
@@ -410,6 +411,15 @@ class QualityPolicies(Base):
         acc = f"{CALC_T}::test_add; {CALC_T}::test_add_concurrent"
         root = self.make(functions=table(row(acc=acc), R2, r3()), arch=arch)
         (root / CALC_T).write_text(CALC + "\n\ndef test_add_concurrent():\n    assert tiny('add', '1', '1') == '2'\n",
+                                   encoding="utf-8")
+        self.assertEqual(self.problems(root), [])
+
+    def test_multi_store_write_needs_a_crash_test(self):  # trial 11: pay crashed between saves took stock twice
+        arch = ARCH.replace("Multi-store writes: -", "Multi-store writes: F001")
+        self.only(self.problems(self.make(arch=arch)), "F001 saves more than once per operation")
+        acc = f"{CALC_T}::test_add; {CALC_T}::test_add_crash_between_saves"
+        root = self.make(functions=table(row(acc=acc), R2, r3()), arch=arch)
+        (root / CALC_T).write_text(CALC + "\n\ndef test_add_crash_between_saves():\n    assert tiny('add', '1', '1') == '2'\n",
                                    encoding="utf-8")
         self.assertEqual(self.problems(root), [])
 

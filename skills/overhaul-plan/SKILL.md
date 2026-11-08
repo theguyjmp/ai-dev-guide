@@ -94,7 +94,7 @@ Owns: the cart table.
   too, is atomic: unique temp file then replace), `Errors:` (typed errors, how the entry reports them, what is logged),
   `Untrusted input:` (HTTP framing: Content-Length missing, negative or malformed gives 400, over the body cap 413;
   files read from disk checked for encoding and schema, damage reported as corrupt; CSV and other exports neutralise
-  formula injection), `Retries:` (bounded, with backoff). Then `Concurrent writers:` (each a `test_<f>_concurrent`), `Boundaries:`
+  formula injection), `Retries:` (bounded, with backoff). Then `Concurrent writers:` (each a `test_<f>_concurrent` with readers running alongside the writers), `Multi-store writes:` (every function whose one operation saves more than once; each a `test_<f>_crash...` that makes the second save fail, then checks the stored state is consistent and a retry applies the change once), `Boundaries:`
   (every function reading untrusted input; each a negative acceptance test, e.g. `test_<f>_rejects_malformed`) and
   `Domain rules: <rule> -> <module>.<function>; ...`: each calculation or validation rule (value = qty * price, qty must be positive) lives in that one function and all others call it.
   `Public:` lists each domain rule home and each API bullet naming a dependent module [by plan_validate.py].
