@@ -3,11 +3,13 @@
 Run from the scripts dir:  py -3 -m unittest
 """
 import os
+import shutil
 import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CYCLES = os.path.join(SCRIPTS, "check_cycles.py")
@@ -334,3 +336,31 @@ class ShapeCheckTest(ToyCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProbe(unittest.TestCase):
+    """v3 probe: mutate.py kills one mutant and reports one survivor; plan_validate requires property tests."""
+
+    def test_mutate_reports_one_survivor_and_one_killed(self):
+        import mutate
+        root = Path(tempfile.mkdtemp(prefix="mut_"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "src").mkdir()
+        (root / "tests").mkdir()
+        (root / "src" / "calc.py").write_text("def neg(x):\n    return -x if x > 0 else x\n", encoding="utf-8")
+        (root / "tests" / "test_calc.py").write_text(
+            "import sys, pathlib, unittest\nsys.path.insert(0, str(pathlib.Path(__file__).parents[1] / 'src'))\n"
+            "import calc\n\n\nclass T(unittest.TestCase):\n    def test_neg(self):\n"
+            "        self.assertEqual(calc.neg(1), -1)\n", encoding="utf-8")
+        res = mutate.mutate(root, ["src"], ["tests"], '"{python}" -m unittest discover -s {tests}')
+        self.assertEqual((res["mutants"], res["killed"], res["survived"]), (4, 3, 1), res)
+        self.assertEqual(res["survivors"][0]["op"], "boundary")
+
+    def test_plan_validate_requires_property_tests(self):
+        from tests.test_plan_validate import Base
+        case = Base()
+        case.addCleanup = self.addCleanup
+        root = case.make(props=False)
+        p = case.problems(root)
+        self.assertTrue(any("no property tests" in x for x in p), p)
+        self.assertFalse(any("no property tests" in x for x in case.problems(case.make())))

@@ -7,7 +7,8 @@ write state.json and can import acquire_lock/release_lock from here). All work h
 R/.overhaul/wt/land, never in R's own working tree.
 
   1. The branch fn/<ID> must not edit plan files (spec/, tests/acceptance/, overhaul.toml): those change only in a plan
-     commit on main.
+     commit on main. Planned tests are anchors (anchors.py): a test file that was in the plan commit may not be
+     modified, renamed or deleted; new test files are fine.
   2. RED BEFORE: the function's acceptance must FAIL on main. If it passes: `acceptance already green before change`.
   3. Merge main into fn/<ID> (no force, no rewrite).
   4. The whole-tree commands test, lint, dup, literals, shape, cycles and entry_lint from overhaul.toml [commands] must
@@ -38,6 +39,8 @@ import sys
 import time
 import tomllib
 
+import anchors  # beside this script
+
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WHOLE_TREE = ("test", "lint", "dup", "literals", "shape", "cycles", "entry_lint")
 PLAN_PATHS = ("spec/", "tests/acceptance/", "overhaul.toml")
@@ -46,6 +49,13 @@ GREEN_BEFORE = "acceptance already green before change"
 
 class LandFail(Exception):
     """One reason line; the land stops and main stays untouched."""
+
+
+def check_anchors(repo, base, head, branch, fpath):
+    """Planned tests are anchors: a branch may add tests but never modify, rename or delete one (anchors.py)."""
+    bad = anchors.touched_anchors(repo, base, head, fpath)
+    if bad:
+        raise LandFail(f"{branch} modifies planned tests (anchors): {', '.join(bad[:5])}")
 
 
 def now_iso():
@@ -308,6 +318,7 @@ def land(repo, fid, main, timeout):
     bad = [p for p in touched if p.startswith(PLAN_PATHS) or p == fpath]
     if bad:
         raise LandFail(f"{branch} edits plan files: {', '.join(bad[:5])}")
+    check_anchors(repo, main_sha, fn_sha, branch, fpath)
 
     prepare_worktree(repo, wt)
 
@@ -399,6 +410,7 @@ def land_polish(repo, fid, main, timeout):
     bad = [p for p in touched if p.startswith(PLAN_PATHS) or p == fpath]
     if bad:
         raise LandFail(f"{branch} edits plan files: {', '.join(bad[:5])}")
+    check_anchors(repo, main_sha, fn.stdout.strip(), branch, fpath)
     if not touched:
         raise LandFail(f"{branch} changes nothing")
     prepare_worktree(repo, wt)
