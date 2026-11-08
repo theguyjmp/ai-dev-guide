@@ -128,6 +128,7 @@ PROBE_FIXES = 2  # fix passes per module below its mutation floor; the score is 
 DEPFIX_PREFIX = "depfix-"  # a dependency fix: a builder's BLOCKED-BY defect, fixed in the owning module
 BLOCKED_BY = re.compile(r"^\s*BLOCKED-BY:\s*`?([^\s`:]+)(?::(\d+))?`?\s*(.*)$", re.M)
 GAPS_FID = "polish-gaps"  # the one cross-module pass over .overhaul/plan-gaps.jsonl, run alone before polish round 1
+MAIN_FLAKE_RE = re.compile(r"main flake: test=(\S+) path=(\S+) module=(\S+)")
 FIX_RETRIES = 1  # a probe or polish fix whose review has verified blocking NOs gets this many retry passes
 
 
@@ -169,6 +170,7 @@ class Job:
     log_at: int = 0  # size of log.jsonl when a land job started
     base: str = ""  # a conflict pass: the sha of main when it started (the branch must contain it)
     model: str = ""  # the --model a claude worker got; "custom" for a worker_cmd without one
+    slot: int = -1  # a land: k of its CARGO_TARGET_DIR .overhaul/target/land-<k>
 
 
 def now_iso() -> str:
@@ -352,12 +354,12 @@ def in_changed(n: dict, changed: dict[str, set[int]]) -> bool:
         return True
 
 
-def spawn(cmd: list[str], cwd: Path, out: Path) -> subprocess.Popen:
-    """Start a worker in its own process group; stdout to out, stderr beside it."""
+def spawn(cmd: list[str], cwd: Path, out: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
+    """Start a worker in its own process group; stdout to out, stderr beside it; env replaces the environment."""
     group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
              else {"start_new_session": True})
     with open(out, "wb") as fo, open(out.with_suffix(".err"), "wb") as fe:
-        return subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, **group)
+        return subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, env=env, **group)
 
 
 def kill_tree(proc: subprocess.Popen) -> None:
@@ -600,6 +602,9 @@ class Driver:
         self.land_queue: list[str] = []
         self.land_job: Job | None = None
         self.side_lands: dict[str, Job] = {}  # lands stacked on the ones in flight (land.py --stack)
+        self.slots: dict[str, int] = {}  # fid -> k of the CARGO_TARGET_DIR .overhaul/target/slot-<k> it reuses
+        self.flake_tests: set[str] = set()  # main-flake tests already sent to a fix this run (one fix per test)
+        self.barrier = bool(har.get("phase_barrier", True))  # phase N+1 waits until every phase <=N is proven
         self.fns: dict[str, Fn] = {}
         self.order: list[Fn] = []
         self.arch = ""
@@ -772,7 +777,9 @@ class Driver:
             raise
 
     def busy(self) -> set[str]:
-        return set(self.jobs) | set(self.land_queue) | {j.fn for j in self.land_jobs()}
+        """In flight: jobs, the land queue, lands, and functions waiting at landing on a main-flake fix."""
+        waiting = {fid for fid, r in self.st["functions"].items() if r["status"] == "landing" and r.get("blocked_on")}
+        return set(self.jobs) | set(self.land_queue) | {j.fn for j in self.land_jobs()} | waiting
 
     def land_jobs(self) -> list[Job]:
         """Lands in flight, the plain one (or a polish land) first, then the stacked ones in start order."""
@@ -795,12 +802,14 @@ class Driver:
         without it a function claims its module's paths, one function per module at a time."""
         recs = self.st["functions"]
         proven = {fid for fid, r in recs.items() if r["status"] == "proven"}
+        # the phase barrier: nothing past the lowest phase that still has an unproven function starts
+        open_phase = min((phase_key(f)[0] for f in self.order if f.id not in proven), default=0)
         busy = self.busy()
         taken = [self.claims(self.fns[fid]) for fid in busy if fid in self.fns]
         ready: list[Fn] = []
         for f in self.order:
             if (recs[f.id]["status"] != "planned" or f.id in busy or recs[f.id]["attempts"] > self.budget(f.id)
-                    or recs[f.id].get("blocked_on")
+                    or recs[f.id].get("blocked_on") or (self.barrier and phase_key(f)[0] > open_phase)
                     or not all(d in proven for d in f.blocking)):
                 continue
             mine = self.claims(f)
@@ -870,7 +879,7 @@ class Driver:
         base = self.worker_cmd(kind)
         cmd = [*base, f"Read and do {brief.as_posix()}"]
         try:
-            proc = spawn(cmd, cwd, out)
+            proc = spawn(cmd, cwd, out, self.slot_env(fid))
         except OSError as e:
             raise DriveError(f"cannot start the {kind} worker {cmd[0]}: {e}") from e
         model = base[base.index("--model") + 1] if "--model" in base[:-1] else (
@@ -1046,6 +1055,32 @@ class Driver:
                 self.set(fid, blocked_on=None)
                 if not ok:
                     self.park(fid, f"dependency fix {dfid} failed: {reason}")
+                elif rec["status"] == "landing":  # it waited on a main-flake fix: its reviewed branch lands now
+                    self.land_queue.append(fid)
+
+    def main_flake(self, fid: str, reason: str) -> bool:
+        """land.py found the land's red test failing on clean main too (`main flake: test=.. path=.. module=..`):
+        the branch did not cause it, so the test's owner module gets a fix pass (fid depfix-flake-<id>) and the
+        function waits at landing, its branch reviewed, to land after the fix. One fix per test per run: the same
+        test failing again parks the function with the reason. False when no owner module is found."""
+        m = MAIN_FLAKE_RE.match(reason)
+        if not m:
+            return False
+        test, path, module = (x if x != "?" else "" for x in m.groups())
+        module = module or (self.owner_module(path) if path else "")
+        dfid = f"{DEPFIX_PREFIX}flake-{fid}"
+        if not module or dfid in self.jobs or dfid in self.polish_lands:
+            return False
+        self.log(fid, "main_flake", f"test={test} path={path or '?'} module={module}")
+        if test in self.flake_tests:
+            self.park(fid, f"main flake on {test} again after its fix this run: {reason}")
+            return True
+        self.flake_tests.add(test)
+        self.set(fid, status="landing", blocked_on=dfid,
+                 last_reason=f"waiting on {dfid}: {test} fails on clean main"[:REASON_MAX])
+        self.start_polish_fix(module, [{"file": path or "?", "line": "?", "rule": f"main flake found by {fid}",
+                                        "evidence": f"{test} fails on clean {self.main}: {reason}"}], fid=dfid)
+        return True
 
     def to_review(self, job: Job, problem: str) -> None:
         """After a build or conflict pass: review when clean, a conflict pass on a pre-review merge conflict."""
@@ -1068,11 +1103,26 @@ class Driver:
             return CONFLICT_SYNC
         return self.gate_problem(wt, fid)
 
-    def sh(self, cmd: str, wt: Path) -> subprocess.CompletedProcess[str] | None:
-        """One gate command in a worktree; None on timeout."""
+    def slot(self, fid: str) -> int:
+        """The parallel slot whose CARGO_TARGET_DIR fid's worktree commands reuse, so a worktree does not
+        cold-build: fid keeps its slot while no other running job holds it, else takes the lowest free one. Two
+        processes that run at once never share a slot."""
+        held = {self.slots[j] for j in self.jobs if j != fid and j in self.slots}
+        k = self.slots.get(fid)
+        if k is None or k in held:
+            k = next(i for i in range(len(held) + 1) if i not in held)
+            self.slots[fid] = k
+        return k
+
+    def slot_env(self, fid: str) -> dict[str, str]:
+        return {**os.environ, "CARGO_TARGET_DIR": str(self.ov / "target" / f"slot-{self.slot(fid)}")}
+
+    def sh(self, cmd: str, wt: Path, fid: str = "") -> subprocess.CompletedProcess[str] | None:
+        """One gate command in a worktree, on fid's slot target dir; None on timeout."""
         try:
             return subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=self.timeout_s, stdin=subprocess.DEVNULL)
+                                  errors="replace", timeout=self.timeout_s, stdin=subprocess.DEVNULL,
+                                  env=self.slot_env(fid or wt.name))
         except subprocess.TimeoutExpired:
             return None
 
@@ -1090,7 +1140,7 @@ class Driver:
                     return problem
                 continue
             cmd = land_mod.fill(cmd)
-            p = self.sh(cmd, wt)
+            p = self.sh(cmd, wt, fid)
             if p is None:
                 return f"{name} timed out in the worktree after merging {self.main}: `{cmd}`"
             if not land_mod.passes(cmd, p.returncode):
@@ -1106,7 +1156,7 @@ class Driver:
         if fid not in self.fns or not tmpl or not self.cfg["harness"].get("pre_review_acceptance", True):
             return ""
         for node, cmd in land_mod.acceptance_cmds(tmpl, self.fns[fid].acceptance):
-            p = self.sh(cmd, wt)
+            p = self.sh(cmd, wt, fid)
             if p is None:
                 return f"acceptance {node} timed out in the worktree after merging {self.main}: `{cmd}`"
             if p.returncode != 0:
@@ -1440,10 +1490,14 @@ class Driver:
                "--main", self.main]
         if flying:
             cmd += ["--stack", ",".join(j.fn for j in flying)]
+        used = {j.slot for j in flying}
+        k = next(i for i in range(len(used) + 1) if i not in used)
+        cmd += ["--target-dir", str(self.ov / "target" / f"land-{k}")]  # one per concurrent land, reused
         log = self.ov / "log.jsonl"
         log_at = log.stat().st_size if log.exists() else 0
         start = time.monotonic()
-        job = Job(fid, "land", spawn(cmd, self.repo, out), out, start, start + 2 * self.timeout_s, 0, log_at=log_at)
+        job = Job(fid, "land", spawn(cmd, self.repo, out), out, start, start + 2 * self.timeout_s, 0, log_at=log_at,
+                  slot=k)
         if flying:
             self.side_lands[fid] = job
             self.log(fid, "land_stacked", f"on {', '.join(j.fn for j in flying)}")
@@ -1468,6 +1522,8 @@ class Driver:
             last_line(out) or last_line(err) or f"land.py exit {job.proc.returncode}")
         if not self.land_logged(fid, job.log_at):  # killed or crashed before land.py wrote its own land_fail line
             self.log(fid, "land_fail", reason, secs)
+        if reason.startswith(land_mod.MAIN_FLAKE) and self.main_flake(fid, reason):
+            return  # a test that fails on clean main too: its owner gets a fix, the function lands after it
         if GREEN_BEFORE in reason:
             self.park(fid, f"land: {reason}")
         elif CONFLICT in reason.lower() and self.start_conflict(fid, reason):
@@ -1595,7 +1651,7 @@ class Driver:
         base, model = self.polish_cmd(kind)
         out = self.ov / "runs" / f"{fid}-r{rnd}-{kind}.json"
         try:
-            proc = spawn([*base, f"Read and do {brief.as_posix()}"], cwd, out)
+            proc = spawn([*base, f"Read and do {brief.as_posix()}"], cwd, out, self.slot_env(fid))
         except OSError as e:
             raise DriveError(f"cannot start the {kind} worker {base[0]}: {e}") from e
         start = time.monotonic()
@@ -1901,10 +1957,10 @@ class Driver:
         fid = self.polish_lands.pop(0)
         out = self.ov / "runs" / f"{fid}-land.out"
         cmd = [sys.executable, str(self.scripts / "land.py"), "--repo", str(self.repo), "--fn", fid,
-               "--main", self.main, "--polish"]
+               "--main", self.main, "--polish", "--target-dir", str(self.ov / "target" / "land-0")]
         start = time.monotonic()
         self.land_job = Job(fid, "polish_land", spawn(cmd, self.repo, out), out, start,
-                            start + 2 * self.timeout_s, 0)
+                            start + 2 * self.timeout_s, 0, slot=0)
         return True
 
     def after_polish_land(self, job: Job) -> None:
@@ -2004,7 +2060,8 @@ class Driver:
                "--max-mutants", str(self.max_mutants)] + (["--cmd", self.probe_cmd] if self.probe_cmd else [])
         out = self.ov / "runs" / f"{fid}-mutate.out"
         start = time.monotonic()
-        self.jobs[fid] = Job(fid, "probe_mutate", spawn(cmd, wt, out), out, start, start + 2 * self.timeout_s, 0)
+        self.jobs[fid] = Job(fid, "probe_mutate", spawn(cmd, wt, out, self.slot_env(fid)), out, start,
+                             start + 2 * self.timeout_s, 0)
         pst[module] = {**pst.get(module, {}), "status": "mutating"}
         self.save()
         self.say(f"probe {module}: mutating")

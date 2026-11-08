@@ -29,7 +29,8 @@ Problems (each is one line):
   - a row is malformed (cells, id, phase, deps, acceptance, status, duplicate id);
   - an acceptance file or its `def <test>` is missing;
   - a function's acceptance tests never invoke the exact entry its row names (entry_match.py);
-  - deps are unknown, point to a later phase, or form a cycle;
+  - deps are unknown, point to a later phase, or form a cycle; a phase holds more than [plan] max_phase_size
+    (default 40) functions;
   - the table lacks the required `files` or `needs` column; a malformed needs cell; an unproven row with no files
     cell, or whose stub files are missing, raise no NotImplementedError or do not import (every function lands an
     importable stub in the plan commit); the critical path counts only `behaviour` deps;
@@ -458,6 +459,23 @@ def check_stubs(rows, repo, problems, flabel, timeout=120):
         problems.append(f"{flabel}: stub does not import: {ln[:200]}")
 
 
+MAX_PHASE_SIZE = 40
+
+
+def check_phase_size(rows, cfg, problems, flabel):
+    """At most [plan] max_phase_size (default 40) functions per phase: drive.py's phase barrier holds phase N+1
+    until every phase <=N function is proven, so a huge phase is one wide, late-failing batch."""
+    limit = int((cfg.get("plan") or {}).get("max_phase_size") or MAX_PHASE_SIZE)
+    sizes = {}
+    for r in rows:
+        if r.get("ph") is not None:
+            sizes[r["ph"]] = sizes.get(r["ph"], 0) + 1
+    for ph, n in sorted(sizes.items()):
+        if n > limit:
+            problems.append(f"{flabel}: phase {ph} has {n} functions > max_phase_size {limit}; split it into "
+                            "more phases, or set [plan] max_phase_size in overhaul.toml")
+
+
 def check_depth(rows, cfg, problems, flabel):
     """Critical path of the graph of blocking deps: every dep without a `needs` column, only the `behaviour` ones
     with it (a `stub` dep builds against the plan commit's stub at once). Returns (depth, widest level, longest
@@ -863,6 +881,7 @@ def validate(repo, run=False, timeout=600, notes=None):
         rows = parse_functions(fun_file.read_text(encoding="utf-8", errors="replace"), problems, paths["functions"])
         check_rows(rows, mods, repo, problems, paths["functions"])
         check_cargo_targets(rows, repo, problems, paths["functions"])
+        check_phase_size(rows, cfg, problems, paths["functions"])
         problems += entry_match.entry_problems(
             repo, [r for r in rows if r["entry"].strip().strip("`").strip().lower() not in NO_ENTRY], paths["functions"])
         check_needs(rows, problems, paths["functions"])

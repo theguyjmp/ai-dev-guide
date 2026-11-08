@@ -140,7 +140,7 @@ retries_per_function = 1
 mutation_floor = 0.9
 max_mutants = 40
 ```
-Rust (plan_validate checks it): acceptance in `tests/acceptance/<f>.rs`, each a root Cargo.toml `[[test]]` named by its stem, through `mod entry;`;
+Rust (plan_validate checks it): when documents store floats, serde_json gets `features = ["float_roundtrip"]` (else 0.059000000000000004 reads back as 0.059 and byte-equal undo/redo breaks); acceptance in `tests/acceptance/<f>.rs`, each a root Cargo.toml `[[test]]` named by its stem, through `mod entry;`;
 stubs `todo!()`; unit tests in-crate `#[cfg(test)] mod tests`; property `tests/property/test_<id>.rs` with `proptest!`; no conftest.py. Commands: test `cargo test -q --workspace --lib --bins`,
 acceptance `cargo test -q --test {stem} -- --exact {test}`, property `cargo test -q --test {stem}`, lint `cargo clippy -q --workspace --all-targets -- -D warnings`, the scripts on `crates src`. JS: `npx eslint .`, `npx jscpd src`, `node --test`.
 Install what is missing now (`py -3 -m pip install ruff pylint pytest`); every command but acceptance exits 0 on the skeleton.

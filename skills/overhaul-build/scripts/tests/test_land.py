@@ -305,6 +305,105 @@ class StackedLandTest(LandTest):
         self.assertRegex(git(repo, "show", "main:spec/FUNCTIONS.md"), r"(?m)^\| F3 \|.*\| proven *\|$")
 
 
+# A stand-in for pytest run as `-m pytest` from the repo root: node ids in, `FAILED <node>` lines and a summary out;
+# every call's node ids go to CALLS so a test can count the commands.
+FAKE_PYTEST = """import json, runpy, sys
+args = [a for a in sys.argv[1:] if not a.startswith("-")]
+with open(CALLS, "a", encoding="utf-8") as f:
+    f.write(json.dumps(args) + chr(10))
+passed = failed = 0
+for node in args:
+    path, _, name = node.partition("::")
+    try:
+        runpy.run_path(path)[name]()
+        passed += 1
+    except Exception as e:
+        failed += 1
+        print(f"FAILED {node} - {e!r}")
+print(f"{failed} failed, {passed} passed in 0.01s")
+sys.exit(1 if failed else 0 if passed else 5)
+"""
+
+
+class BatchedRegressionTest(LandTest):
+    def test_proven_rows_run_in_one_command_and_the_failure_maps_to_its_row(self):
+        repo = self.make_repo(branch={"toy.py": toy(add="a - b", mul="a * b")})
+        calls = os.path.join(repo, ".overhaul-calls.jsonl")
+        functions = FUNCTIONS.replace(
+            "| F2 |", "| F0 | 1 | toy | - | toy.py | `tests/acceptance/test_add.py::test_zero` | proven |\n| F2 |")
+        write(repo, {"pytest.py": f"CALLS = {calls!r}\n" + FAKE_PYTEST, "spec/FUNCTIONS.md": functions,
+                     "tests/acceptance/test_add.py": ACCEPTANCE.format(op="add", want=5)
+                     + "\n\ndef test_zero():\n    assert True\n",
+                     "overhaul.toml": TOML.replace("pytest_lite.py {file} {test}", "-m pytest -q {node}"),
+                     ".gitignore": ".overhaul/\n__pycache__/\n.overhaul-calls.jsonl\n"})
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "two proven rows in one test file")
+        before = git(repo, "rev-parse", "main")
+        code, out, _ = self.land(repo)
+        self.assert_failed(repo, before, code, out, "regression: proven F1 tests/acceptance/test_add.py::test_add")
+        with open(calls, encoding="utf-8") as f:
+            runs = [json.loads(x) for x in f if x.strip()]
+        both = sorted(["tests/acceptance/test_add.py::test_add", "tests/acceptance/test_add.py::test_zero"])
+        self.assertIn(both, [sorted(r) for r in runs])  # both proven rows in one command
+        self.assertEqual(len([r for r in runs if "tests/acceptance/test_add.py::test_zero" in r]), 1, runs)
+
+
+LIBTEST_OUT = """
+running 3 tests
+test store::a ... ok
+test store::b ... FAILED
+test store::c ... ok
+
+failures:
+
+---- store::b stdout ----
+thread 'store::b' panicked at src/store.rs:9:5
+
+failures:
+    store::b
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+"""
+
+
+class BatchResultsTest(unittest.TestCase):
+    def results(self, template, nodes, outputs):
+        """batch_results with a runner that answers each call from `outputs` (exit code, output) in turn."""
+        seen = []
+
+        def runner(cmd):
+            seen.append(cmd)
+            code, out = outputs[min(len(seen), len(outputs)) - 1]
+            return code, out.strip().splitlines()[-1] if out.strip() else "", out
+        return land.batch_results(template, nodes, runner), seen
+
+    def test_libtest_failure_maps_to_its_node_in_one_run(self):
+        nodes = ["tests/store.rs::store::a", "tests/store.rs::store::b", "tests/store.rs::store::c"]
+        res, seen = self.results("cargo test -q --test {stem} -- --exact {test}", nodes, [(101, LIBTEST_OUT)])
+        self.assertEqual(seen, ["cargo test -q --test store -- --exact store::a store::b store::c"])
+        self.assertEqual({n: r[0] for n, r in res.items()}, {nodes[0]: 0, nodes[1]: 101, nodes[2]: 0})
+
+    def test_pytest_failure_maps_to_its_node_in_one_run(self):
+        nodes = ["tests/acceptance/test_a.py::test_x", "tests/acceptance/test_a.py::test_y"]
+        out = "FAILED tests/acceptance/test_a.py::test_y - assert 0\n1 failed, 1 passed in 0.12s\n"
+        res, seen = self.results("py -3 -m pytest -q {node}", nodes, [(1, out)])
+        self.assertEqual(len(seen), 1)
+        self.assertEqual({n: r[0] for n, r in res.items()}, {nodes[0]: 0, nodes[1]: 1})
+
+    def test_a_batch_with_no_summary_reruns_each_node_alone(self):
+        nodes = ["tests/store.rs::a", "tests/store.rs::b"]
+        res, seen = self.results("cargo test -q --test {stem} -- --exact {test}", nodes,
+                                 [(101, "error[E0425]: cannot find value `x`"), (0, "ok"), (101, "boom")])
+        self.assertEqual(len(seen), 3)
+        self.assertEqual({n: (r[0], r[2]) for n, r in res.items()}, {nodes[0]: (0, True), nodes[1]: (101, True)})
+
+    def test_a_green_batch_passes_every_node(self):
+        nodes = ["tests/a.py::test_x", "tests/a.py::test_y", "tests/b.py::test_z"]
+        res, seen = self.results("py -3 -m pytest -q {file} -k {test}", nodes, [(0, "3 passed in 0.1s")])
+        self.assertEqual(len(seen), 2)  # one command per test file (-k joins the names)
+        self.assertTrue(all(r[0] == 0 for r in res.values()))
+
+
 class FunctionsTableTest(unittest.TestCase):
     def test_set_status_keeps_the_rest_of_the_row(self):
         rows = land.parse_functions(FUNCTIONS)

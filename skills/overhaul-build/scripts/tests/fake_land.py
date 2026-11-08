@@ -14,6 +14,7 @@ ap.add_argument("--fn", required=True)
 ap.add_argument("--main", default="main")
 ap.add_argument("--polish", action="store_true")
 ap.add_argument("--stack", default="")
+ap.add_argument("--target-dir", default="")
 a = ap.parse_args()
 repo = Path(a.repo)
 (repo / ".overhaul").mkdir(parents=True, exist_ok=True)
@@ -55,6 +56,12 @@ try:
     if mode == "conflict":  # main moved under the branch: land.py logs its own land_fail and prints the reason
         log("land_fail", f"merge conflict merging {a.main} into fn/{a.fn}")
         print(f"merge conflict merging {a.main} into fn/{a.fn}")
+        sys.exit(1)
+    if mode == "flake":  # its red test fails on clean main too: land.py's main-flake reason
+        why = (f"main flake: test=tests/acceptance/test_f1.py::test_add path=src/alpha/f1.py module=alpha fails on "
+               f"clean main 0123456789ab too (run 1/3); on the merged tree: regression: proven F1")
+        log("land_fail", why)
+        print(why)
         sys.exit(1)
     if mode == "die":  # exits without writing its own log line
         print(a.fn + ": land died")
