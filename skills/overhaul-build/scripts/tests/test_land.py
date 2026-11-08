@@ -348,6 +348,82 @@ class BatchedRegressionTest(LandTest):
         self.assertEqual(len([r for r in runs if "tests/acceptance/test_add.py::test_zero" in r]), 1, runs)
 
 
+class TiersAndExtraTest(LandTest):
+    """[commands.acceptance_by] per-glob templates, footprint-selected [tiers] tests, [commands.extra] gates."""
+
+    def plan_commit(self, repo, files, msg="plan change"):
+        write(repo, files)
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", msg)
+
+    def test_extra_command_runs_on_the_merged_tree(self):
+        repo = self.make_repo()
+        self.plan_commit(repo, {"overhaul.toml": TOML.replace(
+            "[paths]", f"[commands.extra]\nstyle = '\"{PY}\" -c \"print(7); import sys; sys.exit(3)\"'\n[paths]")})
+        before = git(repo, "rev-parse", "main")
+        code, out, _ = self.land(repo)
+        self.assert_failed(repo, before, code, out, "extra.style failed (exit 3) on merged tree")
+
+    def test_acceptance_by_gives_a_test_file_its_own_template(self):
+        repo = self.make_repo()
+        never = f"\"{PY}\" -c \"print(9); import sys; sys.exit(1)\" {{test}}"
+        self.plan_commit(repo, {"overhaul.toml": TOML.replace(
+            "[paths]", f"[commands.acceptance_by]\n\"tests/acceptance/test_mul*.py\" = '{never}'\n[paths]")})
+        before = git(repo, "rev-parse", "main")
+        code, out, _ = self.land(repo)  # red before, then the always-red template keeps it red after the merge
+        self.assert_failed(repo, before, code, out, "acceptance still red after merge: tests/acceptance/test_mul.py")
+
+    def tier_repo(self, core_paths):
+        """F1 (module core, its test in the scale tier) is broken by the branch, which touches only toy.py."""
+        repo = self.make_repo(branch={"toy.py": toy(add="a - b", mul="a * b")})
+        arch = f"# Architecture\n\n## Module core\n\nPaths: {core_paths}\n\n## Module toy\n\nPaths: toy.py\n"
+        self.plan_commit(repo, {"spec/ARCHITECTURE.md": arch,
+                                "spec/FUNCTIONS.md": FUNCTIONS.replace("| F1 | 1 | toy |", "| F1 | 1 | core |"),
+                                "overhaul.toml": TOML + '[tiers]\nscale = ["tests/acceptance/test_add*.py"]\n'})
+        return repo
+
+    def test_scale_tier_test_outside_the_footprint_is_skipped(self):
+        repo = self.tier_repo("`core/`")
+        code, out, err = self.land(repo)
+        self.assertEqual(code, 0, out + err)
+
+    def test_scale_tier_test_of_a_touched_module_still_runs(self):
+        repo = self.tier_repo("`core/`, `toy.py`")
+        before = git(repo, "rev-parse", "main")
+        code, out, _ = self.land(repo)
+        self.assert_failed(repo, before, code, out, "regression: proven F1 tests/acceptance/test_add.py::test_add")
+
+
+class TierHelpersTest(unittest.TestCase):
+    def test_template_per_glob_and_batches_per_template(self):
+        t = land.acceptance_template({"acceptance": "cargo test --test {stem} -- --exact {test}",
+                                      "acceptance_by": {"tests/acceptance/scale_*.rs":
+                                                        "cargo test --release --test {stem} -- --exact {test} "
+                                                        "--test-threads=1"}})
+        nodes = ["tests/acceptance/a.rs::x", "tests/acceptance/scale_b.rs::z", "tests/acceptance/a.rs::y",
+                 "tests/acceptance/scale_b.rs::w"]
+        self.assertEqual(land.batch_cmds(t, nodes), [
+            (["tests/acceptance/a.rs::x", "tests/acceptance/a.rs::y"], "cargo test --test a -- --exact x y"),
+            (["tests/acceptance/scale_b.rs::z", "tests/acceptance/scale_b.rs::w"],
+             "cargo test --release --test scale_b -- --exact z w --test-threads=1")])
+        self.assertEqual(land.acceptance_cmds(t, ["tests/acceptance/scale_b.rs::z"])[0][1],
+                         "cargo test --release --test scale_b -- --exact z --test-threads=1")
+
+    def test_no_new_keys_is_the_plain_template(self):
+        self.assertEqual(land.acceptance_template({"acceptance": "pytest {node}"}), "pytest {node}")
+        self.assertEqual(land.gate_cmds({"test": "t", "lint": "l"}), [("test", "t"), ("lint", "l")])
+        self.assertEqual(land.tier_globs({}), [])
+
+    def test_extra_follows_whole_tree_and_modules_by_paths(self):
+        self.assertEqual(land.gate_cmds({"lint": "l", "extra": {"css": "stylelint", "i18n": "py i18n.py"}}),
+                         [("lint", "l"), ("extra.css", "stylelint"), ("extra.i18n", "py i18n.py")])
+        self.assertEqual(land.tier_globs({"tiers": {"scale": ["a*", "b*"], "gpu": ["g*"]}}), ["a*", "b*", "g*"])
+        arch = "## Module doc\n- **Paths:** `crates/doc/`, `crates/x/*.rs`\n## Module ui\nPaths: crates/ui\n"
+        self.assertEqual(land.touched_modules(arch, ["crates/ui/src/a.rs"]), {"ui"})
+        self.assertEqual(land.touched_modules(arch, ["crates/x/y.rs", "README.md"]), {"doc"})
+        self.assertEqual(land.touched_modules(arch, ["crates/uix/a.rs"]), set())
+
+
 LIBTEST_OUT = """
 running 3 tests
 test store::a ... ok

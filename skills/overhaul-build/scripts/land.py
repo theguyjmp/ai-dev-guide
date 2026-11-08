@@ -12,19 +12,24 @@ R/.overhaul/wt/land, never in R's own working tree.
   2. RED BEFORE: the function's acceptance must FAIL on main. If it passes: `acceptance already green before change`.
   3. Merge main into fn/<ID> (no force, no rewrite).
   4. The whole-tree commands test, lint, dup, literals, shape, cycles and entry_lint from overhaul.toml [commands] must
-     pass on the merged tree. A pytest exit of 5 (no tests collected) counts as pass.
+     pass on the merged tree, then every [commands.extra] command (name = command: project lints such as stylelint
+     or an i18n check). A pytest exit of 5 (no tests collected) counts as pass.
   5. GREEN AFTER: the function's acceptance passes on the merged tree, and every row already `proven` still passes.
      Tests run batched: one command per test target (cargo `--test <stem>` with every exact name, one pytest call),
      failures mapped back to test ids; the first failing id then reruns alone so land.out holds its own output.
      A whole-tree `test` failure or a regression outside the branch's footprint reruns alone on clean main up to 3
      times; if it fails there too the reason starts `main flake: test=.. path=.. module=..` and drive.py sends it
-     to a fix in the owning module instead of failing the function.
+     to a fix in the owning module instead of failing the function. A proven test whose file matches a [tiers]
+     glob (`scale = ["tests/acceptance/scale_*.rs"]`) reruns only when its row's module is the function's own or a
+     module whose ARCHITECTURE.md Paths the branch changes (or a stacked row's); the function's own always run.
   6. One commit sets the row's status cell to `proven` in FUNCTIONS.md; main fast-forwards to it (and fn/<ID> too).
 
 FUNCTIONS.md rows: | id | phase | module | deps | entry | acceptance | status |, acceptance =
 `tests/acceptance/<f>.py::<test>` (or `<f>.rs`) items separated by `;`. The acceptance command template takes {test}
 (the test name), {file} (the test file), {stem} (the file name without suffix: a Rust [[test]] target) or {node}
-(file::test); `<skill>` in any command is this skill's directory.
+(file::test); `<skill>` in any command is this skill's directory. [commands.acceptance_by] maps a glob on the test
+file to its own template (`"tests/acceptance/scale_*.rs" = "cargo test --release --test {stem} -- --exact {test}
+--test-threads=1"`); the first matching glob wins, else [commands] acceptance.
 
 Writes the untracked R/.overhaul/state.json (functions[ID]: status proven on success, last_reason on failure; attempts
 are drive.py's) and appends one line to R/.overhaul/log.jsonl. Any failure prints one reason line, exits 1 and leaves
@@ -37,6 +42,7 @@ state.json entry.
 """
 import argparse
 import datetime
+import fnmatch
 import json
 import os
 import re
@@ -265,14 +271,86 @@ def run(cmd, cwd, out_path, timeout):
     return code, tail[:200]
 
 
+def acceptance_template(commands):
+    """The acceptance template of a [commands] table: the plain string, or with [commands.acceptance_by] a dict
+    {"default": str, "by": [(glob, str)]} that tmpl_for resolves per test file."""
+    by = commands.get("acceptance_by")
+    by = [(str(g), str(t)) for g, t in by.items() if str(t).strip()] if isinstance(by, dict) else []
+    default = str(commands.get("acceptance") or "")
+    return {"default": default, "by": by} if by else default
+
+
+def tmpl_for(template, node):
+    """The command template for one test id: the first acceptance_by glob matching its file, else the default."""
+    if isinstance(template, str):
+        return template
+    file = node.partition("::")[0].replace("\\", "/")
+    return next((t for g, t in template["by"] if fnmatch.fnmatchcase(file, g)), template["default"])
+
+
+def extra_cmds(commands):
+    """[(name, command)] of [commands.extra]: project gates run after the whole-tree commands."""
+    extra = commands.get("extra")
+    return [(f"extra.{k}", str(v)) for k, v in extra.items() if str(v).strip()] if isinstance(extra, dict) else []
+
+
+def gate_cmds(commands, names=WHOLE_TREE):
+    """[(name, command)] the whole-tree gate runs: the named commands that are set, then [commands.extra]."""
+    return [(n, str(commands[n])) for n in names if isinstance(commands.get(n), str) and commands[n]] +         extra_cmds(commands)
+
+
+def tier_globs(conf):
+    """Every glob of every [tiers] list (scale, gpu, ...): test files whose proven tests rerun only by footprint."""
+    tiers = conf.get("tiers")
+    if not isinstance(tiers, dict):
+        return []
+    return [str(g) for v in tiers.values() for g in (v if isinstance(v, list) else [v]) if str(g).strip()]
+
+
+def module_paths(arch):
+    """{module: [paths]} from the `## Module <name>` sections' Paths lines of ARCHITECTURE.md."""
+    mods, cur = {}, None
+    for line in arch.splitlines():
+        m = re.match(r"^##\s+Module\s*:?\s+(\S+)", line, re.I)
+        if m:
+            cur = m.group(1).strip("`:*")
+            mods.setdefault(cur, [])
+            continue
+        if re.match(r"^#{1,2}\s", line):
+            cur = None
+        m = re.match(r"^[\s>*-]*\**\s*Paths\s*:\s*\**\s*(.*)$", line, re.I) if cur else None
+        if m:
+            mods[cur] = [x.strip().strip("`").strip() for x in re.split(r"[,;]", m.group(1).strip().strip("*"))
+                         if x.strip().strip("`").strip()]
+    return mods
+
+
+def under(path, pats):
+    """Whether a repo path lies in one of pats (a file, a directory with or without /, or a glob)."""
+    for p in pats:
+        if any(c in p for c in "*?["):
+            if fnmatch.fnmatchcase(path, p):
+                return True
+        elif path == p or path.startswith(p.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def touched_modules(arch, touched):
+    """The modules whose Paths hold at least one touched file."""
+    return {m for m, pats in module_paths(arch).items() if any(under(t, pats) for t in touched)}
+
+
 def acceptance_cmds(template, nodes):
+    """[(node, command)], one per test id; template is a string or an acceptance_template dict."""
     cmds = []
     for node in nodes:
         file, _, name = node.partition("::")
-        if not any(p in template for p in ("{test}", "{file}", "{node}", "{stem}")):
-            cmds.append((node, f"{fill(template)} {node}"))
+        tmpl = tmpl_for(template, node)
+        if not any(p in tmpl for p in ("{test}", "{file}", "{node}", "{stem}")):
+            cmds.append((node, f"{fill(tmpl)} {node}"))
         else:
-            cmds.append((node, fill(template, test=name or file, file=file, node=node, stem=PurePosixPath(file).stem)))
+            cmds.append((node, fill(tmpl, test=name or file, file=file, node=node, stem=PurePosixPath(file).stem)))
     return cmds
 
 
@@ -311,6 +389,11 @@ def batch_cmds(template, nodes):
     """[(nodes, command)]: the nodes of one test target (the same command but for the test names) share one
     command, split only to keep a command line under BATCH_MAX. A lone node gets exactly its per-id command."""
     nodes = list(dict.fromkeys(nodes))
+    if not isinstance(template, str):  # acceptance_by: each template batches its own nodes
+        per = {}
+        for node in nodes:
+            per.setdefault(tmpl_for(template, node), []).append(node)
+        return [x for t, group in per.items() for x in batch_cmds(t, group)]
     if not batchable(template) or len(nodes) < 2:
         return [([n], c) for n, c in acceptance_cmds(template, nodes)]
     groups = {}
@@ -486,7 +569,8 @@ def gate_branch(repo, fid, main, timeout, stack=()):
         raise LandFail(f"function {fid} already proven")
     if not rows[fid]["acceptance"]:
         raise LandFail(f"no acceptance for {fid} in {fpath}")
-    mine = acceptance_cmds(commands["acceptance"], rows[fid]["acceptance"])
+    acc = acceptance_template(commands)
+    mine = acceptance_cmds(acc, rows[fid]["acceptance"])
 
     touched = git(repo, "diff", "--name-only", f"{main_sha}...{fn_sha}").stdout.splitlines()
     bad = [p for p in touched if p.startswith(PLAN_PATHS) or p == fpath]
@@ -498,7 +582,7 @@ def gate_branch(repo, fid, main, timeout, stack=()):
 
     # RED BEFORE, on main's tree
     git(wt, "checkout", "-q", "--detach", main_sha)
-    if not red_nodes(commands["acceptance"], rows[fid]["acceptance"], wt, out_path, timeout, alone=False):
+    if not red_nodes(acc, rows[fid]["acceptance"], wt, out_path, timeout, alone=False):
         raise LandFail(GREEN_BEFORE)
 
     # Merge main into the branch
@@ -518,7 +602,8 @@ def gate_branch(repo, fid, main, timeout, stack=()):
             stacked = []
             break
     ctx = dict(fid=fid, wt=wt, out_path=out_path, branch=branch, main_sha=main_sha, fn_sha=fn_sha,
-               commands=commands, fpath=fpath, rows=rows, mine=mine, stacked=stacked, touched=touched)
+               commands=commands, fpath=fpath, rows=rows, mine=mine, stacked=stacked, touched=touched,
+               tiers=tier_globs(conf), near=footprint_modules(repo, main_sha, conf, touched))
     gate_tree(ctx, rows, stacked, timeout)
     ctx["gated"] = git(wt, "rev-parse", "HEAD").stdout.strip()
     return ctx
@@ -528,10 +613,7 @@ def gate_tree(ctx, rows, extra, timeout):
     """Steps 4 and 5 on the tree checked out in ctx's worktree: whole-tree commands, this function's acceptance,
     then every proven row (and every stacked row in `extra`) still passes."""
     wt, out_path, commands, fid = ctx["wt"], ctx["out_path"], ctx["commands"], ctx["fid"]
-    for name in WHOLE_TREE:
-        cmd = commands.get(name)
-        if not cmd:
-            continue
+    for name, cmd in gate_cmds(commands):
         cmd = fill(cmd)
         code, tail = run(cmd, wt, out_path, timeout)
         if not passes(cmd, code):
@@ -543,31 +625,48 @@ def gate_tree(ctx, rows, extra, timeout):
             raise LandFail(reason)
 
     # GREEN AFTER, then no regression of proven rows
-    bad = red_nodes(commands["acceptance"], [n for n, _ in ctx["mine"]], wt, out_path, timeout)
+    acc = acceptance_template(commands)
+    bad = red_nodes(acc, [n for n, _ in ctx["mine"]], wt, out_path, timeout)
     if bad:
         node, code, tail = bad[0]
         raise LandFail(f"acceptance still red after merge: {node} (exit {code}): {tail}")
     keep = [rid for rid, row in rows.items() if (row["status"] == "proven" or rid in extra) and rid != fid]
-    hit = regression(rows, keep, commands, wt, out_path, timeout)
+    near = set(ctx.get("near", ())) | {rows[fid].get("module", "")} | {rows[r].get("module", "") for r in extra}
+    hit = regression(rows, keep, commands, wt, out_path, timeout, ctx.get("tiers", ()), near, extra)
     if hit:
         rid, node, reason = hit
         row = rows[rid]
         if row.get("module") != rows[fid].get("module"):
             flake = flake_on_main(ctx, node, node.partition("::")[0], row.get("module", ""),
-                                  acceptance_cmds(commands["acceptance"], [node])[0][1], timeout)
+                                  acceptance_cmds(acc, [node])[0][1], timeout)
             if flake:
                 raise LandFail(f"{flake}; on the merged tree: {reason}")
         raise LandFail(reason)
 
 
-def regression(rows, ids, commands, wt, out_path, timeout):
+def footprint_modules(repo, main_sha, conf, touched):
+    """The modules whose ARCHITECTURE.md Paths hold a file the branch changes (empty without [tiers])."""
+    if not tier_globs(conf):
+        return set()
+    apath = conf.get("paths", {}).get("architecture", "spec/ARCHITECTURE.md")
+    arch = git(repo, "show", f"{main_sha}:{apath}", check=False).stdout
+    return touched_modules(arch, touched)
+
+
+def regression(rows, ids, commands, wt, out_path, timeout, tiers=(), near=None, extra=()):
     """(row id, node, reason) of the first of `ids` whose acceptance fails in wt, or None. All their tests run
-    batched by test target, not one command per test."""
+    batched by test target, not one command per test. With `near` (a module set), a test whose file matches a
+    [tiers] glob runs only when its row is in `extra` or its module is in `near`."""
     owner = {}
     for rid in ids:
         for node in rows[rid]["acceptance"]:
+            if (near is not None and rid not in extra and rows[rid].get("module", "") not in near
+                    and under(node.partition("::")[0], tiers)):
+                continue
             owner.setdefault(node, rid)
-    bad = red_nodes(commands["acceptance"], list(owner), wt, out_path, timeout)
+    if not owner:
+        return None
+    bad = red_nodes(acceptance_template(commands), list(owner), wt, out_path, timeout)
     if not bad:
         return None
     node, code, tail = bad[0]
@@ -702,10 +801,7 @@ def commit_land(repo, ctx, main, timeout):
 
 def gate_merged(wt, rows, commands, out_path, timeout):
     """Whole-tree commands, then every proven row's acceptance, on the merged tree in wt."""
-    for name in WHOLE_TREE:
-        cmd = commands.get(name)
-        if not cmd:
-            continue
+    for name, cmd in gate_cmds(commands):
         cmd = fill(cmd)
         code, tail = run(cmd, wt, out_path, timeout)
         if not passes(cmd, code):

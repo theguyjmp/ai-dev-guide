@@ -39,6 +39,7 @@ allowed.
 ## Quality rules behind the checklist (from the quality standard `{{standard_path}}`)
 
 {{standard}}
+{{project_rules}}
 
 ## Checklist {{checklist_version}} (from `{{checklist_path}}`): answer every item below
 

@@ -1,13 +1,14 @@
-# Review checklist v1
+# Review checklist v2
 
-checklist-version: v1
+checklist-version: v2
 
 Fixed yes/no items built from `quality-standard.md` (the `Q` numbers) plus the function's contract (`K` items).
 Each is answered `yes`, `no` or `unknown`, always with `file:line` evidence. Blocking means P0 or P1. A NO blocks
 only when a verifier reproduces it with a failing test or an exact line and input. Nits are capped at 5 per pass,
 logged, never dispatched. Items change only between runs (bump the version); a finding class seen twice becomes an
 item or a gate, never a fix pass. Each item line is `- <id> [<severity>] <Q rules> | <question> | <how to decide>`;
-drive.py parses these lines, so keep the shape.
+drive.py parses these lines, so keep the shape. `R` in the rules field asks the item only of a row whose `rules`
+column cites project rules ([paths] patterns and standards).
 
 ## Contract (every function review)
 
@@ -62,3 +63,7 @@ drive.py parses these lines, so keep the shape.
 - C27 [P1] Q34 | Is a stale lock recovered and a lock wait bounded? | NO with the lock code line and the killed-holder case.
 - C28 [P0] Q35 | Does every network read have a timeout and a size cap? | NO with the read line and a stalled or oversized request.
 - C29 [P1] Q36 | Are exported cells escaped and the export written atomically? | NO with the export line and a `=1+1` cell.
+
+## Project rules (only for a row with a rules column entry)
+
+- C30 [P1] R | Does each project rule the row cites (quoted under "Project rules this row cites") hold in the change, and does the acceptance test name and prove each pattern (P) id? | NO with the rule id and the file:line that breaks it, or the P id the acceptance test never exercises.

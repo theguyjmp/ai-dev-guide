@@ -74,6 +74,28 @@ SHARED_LINE = re.compile(r"\W*shared\W*?[:=]\s*(.+)", re.I)  # files every funct
 CONFLICT_SYNC = "merge conflict merging"
 FILES_COLUMN = "files"  # required FUNCTIONS.md column (plan_validate): the function's own files, the unit of the build lock
 NEEDS_COLUMN = "needs"  # required FUNCTIONS.md column: which deps must land first (behaviour) or only stub (default)
+RULES_COLUMN = "rules"  # optional FUNCTIONS.md column: the project rule ids (P07, S18) the row must hold
+RULE_PATHS = ("patterns", "standards")  # [paths] keys of the project's rule files (spec/PATTERNS.md, spec/STANDARDS.md)
+RULE_ID = re.compile(r"\b[A-Z]{1,3}\d+\b")
+RULE_DEF = re.compile(r"^[\s|#>*-]*\**([A-Z]{1,3}\d+)\**(?:[.:)|]|\s|$)")
+RULE_TEXT_MAX = 700  # characters of one cited rule in a brief
+
+
+def rule_defs(text: str) -> dict[str, str]:
+    """Rule id -> its text, from a rule file: a line that starts with the id (`S18. ...`, `| P07 | ... |`,
+    `### P07 ...`) plus the lines that continue it up to a blank line, a table row, a heading or the next id."""
+    defs: dict[str, str] = {}
+    cur = None
+    for line in text.splitlines():
+        m = RULE_DEF.match(line)
+        if m and m.group(1) not in defs:
+            cur = m.group(1)
+            defs[cur] = re.sub(r"\s+", " ", line.strip().strip("|#>*- "))
+        elif m or not line.strip() or line.lstrip().startswith(("|", "#")):
+            cur = None
+        elif cur:
+            defs[cur] += " " + line.strip()
+    return {k: v if len(v) <= RULE_TEXT_MAX else v[:RULE_TEXT_MAX - 4] + " ..." for k, v in defs.items()}
 
 
 def parse_needs(cell: str, deps: list[str]) -> list[str] | None:
@@ -150,6 +172,7 @@ class Fn:
     order: int
     files: list[str] = field(default_factory=list)
     needs: list[str] | None = None  # deps that must land before the build starts (behaviour); None = all deps
+    rules: list[str] = field(default_factory=list)  # project rule ids from the optional rules column
 
     @property
     def blocking(self) -> list[str]:
@@ -252,6 +275,7 @@ class Item:
     rules: tuple[int, ...]
     question: str
     decide: str
+    project: bool = False  # `R` in the rules field: asked only of a row that cites project rules
 
 
 @lru_cache(maxsize=1)
@@ -264,13 +288,15 @@ def checklist() -> tuple[str, dict[str, Item]]:
         it = ITEM_LINE.match(line)
         if it:
             nums = tuple(int(n) for n in re.findall(r"Q(\d+)", it[3]))
-            items[it[1]] = Item(it[1], it[2], nums, it[4].strip(), it[5].strip())
+            items[it[1]] = Item(it[1], it[2], nums, it[4].strip(), it[5].strip(),
+                                bool(re.search(r"(?<![A-Za-z])R(?![A-Za-z0-9])", it[3])))
     return (m[1] if m else "v?"), items
 
 
-def applicable_items(text: str | None) -> list[Item]:
-    """Contract items always, plus the items whose rules apply to the text; None means the whole checklist."""
-    items = list(checklist()[1].values())
+def applicable_items(text: str | None, project_rules: bool = False) -> list[Item]:
+    """Contract items always, plus the items whose rules apply to the text; None means the whole checklist. The
+    project-rules item (C30) only for a row that cites project rules."""
+    items = [i for i in checklist()[1].values() if project_rules or not i.project]
     if text is None:
         return items
     want = wanted_rules(text)
@@ -427,6 +453,7 @@ def parse_functions(text: str) -> list[Fn]:
     idx: dict[str, int] | None = None
     names_files: int | None = None
     names_needs: int | None = None
+    names_rules: int | None = None
     header = ""
     for line in text.splitlines():
         if not line.lstrip().startswith("|"):
@@ -438,11 +465,13 @@ def parse_functions(text: str) -> list[Fn]:
             idx, header = {c: names.index(c) for c in COLUMNS}, line.strip()
             names_files = names.index(FILES_COLUMN) if FILES_COLUMN in names else None
             names_needs = names.index(NEEDS_COLUMN) if NEEDS_COLUMN in names else None
+            names_rules = names.index(RULES_COLUMN) if RULES_COLUMN in names else None
             continue
         if idx is None or all(set(c) <= set(":- ") for c in row):
             continue
         get = {c: (row[i] if i < len(row) else "") for c, i in idx.items()}
         files = row[names_files] if names_files is not None and names_files < len(row) else ""
+        rules = row[names_rules] if names_rules is not None and names_rules < len(row) else ""
         deps = [bare(d) for d in get["deps"].split(",") if bare(d) not in ("", "-")]
         # no needs column: every dep blocks (the v2 behaviour, so old plans are unchanged)
         needs = parse_needs(row[names_needs], deps) if names_needs is not None and names_needs < len(row) else None
@@ -451,7 +480,8 @@ def parse_functions(text: str) -> list[Fn]:
             deps=deps, needs=deps if names_needs is not None and needs is None else needs,
             entry=get["entry"], acceptance=[bare(a) for a in get["acceptance"].split(";") if bare(a)],
             status=bare(get["status"]).lower(), header=header, row=line.strip(), order=len(fns),
-            files=[bare(x) for x in re.split(r"[,;]", files) if bare(x) not in ("", "-")]))
+            files=[bare(x) for x in re.split(r"[,;]", files) if bare(x) not in ("", "-")],
+            rules=list(dict.fromkeys(RULE_ID.findall(rules)))))
     return fns
 
 
@@ -560,7 +590,11 @@ def load_config(repo: Path) -> dict:
     except tomllib.TOMLDecodeError as e:
         raise DriveError(f"overhaul.toml: {e}") from e
     cfg = {name: {**base, **raw.get(name, {})} for name, base in DEFAULTS.items()}
-    cfg["commands"] = {k: str(v) for k, v in raw.get("commands", {}).items()}
+    raw_cmds = raw.get("commands", {})
+    # [commands.acceptance_by] and [commands.extra] are tables, kept apart: every cfg["commands"] value is a string
+    cfg["commands"] = {k: str(v) for k, v in raw_cmds.items() if not isinstance(v, dict)}
+    cfg["acceptance"] = land_mod.acceptance_template(raw_cmds)
+    cfg["extra"] = land_mod.extra_cmds(raw_cmds)
     return cfg
 
 
@@ -967,10 +1001,13 @@ class Driver:
     def commands_text(self, f: Fn) -> str:
         lines = []
         for name, cmd in self.cfg["commands"].items():
-            if "{test}" in cmd:  # the exact commands the gate runs ({test}, {file}, {stem}, {node} filled)
+            if name == "acceptance":  # per test file: [commands.acceptance_by] may give a file its own template
+                cmd = self.cfg.get("acceptance") or cmd
+            if "{test}" in str(cmd):  # the exact commands the gate runs ({test}, {file}, {stem}, {node} filled)
                 lines += [f"- {name}: `{c}`" for _, c in land_mod.acceptance_cmds(cmd, f.acceptance)]
             else:
                 lines.append(f"- {name}: `{cmd}`")
+        lines += [f"- {name}: `{cmd}`" for name, cmd in self.cfg.get("extra", [])]
         return "\n".join(lines) or "(overhaul.toml has no [commands])"
 
     def row_table(self, f: Fn) -> str:
@@ -1130,10 +1167,7 @@ class Driver:
         """The whole-tree gate commands land.py runs ([harness] pre_review names them; default all of them), run
         in the worktree on the merged branch. '' when all pass."""
         names = self.cfg["harness"].get("pre_review", land_mod.WHOLE_TREE)
-        for name in names:
-            cmd = self.cfg["commands"].get(name)
-            if not cmd:
-                continue
+        for name, cmd in self.gate_list(names):
             if name == "cycles":
                 problem = self.cycles_problem(wt)
                 if problem:
@@ -1149,10 +1183,15 @@ class Driver:
                         f"review: `{cmd}`: {tail}. Merge {self.main} and rerun the gate before you hand back")
         return self.acceptance_problem(wt, fid)
 
+    def gate_list(self, names) -> list[tuple[str, str]]:
+        """The pre-review commands: the named [commands] that are set, then [commands.extra], as land runs them."""
+        return [(n, self.cfg["commands"][n]) for n in names if self.cfg["commands"].get(n)] + \
+            list(self.cfg.get("extra", []))
+
     def acceptance_problem(self, wt: Path, fid: str) -> str:
         """The function's own acceptance tests, run before review: a red one would only fail at land, after a
         wasted review. The full output goes to a file the retry brief names. '' when green or not a function."""
-        tmpl = self.cfg["commands"].get("acceptance")
+        tmpl = self.cfg.get("acceptance") or self.cfg["commands"].get("acceptance")
         if fid not in self.fns or not tmpl or not self.cfg["harness"].get("pre_review_acceptance", True):
             return ""
         for node, cmd in land_mod.acceptance_cmds(tmpl, self.fns[fid].acceptance):
@@ -1278,7 +1317,24 @@ class Driver:
     def standard_values(self, f: Fn) -> dict[str, str]:
         """The quality-standard placeholders of a build or review brief for function f."""
         text = "\n".join((self.row_table(f), module_section(self.arch, f.module), self.acceptance_text(f)))
-        return {"standard_path": STANDARD.as_posix(), "standard": relevant_rules(text)}
+        return {"standard_path": STANDARD.as_posix(), "standard": relevant_rules(text),
+                "project_rules": self.project_rules(f)}
+
+    def project_rules(self, f: Fn) -> str:
+        """The brief section quoting each project rule the row's rules column cites, from the [paths] patterns and
+        standards files on main; '' when the row cites none."""
+        if not f.rules:
+            return ""
+        srcs = [str(self.cfg["paths"][k]) for k in RULE_PATHS if self.cfg["paths"].get(k)]
+        defs: dict[str, str] = {}
+        for rel in srcs:
+            for k, v in rule_defs(self.read_main(rel) or "").items():
+                defs.setdefault(k, v)
+        where = ", ".join(f"`{x}`" for x in srcs) or "no [paths] patterns or standards in overhaul.toml"
+        lines = [f"- {defs[r]}" if r in defs else f"- {r}: (not found in {where})" for r in f.rules]
+        return (f"\n## Project rules this row cites (from {where})\n\n"
+                "Every rule below must hold in the change, and the acceptance test proves each pattern id it names "
+                "(checklist C30).\n\n" + "\n".join(lines) + "\n")
 
     def round_rule(self, fid: str) -> str:
         prev = self.st["functions"][fid].get("review")
@@ -1301,7 +1357,8 @@ class Driver:
             "id": fid, "branch": branch, "row": self.row_table(f), "allowed_paths": self.allowed(f),
             "acceptance_source": self.acceptance_text(f), "review_file": review_file.as_posix(),
             "policies": self.policies(), **values, "checklist_path": CHECKLIST.as_posix(),
-            "checklist_version": checklist()[0], "checklist": checklist_text(applicable_items(scope)),
+            "checklist_version": checklist()[0],
+            "checklist": checklist_text(applicable_items(scope, bool(f.rules))),
             "round_rule": self.round_rule(fid),
             "diffstat": git(self.repo, "diff", "--stat", f"{self.main}...{branch}").rstrip(),
             "diff": git(self.repo, "diff", f"{self.main}...{branch}").rstrip(),
