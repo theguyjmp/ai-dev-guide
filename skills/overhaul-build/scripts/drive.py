@@ -277,11 +277,19 @@ def checklist_text(items: list[Item]) -> str:
     return "\n".join(lines) or f"(checklist missing: {CHECKLIST.as_posix()})"
 
 
+BAD_ESCAPE = re.compile(r'\\(?!["\\/bfnrtu])')
+
+
 def read_json(path: Path) -> object:
-    try:
-        return json.loads(read_text(path))
-    except ValueError:
-        return None
+    r"""An agent's result file; a hand-written lone backslash (a regex or a Windows path in evidence text) is read
+    as a literal backslash instead of voiding the whole result (trial 11: `'\.file'` lost a polish verdict)."""
+    text = read_text(path)
+    for t in (text, BAD_ESCAPE.sub(r"\\\\", text)):
+        try:
+            return json.loads(t)
+        except ValueError:
+            pass
+    return None
 
 
 def checklist_nos(raw: object) -> list[dict] | None:
@@ -1627,6 +1635,11 @@ class Driver:
     def polish_audit_failed(self, rnd: int, why: str, model: str, secs: float, tokens: int | None) -> None:
         pol = self.polish_state()
         self.log(None, "polish_audit", f"round {rnd} failed: {why} model={model}", secs, tokens)
+        if pol.get("audit_retry") != rnd:  # one unreadable result must not void the round: audit it once more
+            pol.update(status="idle", audit_retry=rnd)
+            self.save()
+            self.say(f"polish audit round {rnd} failed ({why}); running it once more")
+            return
         self.log(None, "polish_done", f"? issues: {why}")
         pol.update(status="failed", issues=None)
         self.save()

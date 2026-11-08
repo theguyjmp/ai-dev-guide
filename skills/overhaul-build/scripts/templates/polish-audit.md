@@ -36,7 +36,7 @@ The rules behind each item are in `{{standard}}`. The project's own commands: {{
 
 ## Output
 
-Write `{{audit_file}}` as one JSON list, `[]` when every item is YES:
+Write `{{audit_file}}` as one JSON list, `[]` when every item is YES. Write it with a script (`json.dump`), not by hand: a hand-typed backslash in a regex or a path makes the file unreadable and the result is lost:
 
 ```json
 [{"module": "<a module name from the list above>", "id": "C05", "answer": "no", "file": "src/x/y.py",

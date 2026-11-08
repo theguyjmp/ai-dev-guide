@@ -124,6 +124,11 @@ if first.startswith("# Polish audit round "):  # scenario "audit": one list of f
     audits = json.loads((ROOT / "scenario.json").read_text(encoding="utf-8")).get("audit") or [[]]
     (seen / f"polish-audit-{rnd}.md").write_text(brief, encoding="utf-8")
     found = audits[min(rnd, len(audits)) - 1]
+    garble = json.loads((ROOT / "scenario.json").read_text(encoding="utf-8")).get("audit_garble")
+    if garble and not (seen / "audit-garbled").exists():  # the first audit writes an unreadable file
+        (seen / "audit-garbled").write_text("", encoding="utf-8")
+        Path(field("- Findings file to write:")).write_text("[{", encoding="utf-8")
+        finish("0")
     Path(field("- Findings file to write:")).write_text(json.dumps(found), encoding="utf-8")
     finish(str(len(found)))
 if first.startswith("# Polish fix "):
@@ -973,6 +978,13 @@ class TestPolish(Toy):
     def polish_events(self, repo: Path) -> list[tuple[str, str]]:
         return [(e["event"], e["detail"]) for e in self.events(repo) if e["event"].startswith("polish_")]
 
+    def test_an_unreadable_polish_audit_runs_once_more(self):  # trial 11: one bad escape voided the verdict
+        repo = self.make_repo({"audit": [[]], "audit_garble": True})
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = [d.split(" model=")[0] for e, d in self.polish_events(repo) if e == "polish_audit"]
+        self.assertEqual(ev, ["round 1 failed: audit-1.json missing or not a JSON list", "round 1: 0 issues"])
+
     def test_audit_fix_land_then_a_clean_reaudit_gives_verdict_good(self):
         repo = self.make_repo({"audit": [[finding("alpha", 3), finding("beta", 7)], []]})
         rc, out = self.drive_cli(repo)
@@ -1184,6 +1196,14 @@ class TestFixRetry(Toy):
         self.assertIn("unused import", self.seen("probe-alpha-fix-2.md"))
         self.assertIn("Retry 1 of a polish fix", self.seen("probe-alpha-review-2.md"))
         self.assertEqual(self.state(repo)["probe"]["alpha"]["status"], "below_floor")
+
+    def test_a_lone_backslash_in_an_agent_result_is_read_not_lost(self):  # trial 11 polish verifier
+        f = Path(tempfile.mkdtemp()) / "v.json"
+        f.write_text('[{"n": 1, "how": "git grep ' + chr(39) + chr(92) + '.file' + chr(92) + 'b' + chr(39) + '"}]',
+                     encoding="utf-8")
+        self.assertEqual(drive.read_json(f)[0]["n"], 1)
+        f.write_text("[{", encoding="utf-8")
+        self.assertIsNone(drive.read_json(f))
 
     def test_retry_count_is_kept_in_state_json(self):
         repo = self.probe_repo(0.5)

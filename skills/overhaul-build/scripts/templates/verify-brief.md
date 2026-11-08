@@ -29,7 +29,7 @@ Each has a number `n`, the checklist item, its severity, the reviewer's file:lin
 
 ## Write the result
 
-Write `{{verify_file}}` as one JSON list, one entry per finding, and nothing else:
+Write `{{verify_file}}` as one JSON list, one entry per finding, and nothing else. Write it with a script (`json.dump`), not by hand: a hand-typed backslash in a regex or a path makes the file unreadable and the result is lost:
 
 ```json
 [{"n": 1, "reproduced": true, "how": "scratch/test_total.py::test_neg fails: total(-1) returns -1"}]

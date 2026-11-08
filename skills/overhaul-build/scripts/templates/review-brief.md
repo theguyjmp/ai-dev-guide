@@ -64,7 +64,7 @@ How to answer:
 
 ## Write the result
 
-Write `{{review_file}}` as one JSON object and nothing else:
+Write `{{review_file}}` as one JSON object and nothing else. Write it with a script (`json.dump`), not by hand: a hand-typed backslash in a regex or a path makes the file unreadable and the result is lost:
 
 ```json
 {"checklist": "{{checklist_version}}",
