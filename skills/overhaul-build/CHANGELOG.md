@@ -2,6 +2,20 @@
 
 Why each rule exists, newest first. Full v1 history: `git log -- skills/overhaul-build` (71 commits, 2026-11-05 to 2026-11-07).
 
+## v3 a fixed checklist with verified NOs is the bar, 2026-11-07
+"A blind open audit scores 10/10" has no fixed point: each pass finds new things, and no source uses it as an exit
+condition. The bar is now measurable (V3-DESIGN.md, "The bar" 4 and 5).
+- `references/checklist.md` v1: K1-K4 contract items plus C01-C29 from the quality standard, each yes/no with a
+  severity (P0, P1, nit) and how to decide it.
+- Review answers the checklist as JSON and lists every NO at once; a verifier (`verify-brief.md`) must reproduce each
+  blocking NO with a failing test or an exact line and input, or it does not block (review_unverified). The retry
+  fixes the whole verified list. Round rule: a re-review blocks only on a still-NO item or a regression in changed
+  code (review_overreach otherwise). Nits are capped at 5, logged and never dispatched.
+- Polish is the checklist over the whole tree plus a dedup role, verified the same way, at most 2 fix rounds.
+- verdict.py: GOOD = all proven, gates green, 0 verified P0/P1 (every blocking item YES), probe floors when
+  probe_mutation events exist. Nits and the open-audit trend are reported (`nits J`, `trend`) and never gate.
+- The final open audit (AUDIT-BRIEF) is a trend report: 7 scores plus NEW-RULE candidates for the next checklist.
+
 ## v2 one quality standard for every step, 2026-11-07
 Trial 4's polish audit (sonnet, a condensed brief) ended at 4 issues while the final judge (opus, AUDIT-BRIEF)
 found 18: polish optimised against a weaker, open-ended bar. The new issues were design-level (a two-store pay

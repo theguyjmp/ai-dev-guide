@@ -6,13 +6,19 @@ GOOD only when all of these hold:
     repo root (pytest exit 5, "no tests collected", is a pass, R-c; --no-checks skips them);
   3 no function has waited in needs-plan for more than 1 cycle;
   4 no log event since the previous verdict shows a builder over its call budget;
-  5 once every function is proven and state.json has a polish phase, its final audit found 0 issues.
+  5 once every function is proven and state.json has a polish phase, its checklist run left 0 verified P0 or P1
+    NOs, i.e. every blocking checklist item is YES (references/checklist.md);
+  6 when the log has probe_mutation events, each module's latest mutation score is at or above its floor
+    (the event's floor, else [limits] mutation_floor, default 0.9).
+Nits (capped at 5) and the open-audit trend (the latest open_audit event: SCORES s1..s7 | ISSUES n) are reported
+and never gate.
 Otherwise BAD, with at most 5 reds ranked by harm, each naming its automatic action (R in an action is the repo).
 Reads spec/FUNCTIONS.md (the committed truth for proven, R-a), .overhaul/state.json and .overhaul/log.jsonl; the
 paths follow overhaul.toml [paths]. Writes .overhaul/verdict.json, appends a "verdict" event to .overhaul/log.jsonl
 and prints one line:
-  VERDICT GOOD|BAD proven N/T rate X/h [issues K] reds: ...
-(issues K is the polish phase's latest audit count, shown once it has started.)
+  VERDICT GOOD|BAD proven N/T rate X/h [issues K nits J] [trend S] reds: ...
+(issues K is the polish phase's verified blocking NO count and J its nits, shown once it has started; S is the
+latest open-audit trend, shown once one ran.)
 The rate is proven per hour over the last 3 h of state.json proven_history, measured up to now.
   py -3 verdict.py --repo R [--no-checks] [--timeout S]     exit 0 GOOD, 1 BAD, 2 no repo
 """
@@ -38,6 +44,7 @@ STATUSES = ("planned", "building", "review", "landing", "proven", "needs-plan")
 ACTIVE = ("building", "review", "landing")
 MAX_REDS = 5
 RATE_WINDOW_H = 3.0
+MUTATION_FLOOR = 0.9  # probe floor when neither the event nor [limits] mutation_floor names one
 BUDGET_RE = re.compile(r"over[ _-]?budget", re.I)
 SEPARATOR_RE = re.compile(r":?-+:?")
 
@@ -254,6 +261,38 @@ def progress_action(view):
     return f"keep drive.py running: {len(active)} in flight ({', '.join(active[:3])})"
 
 
+def as_fraction(v):
+    """A score as a fraction: 0.93, 93 and "93%" are all 0.93; None when it is not a number."""
+    try:
+        f = float(str(v).strip().rstrip("%"))
+    except (TypeError, ValueError):
+        return None
+    return f / 100 if f > 1 else f
+
+
+def probe_floors(events, limits):
+    """[(module, score, floor)] from each module's latest probe_mutation event."""
+    default = as_fraction(limits.get("mutation_floor"))
+    latest = {}
+    for e in events:
+        if e.get("event") != "probe_mutation":
+            continue
+        score = as_fraction(e.get("score"))
+        if score is not None:
+            floor = as_fraction(e.get("floor"))
+            latest[str(e.get("module") or e.get("fn") or "?")] = (
+                score, floor if floor is not None else default if default is not None else MUTATION_FLOOR)
+    return [(m, s, f) for m, (s, f) in sorted(latest.items())]
+
+
+def open_audit_trend(events):
+    """The latest open_audit event's detail (SCORES s1..s7 | ISSUES n), or None. A trend, never a gate."""
+    for e in reversed(events):
+        if e.get("event") == "open_audit" and str(e.get("detail") or "").strip():
+            return short(str(e["detail"]).strip(), 80)
+    return None
+
+
 def judge(p, prev, t_now, checks, events):
     """The verdict document from measurements; checks is None when skipped."""
     view, proven, total, state = p["view"], p["proven"], p["total"], p["state"]
@@ -277,9 +316,17 @@ def judge(p, prev, t_now, checks, events):
     issues = pol.get("issues") if pol else None
     if pol and total and proven == total and (pol.get("status") != "done" or issues != 0):
         reds.append((2, "polish", f"polish {pol.get('status')}: {'?' if issues is None else issues} issues "
-                     f"after round {pol.get('round')}",
+                     f"(verified P0/P1 checklist NOs) after round {pol.get('round')}",
                      "drive.py --repo R runs the polish audit and fix passes; issues left after [limits] "
                      "polish_rounds are in R/.overhaul/polish/: fix them or raise polish_rounds"))
+
+    limits = p["cfg"].get("limits") if isinstance(p["cfg"].get("limits"), dict) else {}
+    for mod, score, floor in probe_floors(events, limits):
+        if score < floor:
+            reds.append((2, "probe", f"mutation score {score:.0%} < floor {floor:.0%} in {mod}",
+                         f"the survivors of {mod} go to one fix pass; see probe_mutation in R/.overhaul/log.jsonl"))
+    nits = pol.get("nits") if pol else None
+    trend = open_audit_trend(events)
 
     seq = as_int(prev.get("seq")) + 1
     cycle = as_int(state.get("cycle"), seq)
@@ -303,7 +350,6 @@ def judge(p, prev, t_now, checks, events):
                          f"plan commit for {fid} (spec/, tests/acceptance/, overhaul.toml) once plan_validate.py "
                          f"prints PLAN OK, then drive.py --repo R --reset {fid}"))
 
-    limits = p["cfg"].get("limits") if isinstance(p["cfg"].get("limits"), dict) else {}
     max_calls = as_int(limits.get("builder_max_calls"), None)
     over = {}
     for e in events:
@@ -332,9 +378,11 @@ def judge(p, prev, t_now, checks, events):
             "prev_proven": prev_proven, "rate_per_h": round(rate, 2), "counts": counts,
             "reds": [{"kind": k, "what": w, "action": a} for _, k, w, a in shown], "reds_total": len(reds),
             "checks": checks if checks is not None else "skipped", "needs_plan_since": since,
-            "polish_issues": issues,
+            "polish_issues": issues, "nits": nits, "trend": trend,
             "line": f"VERDICT {verdict} proven {proven}/{total} rate {rate:.1f}/h"
-                    f"{'' if pol is None else ' issues ' + ('?' if issues is None else str(issues))} reds: {text}"}
+                    f"{'' if pol is None else ' issues ' + ('?' if issues is None else str(issues))}"
+                    f"{'' if pol is None else ' nits ' + str(as_int(nits))}"
+                    f"{'' if trend is None else ' trend ' + trend} reds: {text}"}
 
 
 def write_atomic(path, text):

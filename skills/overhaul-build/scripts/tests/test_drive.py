@@ -92,8 +92,9 @@ ROOT = Path(__file__).resolve().parent
 brief = Path(sys.argv[-1].split("Read and do ", 1)[1]).read_text(encoding="utf-8")
 first = brief.splitlines()[0]
 review = first.startswith("# Blind review of ")
+verify = first.startswith("# Verify findings ")
 conflict = first.startswith("# Resolve conflict ")
-fid = first.split()[-1] if review else first.split()[3 if conflict else 2]
+fid = first.split()[-1] if review or verify else first.split()[3 if conflict else 2]
 scenario = json.loads((ROOT / "scenario.json").read_text(encoding="utf-8")).get(fid, {})
 seen = ROOT / "seen"
 seen.mkdir(exist_ok=True)
@@ -134,12 +135,34 @@ if first.startswith("# Polish fix "):
     git("commit", "-q", "-m", first)
     finish("DONE")
 
-if review:
+if verify:  # scenario "verify": per verify pass "all" (default), "none" or the list of n it reproduces
+    n = len(list(seen.glob(fid + "-verify-*.md"))) + 1
+    (seen / f"{fid}-verify-{n}.md").write_text(brief, encoding="utf-8")
+    listed = [int(ln.split(".", 1)[0]) for ln in brief.splitlines() if ln[:1].isdigit() and ". [" in ln]
+    seq = scenario.get("verify") or ["all"]
+    got = seq[min(n, len(seq)) - 1]
+    hits = listed if got == "all" else [] if got == "none" else got
+    Path(field("- Verify file to write:")).write_text(json.dumps(
+        [{"n": k, "reproduced": k in hits, "how": f"scratch test {k} fails"} for k in listed]), encoding="utf-8")
+    finish(str(len(hits)))
+
+if review:  # scenario "review": "PASS", "FAIL why" (one K2 NO), "FAIL PLAN-GAP: x", or the JSON result itself
     n = len(list(seen.glob(fid + "-review-*.md"))) + 1
     (seen / f"{fid}-review-{n}.md").write_text(brief, encoding="utf-8")
-    verdict, _, why = pick("review", n).partition(" ")
-    Path(field("- Review file to write:")).write_text(f"{verdict}\\n{why or 'checked'}\\n", encoding="utf-8")
-    finish(verdict)
+    got = pick("review", n)
+    if not isinstance(got, str):
+        result = got
+    elif got == "PASS":
+        result = {"checklist": "v1", "items": []}
+    elif got.startswith("FAIL PLAN-GAP: "):
+        result = {"checklist": "v1", "items": [], "plan_gap": got[len("FAIL PLAN-GAP: "):]}
+    else:
+        why = got.partition(" ")[2] or "checked"
+        mod = next((ln.split("`")[1] for ln in brief.splitlines() if ln.startswith("- Module:")), "alpha")
+        result = {"checklist": "v1", "items": [{"id": "K2", "answer": "no", "file": f"src/{mod}/{fid.lower()}.py",
+                                                "line": 1, "evidence": why, "fix": "make it right"}]}
+    Path(field("- Review file to write:")).write_text(json.dumps(result), encoding="utf-8")
+    finish("FAIL" if result.get("items") or result.get("plan_gap") else "PASS")
 
 n = int(first.rstrip(")").split()[-1])
 if conflict:  # a conflict-fix pass: same worktree and branch, merge main, commit a visible fix
@@ -301,13 +324,16 @@ class TestTemplates(unittest.TestCase):
     def test_every_placeholder_is_one_drive_fills(self):
         build = "id attempt worktree branch row entry module module_section allowed_paths " \
                 "acceptance_source policies commands max_calls previous standard_path standard".split()
-        review = "id branch row allowed_paths acceptance_source review_file policies diffstat diff max_calls "                  "standard_path standard".split()
+        review = "id branch row allowed_paths acceptance_source review_file policies diffstat diff max_calls " \
+                 "standard_path standard checklist_path checklist_version checklist round_rule".split()
         conflict = "id pass worktree branch main module reason row allowed_paths commands max_calls".split()
-        audit = "round main audit_file max_calls scratch modules policies commands standard audit_brief".split()
+        audit = "round main audit_file max_calls scratch modules policies commands standard " \
+                "checklist_path checklist_version checklist".split()
+        verify = "id branch verify_file scratch findings commands max_calls".split()
         fix = "id round module branch max_calls issues allowed_paths policies commands".split()
         for name, keys in (("build-brief.md", build), ("review-brief.md", review),
                            ("conflict-brief.md", conflict), ("polish-audit.md", audit),
-                           ("polish-fix-brief.md", fix)):
+                           ("polish-fix-brief.md", fix), ("verify-brief.md", verify)):
             used = set(re.findall(r"\{\{(\w+)\}\}", (drive.TEMPLATES / name).read_text(encoding="utf-8")))
             self.assertEqual(used, set(keys), name)
             self.assertNotIn("{{", drive.render(name, {k: f"<{k}>" for k in keys}))
@@ -356,7 +382,8 @@ class TestRetries(Toy):
         self.assertEqual(rc, 0, out)
         self.assertIn("None. This is the first attempt.", self.seen("F1-build-1.md"))
         self.assertIn("Attempt 1 failed: builder exited rc=7: boom: disk on fire", self.seen("F1-build-2.md"))
-        self.assertIn("Attempt 2 failed: review FAIL: stub left in f1.py", self.seen("F1-build-3.md"))
+        self.assertIn("Attempt 2 failed: review FAIL: 1 verified blocking NOs", self.seen("F1-build-3.md"))
+        self.assertIn("] `src/alpha/f1.py:1` stub left in f1.py", self.seen("F1-build-3.md"))
         self.assertIn("The worktree was reset to main", self.seen("F1-build-3.md"))
         rec = self.state(repo)["functions"]["F1"]
         self.assertEqual((rec["status"], rec["attempts"]), ("proven", 2))
@@ -427,7 +454,8 @@ class TestTrial3Waste(Toy):
         repo = self.make_repo({"F1": {"build": ["stray", "ok"], "review": [why, "PASS"]}}, retries=2)
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 0, out)
-        self.assertIn("Attempt 1 failed: review FAIL: src/beta/f1_stray.py", self.seen("F1-build-2.md"))
+        self.assertIn("Attempt 1 failed: review FAIL: 1 verified blocking NOs", self.seen("F1-build-2.md"))
+        self.assertIn("src/beta/f1_stray.py", self.seen("F1-build-2.md"))
 
     def test_cycles_run_before_review_and_reach_the_retry(self):  # F09
         py = Path(sys.executable).as_posix()
@@ -832,9 +860,9 @@ class TestPolish(Toy):
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 0, out)
         ev = self.polish_events(repo)
-        self.assertEqual(len([1 for e, _ in ev if e == "polish_audit"]), 4)  # polish_rounds 3, then the re-audit
-        self.assertEqual(len([1 for e, d in ev if e == "polish_fix" and d.startswith("landed")]), 6)
-        self.assertEqual(ev[-1], ("polish_done", "2 issues after 3 fix rounds"))
+        self.assertEqual(len([1 for e, _ in ev if e == "polish_audit"]), 3)  # polish rounds capped at 2, then the re-audit
+        self.assertEqual(len([1 for e, d in ev if e == "polish_fix" and d.startswith("landed")]), 4)
+        self.assertEqual(ev[-1], ("polish_done", "2 issues after 2 fix rounds"))
         line = self.verdict(repo)
         self.assertTrue(line.startswith("VERDICT BAD proven 2/2"), line)
         self.assertIn(" issues 2 ", line)
@@ -847,8 +875,8 @@ class TestPolish(Toy):
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 0, out)
         ev = self.polish_events(repo)
-        self.assertEqual(len([1 for e, _ in ev if e == "polish_revert"]), 3, ev)
-        self.assertEqual(ev[-1], ("polish_done", "2 issues after 3 fix rounds"))
+        self.assertEqual(len([1 for e, _ in ev if e == "polish_revert"]), 2, ev)
+        self.assertEqual(ev[-1], ("polish_done", "2 issues after 2 fix rounds"))
         files = git(repo, "ls-tree", "-r", "--name-only", "main")
         self.assertNotIn("src/alpha/tidy.py", files)  # every round made it worse: main keeps the round 1 tree
         self.assertNotIn("src/beta/tidy.py", files)
@@ -859,12 +887,13 @@ class TestPolish(Toy):
         self.assertEqual((pol["issues"], pol["best"][:2]), (2, [1, 2]))
         audit = self.seen("polish-audit-1.md")
         self.assertIn("quality-standard.md", audit)
-        self.assertIn("audit-brief.md", audit)
+        self.assertIn("checklist.md", audit)
+        self.assertIn("dedup", audit.lower())
 
     def test_polish_audit_defaults_to_the_judge_model(self):
         repo = self.make_repo()
         drv = drive.Driver(repo, drive.load_config(repo))
-        self.assertEqual((drv.audit_model, drv.polish_rounds), ("opus", 3))
+        self.assertEqual((drv.audit_model, drv.polish_rounds), ("opus", 2))
 
     def test_polish_rounds_zero_skips_the_phase(self):
         repo = self.make_repo({"audit": [[finding("alpha", 3)]]})
@@ -875,6 +904,93 @@ class TestPolish(Toy):
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.polish_events(repo), [])
+
+
+def no(cid: str, line: int, evidence: str, file: str = "src/alpha/f1.py") -> dict:
+    return {"id": cid, "answer": "no", "file": file, "line": line, "evidence": evidence, "fix": "fix it"}
+
+
+class TestJudge(Toy):
+    """v3 review rules: one pass lists every NO, only verified NOs block, the round rule, nits never dispatched."""
+
+    def kinds(self, repo: Path, fid: str = "F1") -> list[str]:
+        return [e["event"] for e in self.events(repo) if e.get("fn") == fid]
+
+    def polish_events(self, repo: Path) -> list[tuple[str, str]]:
+        return [(e["event"], e["detail"]) for e in self.events(repo) if e["event"].startswith("polish_")]
+
+    def test_one_review_lists_every_no_and_the_retry_gets_the_whole_list(self):
+        three = {"items": [no("K2", 1, "canned output"), no("C07", 2, "message twice"), no("K4", 1, "no error")]}
+        repo = self.make_repo({"F1": {"review": [three, "PASS"]}}, retries=2)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        brief = self.seen("F1-build-2.md")
+        self.assertIn("review FAIL: 3 verified blocking NOs; fix every one", brief)
+        for text in ("canned output", "message twice", "no error"):
+            self.assertIn(text, brief)
+        self.assertEqual(self.seen("F1-verify-1.md").count(". [", 0), 3)  # one verify pass for the whole list
+        self.assertIn("message twice", (repo / ".overhaul" / "reviews" / "F1-nos.md").read_text(encoding="utf-8"))
+        self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "proven")
+
+    def test_an_unreproduced_no_does_not_block(self):
+        repo = self.make_repo({"F1": {"review": ["FAIL looks like a stub"], "verify": ["none"]}})
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        kinds = self.kinds(repo)
+        self.assertIn("review_unverified", kinds)
+        self.assertNotIn("review_fail", kinds)
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["attempts"]), ("proven", 0))  # attempts counts failed attempts
+        self.assertFalse((self.root / "seen" / "F1-build-2.md").exists())
+
+    def test_only_reproduced_nos_reach_the_retry(self):
+        two = {"items": [no("K2", 1, "real stub"), no("C07", 2, "imagined copy")]}
+        repo = self.make_repo({"F1": {"review": [two, "PASS"], "verify": [[1]]}}, retries=2)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        brief = self.seen("F1-build-2.md")
+        self.assertIn("1 verified blocking NOs", brief)
+        self.assertIn("real stub", brief)
+        self.assertNotIn("imagined copy", brief)
+
+    def test_a_new_no_on_unchanged_code_in_round_2_is_overreach_and_does_not_block(self):
+        late = {"items": [no("C07", 2, "found late on an unchanged line", "src/alpha/__init__.py")]}
+        repo = self.make_repo({"F1": {"review": ["FAIL stub", late]}}, retries=2)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        kinds = self.kinds(repo)
+        self.assertIn("review_overreach", kinds)
+        self.assertFalse((self.root / "seen" / "F1-verify-2.md").exists())  # nothing left to verify
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["attempts"]), ("proven", 1))
+
+    def test_nits_are_logged_and_never_dispatched(self):
+        nits = {"items": [no("C06", i, f"nit {i}") for i in range(1, 8)]}
+        repo = self.make_repo({"F1": {"review": [nits]}})
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = [e["detail"] for e in self.events(repo) if e["event"] == "review_nits"]
+        self.assertEqual(len(ev), 1)
+        self.assertIn("5 nits (+2 over the cap of 5, dropped)", ev[0])
+        self.assertFalse((self.root / "seen" / "F1-verify-1.md").exists())
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["attempts"]), ("proven", 0))  # attempts counts failed attempts
+
+    def test_polish_runs_the_checklist_and_dedup_verifies_and_stops_after_2_rounds(self):
+        repo = self.make_repo({"audit": [[finding("alpha", 3), finding("beta", 7)]]})
+        toml = repo / "overhaul.toml"
+        toml.write_text(toml.read_text(encoding="utf-8").replace("[limits]\n", "[limits]\npolish_rounds = 9\n"),
+                        encoding="utf-8")
+        git(repo, "commit", "-qam", "many rounds asked")
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        audit = self.seen("polish-audit-1.md")
+        self.assertIn("K2", audit)
+        self.assertIn("dedup", audit.lower())
+        self.assertIn("`src/alpha/x.py:3`", self.seen("polish-verify-verify-1.md"))
+        ev = self.polish_events(repo)
+        self.assertEqual(ev[-1], ("polish_done", "2 issues after 2 fix rounds"))
+        self.assertTrue(any(e == "polish_checklist" for e, _ in ev))
 
 
 if __name__ == "__main__":
