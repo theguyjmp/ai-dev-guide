@@ -1,5 +1,14 @@
 # overhaul-build changelog
 
+## Rust probe, 2026-11-08
+- mutate.py: when every --paths entry is Rust, the probe runs cargo-mutants on its own temp copy (never --in-place),
+  samples --max-mutants of the listed mutants with --seed and runs only those; --tests map to cargo test targets
+  (test files and dirs, src/ adds --lib, other words are name filters). Same JSON as Python plus "unviable" (mutants
+  that do not compile, left out of the score). A red baseline reads proptest "minimal failing input" and panic lines.
+  CARGO_TARGET_DIR is kept per repo under the system temp so reruns reuse compiled dependencies; the workspace's own
+  packages are cleaned first, since the copy keeps source mtimes and cargo would reuse the last mutated build.
+  Exit 3 when cargo-mutants is missing. Python paths are unchanged.
+
 ## v3 trials 7-9, 2026-11-08
 Trials 7 and 8 stalled at 3/21: F02, which 16 functions waited on, parked over faults no F02 builder could fix.
 - plan_validate: an acceptance test that drives another row's entry must wait on that row's behaviour (F02's test ran
