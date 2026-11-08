@@ -253,6 +253,11 @@ class StaticChecks(Base):
         (root / CALC_T).write_text(uses_add, encoding="utf-8")
         self.assertEqual(self.problems(root), [])
 
+    def test_control_characters_in_the_contract_fail(self):  # trial 9 F09: `\\b` written as a backspace
+        root = self.make()
+        (root / CALC_T).write_text(CALC.replace('"5"', '"5' + chr(8) + '"', 1), encoding="utf-8")
+        self.only(self.problems(root), "test_calc.py:", "raw control character")
+
     def test_acceptance_must_invoke_the_exact_entry(self):
         # trial 4, F15: the row named `report --kind <kind>` and the test drove `report sales`
         self.only(self.problems(self.make(table(R1, R2, r3(entry="`cli: tiny report --kind <kind>`")))),

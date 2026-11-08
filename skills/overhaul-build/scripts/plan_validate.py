@@ -624,6 +624,26 @@ def check_ruff(repo, cmd, problems):
         problems.append(f"overhaul.toml: [commands].lint (ruff) misses the strict set: select {' '.join(missing)}")
 
 
+TEXT_SUFFIXES = (".py", ".md", ".toml", ".json", ".js", ".ts", ".rs", ".txt", ".cfg", ".ini", ".yaml", ".yml")
+CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def check_control_chars(repo, problems):
+    """No raw control characters in the contract (tests/, spec/, overhaul.toml): a `\\b` or `\\x..` that a
+    writing tool turned into the byte itself makes a test no builder can pass (trial 9 F09: backspaces)."""
+    files = [repo / "overhaul.toml"] + [p for d in ("tests", "spec") for p in sorted((repo / d).rglob("*"))
+                                       if p.suffix in TEXT_SUFFIXES and "__pycache__" not in p.parts]
+    for path in files:
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for n, ln in enumerate(text.splitlines(), 1):
+            m = CONTROL.search(ln)
+            if m:
+                problems.append(f"{path.relative_to(repo).as_posix()}:{n}: raw control character "
+                                f"{m.group()!r} (write the escape, e.g. r\"\\b\", not the byte)")
+
+
 def check_lint_green(repo, cmd, problems, timeout=300):
     """The plan commit (and every manager plan fix) must keep the lint gate green: a red main fails every
     builder's pre-review gate and parks functions for a fault that is not theirs."""
@@ -718,6 +738,7 @@ def validate(repo, run=False, timeout=600, notes=None):
         problems += entry_match.entry_problems(
             repo, [r for r in rows if r["entry"].strip().strip("`").strip().lower() not in NO_ENTRY], paths["functions"])
         check_needs(rows, problems, paths["functions"])
+        check_control_chars(repo, problems)
         problems += entry_match.cross_problems(repo, rows, paths["functions"], waits_on_fn(rows))
         check_stubs(rows, repo, problems, paths["functions"])
         check_property(rows, cfg, repo, problems, paths["functions"])

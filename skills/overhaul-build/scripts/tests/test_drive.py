@@ -193,6 +193,9 @@ if mode == "hang":
 if mode == "slow":  # a build that takes long enough for parallel builds to overlap in time
     time.sleep(2.5)
     mode = "ok"
+if mode == "blockedtest":  # the contract is wrong: name the planned test
+    finish("BLOCKED " + fid + chr(10) + "the test is wrong" + chr(10)
+           + "BLOCKED-BY: tests/acceptance/test_f1.py:3 the pattern holds a backspace byte")
 if mode == "blockedby" and (seen / (fid + "-blocked")).exists():  # the rebuild after its dependency fix
     mode = "ok"
 if mode == "blockedby":  # a landed dependency's bug outside the allowed paths: commit nothing, name it
@@ -432,6 +435,15 @@ class TestRetries(Toy):
         self.assertTrue(any(e == "dep_fix" and f == "depfix-F2" and d == "landed alpha" for e, f, d in ev), ev)
         self.assertIn("add 1 2 prints 0, want 3", self.seen("depfix-F2-fix.md"))
         self.assertFalse(any(e == "needs_plan" for e, _, _ in ev))
+
+    def test_blocked_by_on_the_contract_parks_at_once(self):  # trial 10 F09: backspace bytes in its test
+        repo = self.make_repo({"F1": {"build": ["blockedtest"]}}, retries=3)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 3, out)
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual(rec["status"], "needs-plan")
+        self.assertIn("contract defect reported by the builder in tests/acceptance/test_f1.py:3", rec["last_reason"])
+        self.assertEqual(len([e for e in self.events(repo) if e["event"] == "build_start"]), 1)
 
     def test_acceptance_already_green_skips_the_retry(self):
         repo = self.make_repo({"F1": {"land": ["green_before"]}}, retries=1)

@@ -1005,6 +1005,10 @@ class Driver:
         if not m or rec.get("depfixes", 0) >= 1:
             return False
         path, line, why = m.group(1).strip("`"), m.group(2) or "?", m.group(3).strip() or "(no detail)"
+        if path.startswith(self.protected):  # the contract itself is wrong: only a plan fix helps, so stop now
+            self.log(fid, "blocked_by", f"contract {path}:{line}: {why}"[:REASON_MAX])
+            self.park(fid, f"contract defect reported by the builder in {path}:{line}: {why}")
+            return True
         module, dfid = self.owner_module(path), f"{DEPFIX_PREFIX}{fid}"
         if (not module or module == self.fns[fid].module or dfid in self.jobs or dfid in self.polish_lands
                 or any(paths_overlap([path], [c]) for c in self.claims(self.fns[fid]))):
