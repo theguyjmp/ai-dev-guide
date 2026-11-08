@@ -347,7 +347,7 @@ class TestTemplates(unittest.TestCase):
                  "standard_path standard checklist_path checklist_version checklist round_rule".split()
         conflict = "id pass worktree branch main module reason row allowed_paths commands max_calls".split()
         audit = "round main audit_file max_calls scratch modules policies commands standard " \
-                "checklist_path checklist_version checklist".split()
+                "checklist_path checklist_version checklist scope".split()
         verify = "id branch verify_file scratch findings commands max_calls".split()
         fix = "id round module branch max_calls issues allowed_paths policies commands".split()
         for name, keys in (("build-brief.md", build), ("review-brief.md", review),
@@ -1012,6 +1012,10 @@ class TestPolish(Toy):
         self.assertIn("src/beta/tidy.py", files)
         self.assertIn("`src/alpha/x.py:3` [duplication] dup 3", self.seen("polish-r1-alpha-fix.md"))
         self.assertNotIn("beta/x.py", self.seen("polish-r1-alpha-fix.md"))  # one module per fix pass
+        r2 = self.seen("polish-audit-2.md")  # round 2 re-checks round 1's NOs and only the changed files
+        self.assertIn("is a re-check", r2)
+        self.assertIn("`src/alpha/x.py:3`", r2)
+        self.assertIn("`src/alpha/tidy.py`", r2)
         pol = self.state(repo)["polish"]
         self.assertEqual((pol["status"], pol["issues"], pol["history"]), ("done", 0, [[1, 2], [2, 0]]))
         self.assertEqual(set(self.state(repo)["functions"]), {"F1", "F2"})  # no state entry for a polish fix
@@ -1050,6 +1054,7 @@ class TestPolish(Toy):
         pol = self.state(repo)["polish"]
         self.assertEqual((pol["issues"], pol["best"][:2]), (2, [1, 2]))
         audit = self.seen("polish-audit-1.md")
+        self.assertIn("Round 1: the whole tree.", audit)
         self.assertIn("quality-standard.md", audit)
         self.assertIn("checklist.md", audit)
         self.assertIn("dedup", audit.lower())

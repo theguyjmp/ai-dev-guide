@@ -1613,7 +1613,7 @@ class Driver:
         audit.unlink(missing_ok=True)
         modules = sorted({f.module for f in self.order})
         brief = render("polish-audit.md", {
-            "round": str(rnd), "main": self.main, "audit_file": audit.as_posix(), "max_calls": str(self.max_calls),
+            "scope": self.polish_scope(rnd), "round": str(rnd), "main": self.main, "audit_file": audit.as_posix(), "max_calls": str(self.max_calls),
             "scratch": (self.ov / "polish").as_posix(), "policies": self.policies(), "commands": self.polish_commands(),
             "standard": STANDARD.as_posix(), "checklist_path": CHECKLIST.as_posix(),
             "checklist_version": checklist()[0], "checklist": checklist_text(applicable_items(None)),
@@ -1625,6 +1625,24 @@ class Driver:
         self.save()
         self.say(f"polish checklist round {rnd}")
         return True
+
+    def polish_scope(self, rnd: int) -> str:
+        """Round 1 audits the whole tree. A later round re-checks the previous round's verified NOs and audits only
+        the files its fixes changed, like a function's re-review (trial 11: a whole-tree re-audit timed out twice)."""
+        best, prev = self.polish_state().get("best"), self.ov / "polish" / f"checklist-{rnd - 1}.json"
+        if rnd < 2 or not best or not prev.is_file():
+            return "Round 1: the whole tree."
+        changed = [f for f in git(self.repo, "diff", "--name-only", f"{best[2]}..{self.main}").split() if f]
+        items = self.read_audit(prev) or []
+        listed = "\n".join(f"- [{n.get('id')}] `{where(n)}`: {n.get('evidence') or ''}"[:400] for n in items)
+        files = "\n".join(f"- `{f}`" for f in changed) or "- (none)"
+        return (f"Round {rnd} is a re-check, not a new whole-tree audit. Do exactly two things:\n"
+                f"1. For each verified NO of round {rnd - 1} below, check the fix: still NO (same item, same "
+                f"evidence) or YES.\n{listed or '- (none)'}\n"
+                f"2. Answer the checklist only for these files, changed by the fixes since round {rnd - 1} "
+                f"(`git diff {best[2][:12]}..{self.main}`), and only for code the fixes touched:\n{files}\n"
+                "Do not audit other files, write mutation or load harnesses, or re-measure the whole tree; "
+                "the project's commands and the dedup greps on the changed code are enough.")
 
     @staticmethod
     def read_audit(path: Path) -> list[dict] | None:

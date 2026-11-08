@@ -23,6 +23,10 @@ this code. You NEVER edit code: you only write one file.
 
 The rules behind each item are in `{{standard}}`. The project's own commands: {{commands}}
 
+## Scope
+
+{{scope}}
+
 ## Method
 
 1. Run the project's commands and the repo checks first; each red line is a NO of its item.
