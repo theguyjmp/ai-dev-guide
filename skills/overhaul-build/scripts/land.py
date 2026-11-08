@@ -1,6 +1,6 @@
 """Land one function's branch on main (overhaul v2). Deterministic, no LLM, Python stdlib only.
 
-    py -3 land.py --repo R --fn ID [--main main] [--wait 30] [--timeout 1800] [--polish]
+    py -3 land.py --repo R --fn ID [--main main] [--wait 30] [--timeout 1800] [--polish] [--target-dir D]
 
 Sequential under the lock file R/.overhaul/lock (created with O_EXCL, removed on exit; drive.py takes the same lock to
 write state.json and can import acquire_lock/release_lock from here). All work happens in the worktree
@@ -14,6 +14,11 @@ R/.overhaul/wt/land, never in R's own working tree.
   4. The whole-tree commands test, lint, dup, literals, shape, cycles and entry_lint from overhaul.toml [commands] must
      pass on the merged tree. A pytest exit of 5 (no tests collected) counts as pass.
   5. GREEN AFTER: the function's acceptance passes on the merged tree, and every row already `proven` still passes.
+     Tests run batched: one command per test target (cargo `--test <stem>` with every exact name, one pytest call),
+     failures mapped back to test ids; the first failing id then reruns alone so land.out holds its own output.
+     A whole-tree `test` failure or a regression outside the branch's footprint reruns alone on clean main up to 3
+     times; if it fails there too the reason starts `main flake: test=.. path=.. module=..` and drive.py sends it
+     to a fix in the owning module instead of failing the function.
   6. One commit sets the row's status cell to `proven` in FUNCTIONS.md; main fast-forwards to it (and fn/<ID> too).
 
 FUNCTIONS.md rows: | id | phase | module | deps | entry | acceptance | status |, acceptance =
@@ -23,7 +28,8 @@ FUNCTIONS.md rows: | id | phase | module | deps | entry | acceptance | status |,
 
 Writes the untracked R/.overhaul/state.json (functions[ID]: status proven on success, last_reason on failure; attempts
 are drive.py's) and appends one line to R/.overhaul/log.jsonl. Any failure prints one reason line, exits 1 and leaves
-main untouched. The failing command's full output stays in R/.overhaul/land.out.
+main untouched. The failing command's full output stays in R/.overhaul/land.out. CARGO_TARGET_DIR is set to
+--target-dir (default R/.overhaul/target/land), reused by every land and never shared with a concurrent one.
 
 --polish lands a polish fix branch fn/<ID> (no FUNCTIONS row, no red-before): steps 1, 3 and 4, then every proven row
 still passes and main fast-forwards to the merged commit. It logs polish_land_ok or polish_land_fail and writes no
@@ -169,7 +175,7 @@ def _split(line):
 
 def parse_functions(text):
     """{id: {"acceptance": [nodes], "status": str, "line": index, "status_col": k}} from the markdown tables."""
-    cols = {"id": 0, "acceptance": 5, "status": 6}
+    cols = {"id": 0, "module": 2, "acceptance": 5, "status": 6}
     rows = {}
     for n, line in enumerate(text.splitlines(keepends=True)):
         parts = _split(line)
@@ -178,7 +184,7 @@ def parse_functions(text):
         cells = [_clean(c) for c in parts[2]]
         low = [c.lower() for c in cells]
         if {"id", "acceptance", "status"} <= set(low):
-            cols = {name: low.index(name) for name in cols}
+            cols = {name: low.index(name) if name in low else cols[name] for name in cols}
             continue
         if all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c) or len(cells) <= max(cols.values()):
             continue
@@ -187,7 +193,8 @@ def parse_functions(text):
             continue
         nodes = [x.strip().strip("`").strip() for x in cells[cols["acceptance"]].split(";")]
         rows[fid] = {"acceptance": [x for x in nodes if x and x != "-"], "status": cells[cols["status"]].lower(),
-                     "line": n, "status_col": cols["status"]}
+                     "line": n, "status_col": cols["status"],
+                     "module": cells[cols["module"]] if len(cells) > cols["module"] else ""}
     return rows
 
 
@@ -267,6 +274,124 @@ def acceptance_cmds(template, nodes):
         else:
             cmds.append((node, fill(template, test=name or file, file=file, node=node, stem=PurePosixPath(file).stem)))
     return cmds
+
+
+# ---- batched runs: one command per test target, failures mapped back to test ids -------------------------------------
+
+CARGO_TEST = re.compile(r"\bcargo\s+(?:\+\S+\s+)?test\b")
+PYTEST = re.compile(r"(?:-m\s+pytest|\bpytest(?:\.exe)?)(?![\w.])")
+BATCH_MAX = 6000  # characters per batched command line (cmd.exe stops at 8191)
+LIBTEST_FAIL = re.compile(r"^(?:---- (\S+) stdout ----|test (\S+) \.\.\. FAILED)", re.M)
+LIBTEST_LIST = re.compile(r"^failures:\r?\n((?:    \S+\r?\n?)+)", re.M)
+PYTEST_FAIL = re.compile(r"^(?:FAILED|ERROR) (\S+)", re.M)
+SUMMARY = re.compile(r"^test result: |\b\d+ (?:passed|failed|errors?)\b.* in [\d.]+s", re.M)
+
+
+def batchable(template):
+    """Whether one command can run several tests of a target: cargo test with {test} (libtest takes several exact
+    filters) or pytest with {test} or {node}. Any other runner keeps one command per test id."""
+    if CARGO_TEST.search(template):
+        return "{test}" in template and "{node}" not in template
+    return bool(PYTEST.search(template)) and ("{test}" in template or "{node}" in template)
+
+
+def _joined(template, nodes):
+    """The one command for nodes of one target: {file} and {stem} from the first, the test names joined."""
+    file = nodes[0].partition("::")[0]
+    key = fill(template, file=file, stem=PurePosixPath(file).stem)
+    names = [n.partition("::")[2] or n for n in nodes]
+    if "{node}" in key:
+        key = key.replace("{node}", " ".join(nodes))
+    if "-k {test}" in key:
+        key = key.replace("-k {test}", '-k "' + " or ".join(names) + '"')
+    return key.replace("{test}", " ".join(names))
+
+
+def batch_cmds(template, nodes):
+    """[(nodes, command)]: the nodes of one test target (the same command but for the test names) share one
+    command, split only to keep a command line under BATCH_MAX. A lone node gets exactly its per-id command."""
+    nodes = list(dict.fromkeys(nodes))
+    if not batchable(template) or len(nodes) < 2:
+        return [([n], c) for n, c in acceptance_cmds(template, nodes)]
+    groups = {}
+    for node in nodes:
+        file = node.partition("::")[0]
+        groups.setdefault(fill(template, file=file, stem=PurePosixPath(file).stem), []).append(node)
+    chunks = []
+    for group in groups.values():
+        chunk = []
+        for node in group:
+            if chunk and len(_joined(template, chunk + [node])) > BATCH_MAX:
+                chunks.append(chunk)
+                chunk = []
+            chunk.append(node)
+        chunks.append(chunk)
+    return [(c, acceptance_cmds(template, c)[0][1] if len(c) == 1 else _joined(template, c)) for c in chunks]
+
+
+def failed_names(output):
+    """Test names a libtest or pytest run reports as failed."""
+    names = {a or b for a, b in LIBTEST_FAIL.findall(output)}
+    for block in LIBTEST_LIST.findall(output):
+        names.update(x.strip() for x in block.splitlines() if x.strip())
+    names.update(PYTEST_FAIL.findall(output))
+    return names
+
+
+def _hit(node, names):
+    """Whether a failed test name belongs to node (file::test): a libtest name may carry a module path, a pytest
+    node id a path and parameters, and a pytest -k name matches as a substring."""
+    file, _, name = node.partition("::")
+    name = name or file
+    for got in names:
+        last = got.split("::")[-1].split("[")[0]
+        if got in (node, name) or got.endswith("::" + name) or last == name or (".py::" in got and name in last):
+            return True
+    return False
+
+
+def batch_results(template, nodes, runner):
+    """{node: (exit code, tail, alone)} for every node; runner(cmd) -> (code, tail, full output). A batch that exits
+    0 passes every node in it; a failed batch fails the nodes its output names and passes the rest. When the
+    output names none of them or has no summary line (a compile error, a crash), each node reruns alone. A timeout
+    fails the whole batch."""
+    res = {}
+    for group, cmd in batch_cmds(template, nodes):
+        code, tail, output = runner(cmd)
+        if len(group) == 1 or code == 0 or code in (-1, 124):
+            res.update({n: (code, tail, len(group) == 1) for n in group})
+            continue
+        hits = [n for n in group if _hit(n, failed_names(output))]
+        if hits and SUMMARY.search(output):
+            res.update({n: (code, tail, False) if n in hits else (0, "", False) for n in group})
+            continue
+        for node, one in acceptance_cmds(template, group):
+            c, t, _ = runner(one)
+            res[node] = (c, t, True)
+    return res
+
+
+def read_out(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def red_nodes(template, nodes, wt, out_path, timeout, alone=True):
+    """[(node, code, tail)] of the nodes that fail in wt, in order, batched by test target. With `alone`, the first
+    one found in a batch reruns by itself so out_path holds its own output (the batch verdict stands)."""
+    def runner(cmd):
+        code, tail = run(cmd, wt, out_path, timeout)
+        return code, tail, read_out(out_path)
+    res = batch_results(template, nodes, runner)
+    bad = [(n, res[n][0], res[n][1]) for n in dict.fromkeys(nodes) if res[n][0] != 0]
+    if bad and alone and not res[bad[0][0]][2]:
+        code, tail = run(acceptance_cmds(template, [bad[0][0]])[0][1], wt, out_path, timeout)
+        if code != 0:
+            bad[0] = (bad[0][0], code, tail)
+    return bad
 
 
 # ---- the land -------------------------------------------------------------------------------------------------------
@@ -373,7 +498,7 @@ def gate_branch(repo, fid, main, timeout, stack=()):
 
     # RED BEFORE, on main's tree
     git(wt, "checkout", "-q", "--detach", main_sha)
-    if all(run(cmd, wt, out_path, timeout)[0] == 0 for _, cmd in mine):
+    if not red_nodes(commands["acceptance"], rows[fid]["acceptance"], wt, out_path, timeout, alone=False):
         raise LandFail(GREEN_BEFORE)
 
     # Merge main into the branch
@@ -393,7 +518,7 @@ def gate_branch(repo, fid, main, timeout, stack=()):
             stacked = []
             break
     ctx = dict(fid=fid, wt=wt, out_path=out_path, branch=branch, main_sha=main_sha, fn_sha=fn_sha,
-               commands=commands, fpath=fpath, rows=rows, mine=mine, stacked=stacked)
+               commands=commands, fpath=fpath, rows=rows, mine=mine, stacked=stacked, touched=touched)
     gate_tree(ctx, rows, stacked, timeout)
     ctx["gated"] = git(wt, "rev-parse", "HEAD").stdout.strip()
     return ctx
@@ -410,20 +535,122 @@ def gate_tree(ctx, rows, extra, timeout):
         cmd = fill(cmd)
         code, tail = run(cmd, wt, out_path, timeout)
         if not passes(cmd, code):
-            raise LandFail(f"{name} failed (exit {code}) on merged tree: {tail}")
+            reason = f"{name} failed (exit {code}) on merged tree: {tail}"
+            if name == "test":
+                flake = unit_flake(ctx, cmd, read_out(out_path), timeout)
+                if flake:
+                    raise LandFail(f"{flake}; on the merged tree: {reason}")
+            raise LandFail(reason)
 
     # GREEN AFTER, then no regression of proven rows
-    for node, cmd in ctx["mine"]:
-        code, tail = run(cmd, wt, out_path, timeout)
+    bad = red_nodes(commands["acceptance"], [n for n, _ in ctx["mine"]], wt, out_path, timeout)
+    if bad:
+        node, code, tail = bad[0]
+        raise LandFail(f"acceptance still red after merge: {node} (exit {code}): {tail}")
+    keep = [rid for rid, row in rows.items() if (row["status"] == "proven" or rid in extra) and rid != fid]
+    hit = regression(rows, keep, commands, wt, out_path, timeout)
+    if hit:
+        rid, node, reason = hit
+        row = rows[rid]
+        if row.get("module") != rows[fid].get("module"):
+            flake = flake_on_main(ctx, node, node.partition("::")[0], row.get("module", ""),
+                                  acceptance_cmds(commands["acceptance"], [node])[0][1], timeout)
+            if flake:
+                raise LandFail(f"{flake}; on the merged tree: {reason}")
+        raise LandFail(reason)
+
+
+def regression(rows, ids, commands, wt, out_path, timeout):
+    """(row id, node, reason) of the first of `ids` whose acceptance fails in wt, or None. All their tests run
+    batched by test target, not one command per test."""
+    owner = {}
+    for rid in ids:
+        for node in rows[rid]["acceptance"]:
+            owner.setdefault(node, rid)
+    bad = red_nodes(commands["acceptance"], list(owner), wt, out_path, timeout)
+    if not bad:
+        return None
+    node, code, tail = bad[0]
+    return owner[node], node, f"regression: proven {owner[node]} {node} fails (exit {code}): {tail}"
+
+
+# ---- main flakes: a test outside the function's footprint that fails on clean main too ------------------------------
+
+MAIN_FLAKE = "main flake:"
+FLAKE_RUNS = 3
+RUNNING = re.compile(r"^\s*Running (?:unittests )?(\S+) \((?:.*[\\/])?([A-Za-z0-9_]+)-[0-9a-f]+(?:\.exe)?\)", re.M)
+
+
+def flake_on_main(ctx, test, path, module, cmd, timeout):
+    """A test that failed on the merged tree, outside the function's footprint (its file not among the branch's
+    changes), reruns alone on clean main up to FLAKE_RUNS times. If it fails there too the branch did not cause
+    it: returns the `main flake:` reason drive.py routes to a fix in the owning module; else ''."""
+    if not test or (path and path in ctx.get("touched", ())):
+        return ""
+    wt, main = ctx["wt"], ctx.get("main_now") or ctx["main_sha"]
+    out = os.path.join(os.path.dirname(ctx["out_path"]), f"land-{ctx['fid']}-flake.out")
+    if git(wt, "checkout", "-q", "--detach", main, check=False).returncode != 0:
+        return ""
+    for k in range(1, FLAKE_RUNS + 1):
+        code, _ = run(cmd, wt, out, timeout)
         if code != 0:
-            raise LandFail(f"acceptance still red after merge: {node} (exit {code}): {tail}")
-    for rid, row in rows.items():
-        if (row["status"] != "proven" and rid not in extra) or rid == fid:
-            continue
-        for node, cmd in acceptance_cmds(commands["acceptance"], row["acceptance"]):
-            code, tail = run(cmd, wt, out_path, timeout)
-            if code != 0:
-                raise LandFail(f"regression: proven {rid} {node} fails (exit {code}): {tail}")
+            return (f"{MAIN_FLAKE} test={test} path={path or '?'} module={module or '?'} fails on clean main "
+                    f"{main[:12]} too (run {k}/{FLAKE_RUNS}, output {out})")
+    return ""
+
+
+def unit_test_cmd(cmd, name):
+    """The whole-tree test command narrowed to one failed test, when the runner allows it."""
+    if CARGO_TEST.search(cmd):
+        return f"{cmd} {'' if ' -- ' in cmd else '-- '}--exact {name}"
+    m = PYTEST.search(cmd)
+    return f"{cmd[:m.end()]} -q {name}" if m and "::" in name else cmd
+
+
+def crate_dir(wt, crate):
+    """The package directory (relative, posix) whose Cargo.toml names `crate` (- and _ alike), or ''."""
+    want = crate.replace("-", "_")
+    for root, dirs, files in os.walk(wt):
+        dirs[:] = [d for d in dirs if d not in ("target", ".git", ".overhaul", "node_modules")]
+        if "Cargo.toml" in files:
+            try:
+                with open(os.path.join(root, "Cargo.toml"), "rb") as f:
+                    pkg = tomllib.load(f).get("package", {})
+            except (OSError, tomllib.TOMLDecodeError):
+                continue
+            if str(pkg.get("name", "")).replace("-", "_") == want:
+                rel = os.path.relpath(root, wt).replace("\\", "/")
+                return "" if rel == "." else rel
+    return ""
+
+
+def unit_test_path(wt, name, output):
+    """Best guess at the source file of a failed unit test: a pytest node id's file, or for libtest the module file
+    of `name` inside the crate whose `Running` line precedes its failure."""
+    if "::" in name and name.split("::")[0].endswith(".py"):
+        return name.split("::")[0]
+    at = output.find(f"---- {name} stdout ----")
+    runs = [m for m in RUNNING.finditer(output) if at < 0 or m.start() < at]
+    if not runs:
+        return ""
+    src, crate = runs[-1].group(1).replace("\\", "/"), runs[-1].group(2)
+    pkg = crate_dir(wt, crate)
+    base = f"{pkg}/" if pkg else ""
+    parts = [p for p in name.split("::")[:-1] if p != "tests"]
+    for cand in ([f"src/{'/'.join(parts)}.rs", f"src/{'/'.join(parts)}/mod.rs"] if parts else []):
+        if os.path.isfile(os.path.join(wt, base + cand)):
+            return base + cand
+    return base + src
+
+
+def unit_flake(ctx, cmd, output, timeout):
+    """The whole-tree test command failed: route its first failed test through flake_on_main."""
+    names = sorted(failed_names(output))
+    if not names:
+        return ""
+    name = names[0]
+    path = unit_test_path(ctx["wt"], name, output)
+    return flake_on_main(ctx, name, path, "", unit_test_cmd(cmd, name), timeout)
 
 
 def commit_land(repo, ctx, main, timeout):
@@ -450,6 +677,7 @@ def commit_land(repo, ctx, main, timeout):
                                 f":(exclude){fpath}", check=False).returncode == 0
         ctx["regated"] = not same
         if not same:  # main moved by something the gate did not see: gate the real tree, under the lock
+            ctx["main_now"] = cur
             gate_tree(ctx, now, (), timeout)
         ctx["main_sha"] = cur
 
@@ -482,13 +710,10 @@ def gate_merged(wt, rows, commands, out_path, timeout):
         code, tail = run(cmd, wt, out_path, timeout)
         if not passes(cmd, code):
             raise LandFail(f"{name} failed (exit {code}) on merged tree: {tail}")
-    for rid, row in rows.items():
-        if row["status"] != "proven":
-            continue
-        for node, cmd in acceptance_cmds(commands["acceptance"], row["acceptance"]):
-            code, tail = run(cmd, wt, out_path, timeout)
-            if code != 0:
-                raise LandFail(f"regression: proven {rid} {node} fails (exit {code}): {tail}")
+    hit = regression(rows, [r for r, row in rows.items() if row["status"] == "proven"], commands, wt, out_path,
+                     timeout)
+    if hit:
+        raise LandFail(hit[2])
 
 
 def land_polish(repo, fid, main, timeout):
@@ -599,6 +824,13 @@ def wait_stack(repo, main, fpath, stack, log_at, timeout):
         time.sleep(0.5)
 
 
+def target_dir(repo, given, stacked_fid=""):
+    """The cargo target dir this land reuses across lands: never shared with a builder slot or another land that
+    runs at the same time, so a land worktree does not cold-build the workspace."""
+    path = given or os.path.join(repo, ".overhaul", "target", f"land-{stacked_fid}" if stacked_fid else "land")
+    return os.path.abspath(path if os.path.isabs(path) else os.path.join(repo, path))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", required=True)
@@ -609,9 +841,12 @@ def main(argv=None):
     ap.add_argument("--polish", action="store_true", help="land a polish fix branch (no FUNCTIONS row)")
     ap.add_argument("--stack", default="", help="ids of in-flight lands (disjoint footprints) to gate on top of; "
                     "the gate runs without the lock, which is taken only to commit")
+    ap.add_argument("--target-dir", default="", help="CARGO_TARGET_DIR for every command (default "
+                    ".overhaul/target/land, or land-<ID> when stacked); drive.py passes one per concurrent land")
     a = ap.parse_args(argv)
     repo = os.path.abspath(a.repo)
     stack = [x.strip() for x in a.stack.split(",") if x.strip()]
+    os.environ["CARGO_TARGET_DIR"] = target_dir(repo, a.target_dir, a.fid if stack and not a.polish else "")
     if stack and not a.polish:
         return main_stacked(repo, a, stack)
 

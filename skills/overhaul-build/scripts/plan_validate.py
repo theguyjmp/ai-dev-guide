@@ -125,8 +125,9 @@ def load_toml(path):
     return data
 
 
-def run_cmd(cmd, cwd, timeout):
-    """Run a shell command line from cwd; return (exit code, last output line). Kills the whole tree on timeout (code 124)."""
+def run_cmd(cmd, cwd, timeout, full=False):
+    """Run a shell command line from cwd; return (exit code, last output line), plus the whole output with `full`.
+    Kills the whole tree on timeout (code 124)."""
     kw = {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)} if os.name == "nt" else {"start_new_session": True}
     p = subprocess.Popen(cmd, shell=True, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", **kw)
@@ -141,7 +142,8 @@ def run_cmd(cmd, cwd, timeout):
         out, _ = p.communicate()
         code, out = 124, f"timed out after {timeout}s"
     lines = [x.strip() for x in (out or "").splitlines() if x.strip()]
-    return code, (lines[-1][:160] if lines else "")
+    tail = lines[-1][:160] if lines else ""
+    return (code, tail, out or "") if full else (code, tail)
 
 
 def cells(line):
@@ -892,15 +894,17 @@ def validate(repo, run=False, timeout=600, notes=None):
                 problems.append(f"overhaul.toml: {k} command exited {code}" + (f": {tail}" if tail else ""))
 
     if run and "acceptance" in cmd:
-        for r in rows:
-            for item, name in r.get("tests", []):
-                node = f"{item.split('::')[0]}::{name}"  # {test} = the bare test name, {stem} = the file stem
-                code, tail = run_cmd(drive.land_mod.acceptance_cmds(cmd["acceptance"], [node])[0][1], repo, timeout)
-                where = f"{paths['functions']}:{r['line']} {r['rid']}"
-                if r["st"] == "proven" and code:
-                    problems.append(f"{where}: proven, but its acceptance {item} FAILS (exit {code})" + (f": {tail}" if tail else ""))
-                elif r["st"] != "proven" and r["st"] in STATUSES and not code:
-                    problems.append(f"{where}: {r['st']}, but its acceptance {item} already PASSES (it must be red before the build)")
+        tests = [(r, item, f"{item.split('::')[0]}::{name}") for r in rows for item, name in r.get("tests", [])]
+        # one command per test target ({test} = the bare test name, {stem} = the file stem), mapped back to ids
+        res = drive.land_mod.batch_results(cmd["acceptance"], [node for _, _, node in tests],
+                                           lambda c: run_cmd(c, repo, timeout, full=True))
+        for r, item, node in tests:
+            code, tail, _ = res[node]
+            where = f"{paths['functions']}:{r['line']} {r['rid']}"
+            if r["st"] == "proven" and code:
+                problems.append(f"{where}: proven, but its acceptance {item} FAILS (exit {code})" + (f": {tail}" if tail else ""))
+            elif r["st"] != "proven" and r["st"] in STATUSES and not code:
+                problems.append(f"{where}: {r['st']}, but its acceptance {item} already PASSES (it must be red before the build)")
     prop = cmds.get("property") if isinstance(cmds.get("property"), str) else ""
     if run and prop:
         for r in rows:
