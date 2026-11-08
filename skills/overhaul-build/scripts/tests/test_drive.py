@@ -842,6 +842,17 @@ class TestModels(Toy):
 
 
 class TestManagerCommands(Toy):
+    def test_a_third_plan_fix_of_one_function_is_refused(self):  # no endless manager rounds
+        repo = self.make_repo(brief_max=50)
+        for _ in range(2):
+            self.assertEqual(self.drive_cli(repo)[0], 3)
+            self.assertEqual(self.drive_cli(repo, "--reset", "F1")[0], 0)
+        self.assertEqual(self.drive_cli(repo)[0], 3)
+        rc, out = self.drive_cli(repo, "--reset", "F1")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("already had 2 plan fixes", out)
+        self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "needs-plan")
+
     def test_reset_and_mark_proven_and_exit_codes(self):
         repo = self.make_repo(brief_max=50)
         rc, out = self.drive_cli(repo)

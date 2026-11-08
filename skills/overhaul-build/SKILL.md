@@ -44,7 +44,7 @@ drive.py exits 3 when nothing is READY and some function is needs-plan: its retr
 1. Split it, when the brief was over budget or the work spans modules: new rows, each with one module, one entry and its own acceptance test that fails now; deps keep the phase order.
 2. Fix its acceptance, when the test cannot go red before and green after through the public entry (it already passes on main, reaches an internal, or is flaky).
 3. Fix the plan, when ARCHITECTURE.md blocks it (a missing dep, a cycle, a public API the function cannot reach).
-Change nothing else: no other function's row or test, no re-cut of modules or phases, no raised limit, no loosened check, no edit to harness state. Then plan_validate must print PLAN OK; commit `plan: <id> split|acceptance|architecture: <why>` and run again. If drive.py does not pick the fixed function up, that is a harness defect: report it. A function at needs-plan again after two plan fixes: stop and report it as the deciding item.
+Change nothing else: no other function's row or test, no re-cut of modules or phases, no raised limit, no loosened check, no edit to harness state. Then plan_validate must print PLAN OK; commit `plan: <id> split|acceptance|architecture: <why>` and run again. If drive.py does not pick the fixed function up, that is a harness defect: report it. A function at needs-plan again after two plan fixes: stop and report it as the deciding item. drive.py enforces it: a third `--reset` of one function is refused (exit 1).
 
 State changes go only through drive.py's own commands, never by editing `.overhaul/state.json`; each exits at once:
 - `py -3 <skill>/scripts/drive.py --repo R --reset <id>`: the function goes back to planned with attempts 0, a fresh start after your plan fix.

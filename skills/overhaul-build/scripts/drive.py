@@ -121,6 +121,7 @@ DEFAULTS = {
 }
 PROBE_PREFIX = "probe-"  # a probe fix pass: fid probe-<module>, landed like a polish fix
 PROBE_DONE = ("done", "below_floor", "fix_failed", "error", "skipped")
+PLAN_FIXES = 2  # --reset per function; a third needs-plan stops the build for the owner
 PROBE_FIXES = 2  # fix passes per module below its mutation floor; the score is measured again after each
 DEPFIX_PREFIX = "depfix-"  # a dependency fix: a builder's BLOCKED-BY defect, fixed in the owning module
 BLOCKED_BY = re.compile(r"^\s*BLOCKED-BY:\s*`?([^\s`:]+)(?::(\d+))?`?\s*(.*)$", re.M)
@@ -2159,7 +2160,14 @@ class Driver:
 
     # ---- manager commands ----
     def reset(self, fid: str) -> None:
-        self.set(fid, status="planned", attempts=0, conflicts=0, last_reason="")
+        """A manager's plan fix sends fid back to planned. At most PLAN_FIXES per function, so a function that
+        keeps failing stops the build with a report instead of looping through manager rounds."""
+        resets = int(self.st["functions"][fid].get("resets", 0))
+        if resets >= PLAN_FIXES:
+            raise DriveError(f"{fid} already had {resets} plan fixes and failed again: stop and report it "
+                             f"to the owner as the deciding item (last reason: "
+                             f"{self.st['functions'][fid].get('last_reason', '')[:300]})")
+        self.set(fid, status="planned", attempts=0, conflicts=0, last_reason="", resets=resets + 1)
         if self.dirty:
             self.flush()
         self.log(fid, "cycle", "reset to planned, attempts 0")
