@@ -137,3 +137,38 @@ def entry_problems(repo, rows, flabel):
             problems.append(f"{flabel}:{r.get('line', '?')}: {r.get('id', '?')} acceptance never invokes its entry "
                             f"`{r['entry'].strip().strip('`')}`{hint}: drive the exact entry, or fix the row")
     return problems
+
+
+def row_calls(repo, r):
+    """Every call inside a row's acceptance tests."""
+    calls = []
+    for path in sorted({item.split("::")[0] for item, _ in r.get("tests") or []}):
+        try:
+            tree = ast.parse((repo / path).read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        calls += list(test_calls(tree, {name for _, name in r["tests"]}))
+    return calls
+
+
+def cross_problems(repo, rows, flabel, waits_on):
+    """Rows whose acceptance tests drive another row's entry without waiting on that row's behaviour: the builder
+    cannot make such a test green inside its own paths (trial 8: F02's test ran F05's `stock price`).
+    waits_on(id) is the set of rows whose real behaviour the row's build waits for, transitively."""
+    problems = []
+    entries = [(r.get("id", "?"), *tokens(r.get("entry", ""))) for r in rows]
+    for r in rows:
+        calls = row_calls(repo, r)
+        if not calls:
+            continue
+        mine, before, own = r.get("id", "?"), waits_on(r.get("id", "?")), tokens(r.get("entry", ""))[1]
+        for oid, kind, parts in entries:
+            if oid == mine or oid in before or not kind or not parts or parts == own:  # same entry: not a cross call
+                continue
+            ok, _ = (cli_ok if kind == "cli" else http_ok)(calls, parts)
+            if ok:
+                problems.append(f"{flabel}:{r.get('line', '?')}: {mine} acceptance drives {oid}'s entry "
+                                f"`{' '.join(parts)}` but {mine} does not wait on {oid}'s behaviour: add "
+                                f"{oid} to deps with needs {oid}:behaviour, or set the state up another way")
+    return problems
+

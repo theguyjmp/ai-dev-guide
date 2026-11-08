@@ -316,6 +316,24 @@ def row_deps(r):
     return [d for d in (bare(x) for x in cell.split(",")) if cell != "-" and d]
 
 
+def waits_on_fn(rows):
+    """id -> every row whose real behaviour that row's build waits for, through the needs cells, transitively."""
+    direct = {}
+    for r in rows:
+        deps = row_deps(r)
+        blocking = drive.parse_needs(r["needs"], deps) if "needs" in r else deps
+        direct[bare(r["id"])] = set(blocking if blocking is not None else deps)
+    def waits_on(fid):
+        out, todo = set(), [bare(fid)]
+        while todo:
+            for d in direct.get(todo.pop(), ()):
+                if d not in out:
+                    out.add(d)
+                    todo.append(d)
+        return out
+    return waits_on
+
+
 def check_needs(rows, problems, flabel):
     """The required `needs` cell: `stub` (default), `behaviour`, or `F03:behaviour, F04:stub` per dep."""
     for r in rows:
@@ -700,6 +718,7 @@ def validate(repo, run=False, timeout=600, notes=None):
         problems += entry_match.entry_problems(
             repo, [r for r in rows if r["entry"].strip().strip("`").strip().lower() not in NO_ENTRY], paths["functions"])
         check_needs(rows, problems, paths["functions"])
+        problems += entry_match.cross_problems(repo, rows, paths["functions"], waits_on_fn(rows))
         check_stubs(rows, repo, problems, paths["functions"])
         check_property(rows, cfg, repo, problems, paths["functions"])
         depth, width, _ = check_depth(rows, cfg, problems, paths["functions"])

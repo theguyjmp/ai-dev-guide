@@ -241,6 +241,18 @@ class StaticChecks(Base):
         styled = "## Module calc\n- **Paths:** `src/tiny.py`\n- **Depends on:** none\n### API\ntext\n## Module report\nPaths: src/report.py\nDepends on: calc\n"
         self.assertEqual(self.problems(self.make(arch=styled + POLICIES)), [])
 
+    def test_acceptance_driving_another_rows_entry_must_wait_on_it(self):
+        # trial 8, F02: its test ran F05's `stock price`, so no F02 builder could turn it green
+        uses_add = CALC.replace('assert tiny("sub", "5", "3") == "2"',
+                                'assert tiny("add", "5", "0") == "5"' + chr(10) + '    assert tiny("sub", "5", "3") == "2"')
+        root = self.make(table(R1, R2, r3()))
+        (root / CALC_T).write_text(uses_add, encoding="utf-8")
+        self.only(self.problems(root), "F002 acceptance drives F001's entry", "needs F001:behaviour")
+        root = self.make(table(R1, row("F002", deps="F001", entry="`tiny sub A B`", acc=f"{CALC_T}::test_sub",
+                                       status="planned", needs="F001:behaviour"), r3()))
+        (root / CALC_T).write_text(uses_add, encoding="utf-8")
+        self.assertEqual(self.problems(root), [])
+
     def test_acceptance_must_invoke_the_exact_entry(self):
         # trial 4, F15: the row named `report --kind <kind>` and the test drove `report sales`
         self.only(self.problems(self.make(table(R1, R2, r3(entry="`cli: tiny report --kind <kind>`")))),
