@@ -3,6 +3,7 @@
 Each test builds a toy repo in a temp dir: a tiny CLI (src/tiny.py), acceptance tests run by pytest, FUNCTIONS.md,
 ARCHITECTURE.md and overhaul.toml. cycles and entry_lint are fake commands. Only the --run tests need pytest.
 """
+import re
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
+import anchors  # noqa: E402
 import plan_validate as pv  # noqa: E402
 
 try:
@@ -27,6 +29,14 @@ OK = f'{PY} -c "import sys; sys.exit(0)"'
 BAD = f'{PY} -c "import sys; sys.exit(1)"'
 FAST = "exit 0"  # the same fake without a Python start-up, for the many tests that do not look at cycles or entry_lint
 ACCEPT = f"{PY} -m pytest -q -p no:cacheprovider tests/acceptance -k {{test}}"
+
+PROP = """from hypothesis import given, strategies as st
+
+
+@given(st.integers())
+def test_prop(n):
+    assert False
+"""
 
 CLI = """import sys
 
@@ -119,7 +129,7 @@ def toml(**over):
 
 
 class Base(unittest.TestCase):
-    def make(self, functions=None, arch=ARCH, toml_text=None, **cmds):
+    def make(self, functions=None, arch=ARCH, toml_text=None, props=True, **cmds):
         root = Path(tempfile.mkdtemp(prefix="pv_toy_"))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         files = {"src/tiny.py": CLI, "tests/acceptance/test_calc.py": CALC, "tests/acceptance/test_report.py": REPORT,
@@ -128,6 +138,9 @@ class Base(unittest.TestCase):
                  "overhaul.toml": toml_text if toml_text is not None else toml(**cmds)}
         if arch is not None:
             files["spec/ARCHITECTURE.md"] = arch
+        if props:  # v3: 1 to 3 Hypothesis property tests per function, planned with the acceptance tests
+            for fid in re.findall(r"^\|\s*([A-Za-z0-9][\w.-]*)\s*\|", files["spec/FUNCTIONS.md"], re.M):
+                files.setdefault(anchors.property_file(fid), PROP)
         for rel, text in files.items():
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / rel).write_text(text, encoding="utf-8")

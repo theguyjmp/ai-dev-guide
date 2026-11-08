@@ -39,6 +39,10 @@ Problems (each is one line):
   - the cycles, entry_lint, literals or shape command exits non-zero (run from the repo root, through overhaul.toml);
   - the longest deps chain is over [plan] max_depth, default max(4, ceil(N/4)); depth and widest level print to stderr;
   - with --run: a non-proven function's acceptance test PASSES (it must be red before the build), or a proven one FAILS.
+  - a Python plan (acceptance in .py files) without tests/property/test_<id>.py per function holding 1 to 3 Hypothesis
+    tests (`def test_*` under `@given`); [probe] property_tests = false turns this off. With --run and a
+    [commands].property template ({file} = the property file), a non-proven function's property file must FAIL and a
+    proven one must PASS. Planned tests are anchors: land.py rejects a branch that modifies one (anchors.py).
 Python standard library only.
 """
 import argparse
@@ -49,6 +53,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import anchors  # beside this script
 import drive  # beside this script: parse_needs, the one reading of the needs cell
 import entry_match  # beside this script
 
@@ -596,6 +601,41 @@ def check_ruff(repo, cmd, problems):
         problems.append(f"overhaul.toml: [commands].lint (ruff) misses the strict set: select {' '.join(missing)}")
 
 
+def given_tests(path):
+    """The number of `def test_*` functions decorated with Hypothesis @given (any import form) in a file."""
+    import ast
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:
+        return -1
+    def is_given(d):
+        d = d.func if isinstance(d, ast.Call) else d
+        return (isinstance(d, ast.Name) and d.id == "given") or (isinstance(d, ast.Attribute) and d.attr == "given")
+    return sum(1 for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and n.name.startswith("test_") and any(is_given(d) for d in n.decorator_list))
+
+
+def check_property(rows, cfg, repo, problems, flabel):
+    """Python plans: 1 to 3 Hypothesis property tests per function in tests/property/test_<id>.py, written now."""
+    if (cfg.get("probe") or {}).get("property_tests") is False:
+        return
+    if not any(item.split("::")[0].endswith(".py") for r in rows for item, _ in r.get("tests", [])):
+        return
+    for r in rows:
+        if not ID.match(r["rid"]):
+            continue
+        rel, where = anchors.property_file(r["rid"]), f"{flabel}:{r['line']} {r['rid']}"
+        n = given_tests(repo / rel) if (repo / rel).is_file() else None
+        if n is None:
+            problems.append(f"{where}: no property tests: write {rel} with 1 to 3 Hypothesis @given tests")
+        elif n < 0:
+            problems.append(f"{where}: {rel} does not parse")
+        elif not 1 <= n <= 3:
+            problems.append(f"{where}: {rel} has {n} @given tests, want 1 to 3")
+        else:
+            r["property"] = rel
+
+
 def validate(repo, run=False, timeout=600, notes=None):
     """Returns (problems, n functions). `repo` is the rebuild repo root."""
     repo, problems = Path(repo), []
@@ -639,6 +679,7 @@ def validate(repo, run=False, timeout=600, notes=None):
             repo, [r for r in rows if r["entry"].strip().strip("`").strip().lower() not in NO_ENTRY], paths["functions"])
         check_needs(rows, problems, paths["functions"])
         check_stubs(rows, repo, problems, paths["functions"])
+        check_property(rows, cfg, repo, problems, paths["functions"])
         depth, width, _ = check_depth(rows, cfg, problems, paths["functions"])
         if notes is not None:
             notes.append(f"{paths['functions']}: critical path {depth} functions, widest level {width}")
@@ -665,6 +706,19 @@ def validate(repo, run=False, timeout=600, notes=None):
                     problems.append(f"{where}: proven, but its acceptance {item} FAILS (exit {code})" + (f": {tail}" if tail else ""))
                 elif r["st"] != "proven" and r["st"] in STATUSES and not code:
                     problems.append(f"{where}: {r['st']}, but its acceptance {item} already PASSES (it must be red before the build)")
+    prop = cmds.get("property") if isinstance(cmds.get("property"), str) else ""
+    if run and prop:
+        for r in rows:
+            if not r.get("property"):
+                continue
+            code, tail = run_cmd(prop.replace("{file}", r["property"]), repo, timeout)
+            where = f"{paths['functions']}:{r['line']} {r['rid']}"
+            if r["st"] == "proven" and code:
+                problems.append(f"{where}: proven, but its property tests {r['property']} FAIL (exit {code})"
+                                + (f": {tail}" if tail else ""))
+            elif r["st"] != "proven" and r["st"] in STATUSES and not code:
+                problems.append(f"{where}: {r['st']}, but its property tests {r['property']} already PASS "
+                                "(they must be red before the build)")
     return problems, len(rows)
 
 

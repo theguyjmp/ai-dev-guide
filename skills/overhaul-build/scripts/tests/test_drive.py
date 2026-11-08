@@ -929,3 +929,45 @@ class TestPolish(Toy):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProbe(Toy):
+    """v3: after a module is proven, mutate.py runs; below [probe] mutation_floor ONE fix pass per module lands."""
+
+    def probe_repo(self, score: float) -> Path:
+        repo = self.make_repo(harness_extra="[limits]\npolish_rounds = 0\n" if False else "")
+        toml = repo / "overhaul.toml"
+        toml.write_text(toml.read_text(encoding="utf-8").replace("[limits]\n", "[limits]\npolish_rounds = 0\n"),
+                        encoding="utf-8")
+        survivor = {"file": "src/alpha/x.py", "line": 2, "op": "boundary", "before": "a > b", "after": "a >= b"}
+        put(self.root / "scripts" / "mutate.py", "import json\nprint(json.dumps(" + repr(
+            {"score": score, "mutants": 10, "survivors": [survivor] if score < 1 else [], "counterexamples": []})
+            + "))\n")
+        for m in ("alpha", "beta"):
+            put(repo / "tests" / "unit" / m / "test_x.py", "def test_x():\n    pass\n")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "unit tests")
+        return repo
+
+    def probe_events(self, repo: Path) -> list[tuple[str, str]]:
+        return [(e["event"], e["detail"]) for e in self.events(repo) if e["event"].startswith("probe_")]
+
+    def test_below_the_floor_runs_one_fix_pass_per_module(self):
+        repo = self.probe_repo(0.5)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.probe_events(repo)
+        self.assertEqual(len([1 for e, _ in ev if e == "probe_mutation"]), 2, ev)
+        self.assertEqual(sorted(d for e, d in ev if e == "probe_fix" and d.startswith("landed")),
+                         ["landed alpha", "landed beta"])
+        self.assertIn("a >= b", self.seen("probe-alpha-fix.md"))
+        self.assertEqual({m: r["status"] for m, r in self.state(repo)["probe"].items()},
+                         {"alpha": "fixed", "beta": "fixed"})
+
+    def test_at_or_above_the_floor_runs_no_fix(self):
+        repo = self.probe_repo(0.95)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.probe_events(repo)
+        self.assertEqual(len([1 for e, _ in ev if e == "probe_mutation"]), 2, ev)
+        self.assertFalse([1 for e, _ in ev if e == "probe_fix"], ev)

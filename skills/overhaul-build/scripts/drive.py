@@ -107,7 +107,10 @@ DEFAULTS = {
     "paths": {"functions": "spec/FUNCTIONS.md", "architecture": "spec/ARCHITECTURE.md",
               "state": ".overhaul/state.json"},
     "harness": {"builder_model": "opus", "review_model": "sonnet"},
+    "probe": {"enabled": True, "mutation_floor": 0.9, "max_mutants": 40, "cmd": ""},
 }
+PROBE_PREFIX = "probe-"  # a probe fix pass: fid probe-<module>, landed like a polish fix
+PROBE_DONE = ("done", "fixed", "fix_failed", "error", "skipped")
 
 
 class DriveError(Exception):
@@ -450,6 +453,11 @@ class Driver:
         self.polish_queue: list[tuple[str, list[dict]]] = []  # (module, issues) fix passes waiting for a slot
         self.polish_lands: list[str] = []
         self.polish_meta: dict[str, tuple[str, str]] = {}  # fix fid -> (module, issues text)
+        probe = {**DEFAULTS["probe"], **(cfg.get("probe") or {})}
+        self.probe_on = bool(probe["enabled"])
+        self.mutation_floor = float(probe["mutation_floor"])
+        self.max_mutants = int(probe["max_mutants"])
+        self.probe_cmd = str(probe.get("cmd") or "")
         scripts = Path(str(har.get("scripts_dir") or HERE))
         self.scripts = scripts if scripts.is_absolute() else repo / scripts
         self.ov = repo / ".overhaul"
@@ -604,6 +612,7 @@ class Driver:
                 changed = self.reap()
                 changed = self.pump_land() or changed
                 changed = self.launch() or changed
+                changed = self.probe_step() or changed
                 changed = self.polish_step() or changed
                 if self.cycle_due:
                     why, self.cycle_due = self.cycle_due, ""
@@ -689,7 +698,8 @@ class Driver:
                 self.after_land(job)
             else:
                 del self.jobs[job.fn]
-                {"build": self.after_build, "conflict": self.after_conflict}.get(job.kind, self.after_review)(job)
+                {"build": self.after_build, "conflict": self.after_conflict,
+                 "probe_mutate": self.after_probe_mutate}.get(job.kind, self.after_review)(job)
         return done
 
     # ---- build ----
@@ -735,14 +745,14 @@ class Driver:
                 if os.path.normcase(os.path.abspath(top)) == os.path.normcase(os.path.abspath(wt)):
                     git(wt, "checkout", "-q", "-f", "-B", branch, self.main)
                     git(wt, "clean", "-fdq")
-                    return wt
+                    return self.lint_hook(wt)
             except DriveError:
                 pass
         if wt.exists():
             shutil.rmtree(wt, onexc=force_remove)
         git(self.repo, "worktree", "prune")
         git(self.repo, "worktree", "add", "-q", "-f", "-B", branch, str(wt), self.main)
-        return wt
+        return self.lint_hook(wt)
 
     def allowed_lists(self, f: Fn) -> tuple[list[str], list[str]]:
         section = module_section(self.arch, f.module)
@@ -1119,6 +1129,8 @@ class Driver:
         if any(self.st["functions"][fid]["status"] != "proven" for fid in self.fns):
             return False
         started = self.pump_polish_land()
+        if self.probe_waiting():
+            return started
         if pol["status"] == "fix":
             for item in self.polish_ready():
                 self.polish_queue.remove(item)
@@ -1174,10 +1186,12 @@ class Driver:
         lines = [f"- {name}: `{cmd}`" for name, cmd in self.cfg["commands"].items() if "{test}" not in cmd]
         return "\n".join(lines) or "(overhaul.toml has no whole-tree [commands])"
 
-    def polish_allowed(self, module: str) -> str:
+    def polish_allowed(self, module: str, fid: str = "") -> str:
         paths = module_paths(module_section(self.arch, module), module)
         tests = unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
-        return "\n".join([f"- `{p}`" for p in paths] + [f"- `{t}` (unit tests for this module only)" for t in tests])
+        return "\n".join([f"- `{p}`" for p in paths] + [f"- `{t}` (unit tests for this module only)" for t in tests]
+                         + (["- `tests/property/` (add property tests; never edit a planned one)"]
+                            if fid.startswith(PROBE_PREFIX) else []))
 
     def start_polish_audit(self, rnd: int) -> bool:
         fid, pol = "polish-audit", self.polish_state()
@@ -1273,25 +1287,25 @@ class Driver:
         finally:
             release_lock(self.repo)
 
-    def start_polish_fix(self, module: str, items: list[dict]) -> None:
-        rnd = self.polish_state()["round"]
-        fid = f"polish-r{rnd}-" + (re.sub(r"[^A-Za-z0-9._-]+", "-", module).strip("-.") or "misc")
+    def start_polish_fix(self, module: str, items: list[dict], fid: str = "") -> None:
+        rnd = 0 if fid else self.polish_state()["round"]
+        fid = fid or f"polish-r{rnd}-" + (re.sub(r"[^A-Za-z0-9._-]+", "-", module).strip("-.") or "misc")
         issues = "\n".join(f"- `{i.get('file', '?')}:{i.get('line', '?')}` [{i.get('rule', '?')}] "
                            f"{i.get('evidence') or i.get('issue') or ''}" for i in items)
         self.polish_meta[fid] = (module, issues)
         brief = render("polish-fix-brief.md", {
             "id": fid, "round": str(rnd), "module": module, "branch": f"fn/{fid}", "max_calls": str(self.max_calls),
-            "issues": issues, "allowed_paths": self.polish_allowed(module), "policies": self.policies(),
+            "issues": issues, "allowed_paths": self.polish_allowed(module, fid), "policies": self.policies(),
             "commands": self.polish_commands()})
         path = self.ov / "briefs" / f"{fid}.md"
         path.write_text(brief, encoding="utf-8")
         self.start_polish_job(fid, "polish_fix", rnd, path, self.prepare_worktree(fid))
-        self.log(fid, "polish_fix", f"start {module}: {len(items)} issues model={self.jobs[fid].model}")
+        self.log(fid, self.fix_event(fid), f"start {module}: {len(items)} issues model={self.jobs[fid].model}")
         self.say(f"polish fix {fid}")
 
     def after_polish_fix(self, job: Job) -> None:
         tokens, turns, text = read_result(job.out)
-        self.log(job.fn, "polish_fix", f"built rc={job.proc.returncode} turns={turns}/{self.max_calls}",
+        self.log(job.fn, self.fix_event(job.fn), f"built rc={job.proc.returncode} turns={turns}/{self.max_calls}",
                  time.monotonic() - job.started, tokens)
         problem = self.build_problem(job, text)
         if problem:
@@ -1301,7 +1315,7 @@ class Driver:
         branch, review_file = f"fn/{job.fn}", self.ov / "reviews" / f"{job.fn}.txt"
         review_file.unlink(missing_ok=True)
         brief = render("review-brief.md", {
-            "id": job.fn, "branch": branch, "allowed_paths": self.polish_allowed(module),
+            "id": job.fn, "branch": branch, "allowed_paths": self.polish_allowed(module, job.fn),
             "row": f"A polish fix of module `{module}`: no function row, and no behaviour may change. "
                    f"The issues it must fix:\n\n{issues}",
             "acceptance_source": "(none: a polish fix adds no function; land.py re-runs every proven acceptance test)",
@@ -1326,7 +1340,7 @@ class Driver:
         lines = read_text(self.ov / "reviews" / f"{fid}.txt").splitlines()
         verdict = "FAIL" if job.timed_out else (lines[0].strip() if lines else "")
         notes = "reviewer timed out" if job.timed_out else " / ".join(ln.strip() for ln in lines[1:] if ln.strip())
-        self.log(fid, "polish_fix", f"review {verdict or 'missing'}: {notes} model={job.model}",
+        self.log(fid, self.fix_event(fid), f"review {verdict or 'missing'}: {notes} model={job.model}",
                  time.monotonic() - job.started, tokens)
         if verdict == "PASS":
             self.polish_lands.append(fid)
@@ -1347,8 +1361,10 @@ class Driver:
 
     def after_polish_land(self, job: Job) -> None:
         if job.proc.returncode == 0 and not job.timed_out:
-            self.log(job.fn, "polish_fix", f"landed {self.polish_meta[job.fn][0]}", time.monotonic() - job.started)
+            self.log(job.fn, self.fix_event(job.fn), f"landed {self.polish_meta[job.fn][0]}",
+                     time.monotonic() - job.started)
             self.say(f"polish landed {job.fn}")
+            self.probe_settled(job.fn, True)
             return
         out, err = read_text(job.out), read_text(job.out.with_suffix(".err"))
         self.polish_failed(job.fn, "land: " + ("land.py timed out" if job.timed_out else (
@@ -1356,8 +1372,9 @@ class Driver:
 
     def polish_failed(self, fid: str, reason: str) -> None:
         """A fix pass that cannot land is dropped; the re-audit finds its issues again."""
-        self.log(fid, "polish_fix", f"failed: {reason[:REASON_MAX]}")
+        self.log(fid, self.fix_event(fid), f"failed: {reason[:REASON_MAX]}")
         self.say(f"polish {fid} failed: {reason}")
+        self.probe_settled(fid, False)
 
     def reap_polish(self, job: Job) -> None:
         if job is self.land_job:
@@ -1366,6 +1383,143 @@ class Driver:
             del self.jobs[job.fn]
         {"polish_audit": self.after_polish_audit, "polish_fix": self.after_polish_fix,
          "polish_review": self.after_polish_review, "polish_land": self.after_polish_land}[job.kind](job)
+
+    # ---- probe (v3): mutation score and property counterexamples, one fix pass per module ----
+    def probe_modules(self) -> dict[str, str]:
+        """{probe fid: module} for every module that owns a function, in build order."""
+        return {PROBE_PREFIX + (re.sub(r"[^A-Za-z0-9._-]+", "-", f.module).strip("-.") or "misc"): f.module
+                for f in self.order}
+
+    def probe_state(self) -> dict:
+        """st["probe"][module]: status (mutating | fixing | one of PROBE_DONE), score, survivors."""
+        return self.st.setdefault("probe", {})
+
+    def probe_waiting(self) -> bool:
+        """True while a module still owes its probe (polish waits for every probe)."""
+        pst = self.probe_state()
+        return self.probe_on and any(pst.get(m, {}).get("status") not in PROBE_DONE
+                                     for m in self.probe_modules().values())
+
+    def probe_step(self) -> bool:
+        """Start mutate.py for each module whose functions are all proven; True if anything started."""
+        if not self.probe_on:
+            return False
+        started = self.pump_polish_land()
+        pst, recs = self.probe_state(), self.st["functions"]
+        held = set(self.jobs) | set(self.polish_lands) | ({self.land_job.fn} if self.land_job else set())
+        for fid, module in self.probe_modules().items():
+            if pst.get(module, {}).get("status") in PROBE_DONE or fid in held:
+                continue
+            if any(recs[f.id]["status"] != "proven" for f in self.order if f.module == module):
+                continue
+            if len(self.jobs) >= self.max_parallel:
+                break
+            self.start_probe(fid, module)
+            started = True
+        return started
+
+    def probe_tests(self, module: str) -> list[str]:
+        """The module's unit test dir and its functions' property test files that exist on main."""
+        cands = [f"tests/unit/{module}"] + [land_mod.anchors.property_file(f.id) for f in self.order
+                                            if f.module == module]
+        return [c for c in cands
+                if run(["git", "cat-file", "-e", f"{self.main}:{c}"], self.repo).returncode == 0]
+
+    def start_probe(self, fid: str, module: str) -> None:
+        pst, script = self.probe_state(), self.scripts / "mutate.py"
+        tests = self.probe_tests(module)
+        if not script.is_file():
+            pst[module] = {"status": "skipped", "reason": f"no {script.name} in {self.scripts}"}
+            self.log(fid, "probe_mutation", f"{module}: skipped, no {script.name}")
+            self.save()
+            return
+        if not tests:
+            self.probe_result(fid, module, {"score": 0.0, "mutants": 0, "survivors": [], "counterexamples": [
+                f"module {module} has no unit tests (tests/unit/{module}/) and no property tests on main"]})
+            return
+        wt = self.prepare_worktree(fid)
+        paths = module_paths(module_section(self.arch, module), module)
+        cmd = [sys.executable, str(script), "--repo", str(wt), "--paths", *paths, "--tests", *tests,
+               "--max-mutants", str(self.max_mutants)] + (["--cmd", self.probe_cmd] if self.probe_cmd else [])
+        out = self.ov / "runs" / f"{fid}-mutate.out"
+        start = time.monotonic()
+        self.jobs[fid] = Job(fid, "probe_mutate", spawn(cmd, wt, out), out, start, start + 2 * self.timeout_s, 0)
+        pst[module] = {"status": "mutating"}
+        self.save()
+        self.say(f"probe {module}: mutating")
+
+    def after_probe_mutate(self, job: Job) -> None:
+        module = self.probe_modules()[job.fn]
+        try:
+            res = None if job.timed_out else json.loads(last_line(read_text(job.out)))
+        except ValueError:
+            res = None
+        if not isinstance(res, dict):
+            why = "mutate.py timed out" if job.timed_out else (
+                f"mutate.py exit {job.proc.returncode}: " + last_line(read_text(job.out.with_suffix(".err"))))
+            self.probe_state()[module] = {"status": "error", "reason": why[:REASON_MAX]}
+            self.log(job.fn, "probe_mutation", f"{module}: error {why[:REASON_MAX]}", time.monotonic() - job.started)
+            self.save()
+            return
+        self.probe_result(job.fn, module, res, time.monotonic() - job.started)
+
+    def probe_result(self, fid: str, module: str, res: dict, secs: float = 0.0) -> None:
+        """Log probe_mutation; below the floor (or with a counterexample) start the module's ONE fix pass."""
+        score, survivors, cex = float(res.get("score") or 0.0), res.get("survivors") or [], res.get(
+            "counterexamples") or []
+        shown = "; ".join(f"{s.get('file')}:{s.get('line')} {s.get('op')} `{s.get('before')}` -> `{s.get('after')}`"
+                          for s in survivors)
+        self.log(fid, "probe_mutation", f"{module}: score {score} floor {self.mutation_floor} mutants "
+                 f"{res.get('mutants', 0)} survivors {len(survivors)} counterexamples {len(cex)}: {shown}"[:REASON_MAX],
+                 secs)
+        rec = {"score": score, "survivors": len(survivors), "counterexamples": len(cex)}
+        if score >= self.mutation_floor and not cex:
+            self.probe_state()[module] = {**rec, "status": "done"}
+            self.save()
+            return
+        items = [{"file": s.get("file"), "line": s.get("line"), "rule": f"surviving mutant {s.get('op')}",
+                  "evidence": f"`{s.get('before')}` -> `{s.get('after')}` passes every test: add a unit or property "
+                              "test that kills it, or fix the code if the mutant is the right behaviour"}
+                 for s in survivors]
+        items += [{"file": "tests/property/", "line": "?", "rule": "property counterexample",
+                   "evidence": f"{c} (fix the code; a planned test is an anchor)"} for c in cex]
+        self.probe_state()[module] = {**rec, "status": "fixing"}
+        self.save()
+        self.log(fid, "probe_fix", f"queued {module}: score {score} < floor {self.mutation_floor}, {len(items)} items")
+        self.start_polish_fix(module, items, fid=fid)
+
+    @staticmethod
+    def fix_event(fid: str) -> str:
+        return "probe_fix" if fid.startswith(PROBE_PREFIX) else "polish_fix"
+
+    def probe_settled(self, fid: str, ok: bool) -> None:
+        """A probe fix landed or failed: the module's probe is over (one fix pass, never a second)."""
+        module = self.probe_modules().get(fid) if fid.startswith(PROBE_PREFIX) else None
+        if module and module in self.probe_state():
+            self.probe_state()[module]["status"] = "fixed" if ok else "fix_failed"
+            self.save()
+
+    def lint_hook(self, wt: Path) -> Path:
+        """Lint on every edit: a PostToolUse hook (lint_hook.py) in the worktree's .claude/settings.json,
+        kept out of git through the repo's info/exclude. Skipped when the project tracks its own settings.json."""
+        script = self.scripts / "lint_hook.py"
+        target = wt / ".claude" / "settings.json"
+        if not script.is_file() or run(["git", "ls-files", "--error-unmatch", ".claude/settings.json"],
+                                       wt).returncode == 0:
+            return wt
+        hook = {"type": "command", "command": f'"{Path(sys.executable).as_posix()}" "{script.as_posix()}"',
+                "timeout": 90}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [{"matcher": "Edit|Write|MultiEdit",
+                                                                 "hooks": [hook]}]}}, indent=2), encoding="utf-8")
+        exclude = Path(git(wt, "rev-parse", "--git-path", "info/exclude").strip())
+        exclude = exclude if exclude.is_absolute() else wt / exclude
+        if "/.claude/settings.json" not in read_text(exclude):
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            with exclude.open("a", encoding="utf-8") as fh:
+                fh.write("\n/.claude/settings.json\n")
+        return wt
+
 
     # ---- outcomes ----
     def fail(self, fid: str, reason: str) -> None:

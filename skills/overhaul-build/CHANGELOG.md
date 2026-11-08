@@ -1,5 +1,14 @@
 # overhaul-build changelog
 
+## v3 probe, 2026-11-07
+mutate.py: a stdlib AST mutation tester (comparisons, boundaries, arithmetic, booleans, returns, raises), one
+subprocess per mutant on a temp copy, at most [probe] max_mutants (40). drive.py runs it once a module's functions are
+all proven (event probe_mutation); below [probe] mutation_floor (0.9), or with a property counterexample, the
+survivors go to ONE fix pass for that module, reviewed and landed like a polish fix (event probe_fix); polish waits
+for every probe. land.py rejects a branch that modifies, renames or deletes a test file from the plan commit
+(anchors.py). Builder worktrees get a .claude/settings.json PostToolUse hook (lint_hook.py) that lints each edited
+file and returns failures to the builder.
+
 Why each rule exists, newest first. Full v1 history: `git log -- skills/overhaul-build` (71 commits, 2026-11-05 to 2026-11-07).
 
 ## v3 speed and conflicts, 2026-11-07

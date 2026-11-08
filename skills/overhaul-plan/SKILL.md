@@ -113,7 +113,8 @@ Owns: the cart table.
   plus at least one error case, and reads results back only through its own entry or a dep's entry.
 - No mocks, fakes, monkeypatching or product imports. For an outside service the test cannot reach, assert up to
   the product's boundary through a public entry and add one DECISIONS line.
-- It fails because the product is missing, never a broken test: `pytest --collect-only -q tests/acceptance` exits 0.
+- It fails because the product is missing, never a broken test: `pytest --collect-only -q tests` exits 0. Each function
+  also gets 1 to 3 Hypothesis `@given` tests in `tests/property/test_<id>.py`, red now; planned tests are anchors.
 
 ## Step 6. overhaul.toml
 The commands are the gates land.py runs on the whole tree. Python, with `<overhaul-build>` filled in:
@@ -133,10 +134,9 @@ max_parallel = 6
 builder_max_calls = 60
 brief_max_tokens = 40000
 retries_per_function = 1
-[paths]
-functions = "spec/FUNCTIONS.md"
-architecture = "spec/ARCHITECTURE.md"
-state = ".overhaul/state.json"
+[probe]  # paths default to spec/FUNCTIONS.md, spec/ARCHITECTURE.md, .overhaul/state.json
+mutation_floor = 0.9
+max_mutants = 40
 ```
 Rust: `cargo clippy -- -D warnings`, `cargo test`, `cargo metadata`; JS: `npx eslint .`, `npx jscpd src`, `node --test`.
 Install what is missing now (`py -3 -m pip install ruff pylint pytest`); every command but acceptance exits 0 on the skeleton.
