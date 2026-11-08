@@ -49,8 +49,16 @@ def main(argv):
     return 2
 
 
-sys.exit(main(sys.argv[1:]))
+def sub(a: int, b: int) -> int:
+    "The difference (stub)."
+    raise NotImplementedError
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
 """
+REPORT_STUB = 'def report() -> str:\n    """Both totals (stub)."""\n    raise NotImplementedError\n'
+MODULE_FILES = {"calc": "src/tiny.py", "report": "src/report.py"}
 HEAD = """import subprocess
 import sys
 from pathlib import Path
@@ -102,12 +110,15 @@ CALC_T = "tests/acceptance/test_calc.py"
 REPORT_T = "tests/acceptance/test_report.py"
 
 
-def row(i="F001", phase="1", module="calc", deps="-", entry="`tiny add A B`", acc=f"{CALC_T}::test_add", status="proven"):
-    return f"| {i} | {phase} | {module} | {deps} | {entry} | {acc} | {status} |"
+def row(i="F001", phase="1", module="calc", deps="-", entry="`tiny add A B`", acc=f"{CALC_T}::test_add", status="proven",
+        files=None, needs="stub"):
+    files = MODULE_FILES.get(module, "src/report.py") if files is None else files
+    return f"| {i} | {phase} | {module} | {deps} | {entry} | {acc} | {status} | {files} | {needs} |"
 
 
 def table(*rows):
-    return "# Functions\n\n| id | phase | module | deps | entry | acceptance | status |\n|---|---|---|---|---|---|---|\n" + "\n".join(rows) + "\n"
+    return ("# Functions\n\n| id | phase | module | deps | entry | acceptance | status | files | needs |\n"
+            "|---|---|---|---|---|---|---|---|---|\n" + "\n".join(rows) + "\n")
 
 
 R1 = row()
@@ -121,6 +132,9 @@ def r3(**kw):
     return row(**d)
 
 
+CHAIN = table(R1, R2.replace("| stub |", "| behaviour |"), r3(needs="behaviour"))  # every dep blocks: F001 -> F002 -> F003
+
+
 def toml(**over):
     cmds = {"test": OK, "acceptance": ACCEPT, "lint": OK, "dup": OK, "literals": FAST, "shape": FAST, "cycles": FAST, "entry_lint": FAST}
     cmds.update(over)
@@ -132,7 +146,7 @@ class Base(unittest.TestCase):
     def make(self, functions=None, arch=ARCH, toml_text=None, props=True, **cmds):
         root = Path(tempfile.mkdtemp(prefix="pv_toy_"))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-        files = {"src/tiny.py": CLI, "tests/acceptance/test_calc.py": CALC, "tests/acceptance/test_report.py": REPORT,
+        files = {"src/tiny.py": CLI, "src/report.py": REPORT_STUB, "tests/acceptance/test_calc.py": CALC, "tests/acceptance/test_report.py": REPORT,
                  "tests/conftest.py": "",
                  "spec/FUNCTIONS.md": functions if functions is not None else table(R1, R2, r3()),
                  "overhaul.toml": toml_text if toml_text is not None else toml(**cmds)}
@@ -167,7 +181,8 @@ class StaticChecks(Base):
 
     def test_malformed_rows(self):
         cases = {
-            "6 cells": (f"| F003 | 2 | report | F001 | `x` | {REPORT_T}::test_report_a |", "row has 6 cells"),
+            "8 cells": (f"| F003 | 2 | report | F001 | `x` | {REPORT_T}::test_report_a | planned | src/report.py |",
+                        "row has 8 cells"),
             "phase 0": (r3(phase="0"), "malformed phase"),
             "phase text": (r3(phase="two"), "malformed phase"),
             "phase decimal": (r3(phase="1.5"), "malformed phase"),
@@ -223,7 +238,7 @@ class StaticChecks(Base):
         self.only(self.problems(self.make(arch=ghost)), "Depends on unknown module ghost")
         cyc = ARCH.replace("Depends on: -", "Depends on: report")
         self.only(self.problems(self.make(arch=cyc)), "module cycle")
-        styled = "## Module calc\n- **Paths:** `src/tiny.py`\n- **Depends on:** none\n### API\ntext\n## Module report\nPaths: src/r.py\nDepends on: calc\n"
+        styled = "## Module calc\n- **Paths:** `src/tiny.py`\n- **Depends on:** none\n### API\ntext\n## Module report\nPaths: src/report.py\nDepends on: calc\n"
         self.assertEqual(self.problems(self.make(arch=styled + POLICIES)), [])
 
     def test_acceptance_must_invoke_the_exact_entry(self):
@@ -484,9 +499,10 @@ class DepthCheck(Base):
         self.assertEqual(p, [])
 
     def test_toml_max_depth_overrides_and_validate_reports_it(self):
-        self.assertEqual(self.problems(self.make()), [])  # the toy chain F001 -> F002 -> F003 is under 4
+        self.assertEqual(self.problems(self.make(CHAIN)), [])  # the toy chain F001 -> F002 -> F003 is under 4
         tight = toml() + "[plan]\nmax_depth = 2\n"
-        self.only(self.problems(self.make(toml_text=tight)), "dependency depth 3 > 2", "F001 -> F002 -> F003")
+        self.only(self.problems(self.make(CHAIN, toml_text=tight)), "dependency depth 3 > 2", "F001 -> F002 -> F003")
+        self.assertEqual(self.problems(self.make(toml_text=tight)), [])  # stub edges do not block: no chain
         p = []
         loose = self.rows([(f"F{n}", f"F{n - 1}" if n else "-") for n in range(8)])
         pv.check_depth(loose, {"plan": {"max_depth": 9}}, p, "F")
@@ -502,7 +518,7 @@ class DepthCheck(Base):
         import io
         out = io.StringIO()
         with contextlib.redirect_stderr(out), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pv.main(["--repo", str(self.make())]), 0)
+            self.assertEqual(pv.main(["--repo", str(self.make(CHAIN))]), 0)
         self.assertIn("critical path 3 functions, widest level 1", out.getvalue())
 
 
@@ -555,17 +571,20 @@ class StubsAndNeeds(Base):
         self.assertTrue(self.has(p, "B: stub file missing", "src/calc/missing.py"), p)
         self.assertTrue(self.has(p, "C: no stub", "NotImplementedError"), p)
         self.assertTrue(self.has(p, "stub does not import", "calc.broken"), p)
-        self.assertTrue(self.has(p, "E: a needs column needs a files column"), p)
+        self.assertTrue(self.has(p, "E: no files cell"), p)
 
-    def test_no_needs_column_skips_the_stub_check(self):
-        p = []
-        pv.check_stubs([{"id": "A", "deps": "-", "status": "planned", "line": 1}], Path("."), p, "F")
-        self.assertEqual(p, [])
+    @staticmethod
+    def drop_columns(text, n):
+        return "\n".join(ln.rsplit("|", n + 1)[0] + "|" if ln.startswith("|") else ln for ln in text.splitlines()) + "\n"
 
-    def test_validate_reads_the_needs_column(self):
-        text = table(R1, R2, r3()).replace("| status |", "| status | needs |", 1)
-        lines = [ln + (" stub |" if ln.startswith("| F") else " --- |" if set(ln) <= set("|-: ") else "")
-                 for ln in text.splitlines()]
-        p = self.problems(self.make(functions="\n".join(lines) + "\n"))
-        self.assertTrue(self.has(p, "a needs column needs a files column"), p)
-        self.assertFalse(self.has(p, "cells"), p)
+    def test_files_and_needs_columns_are_required(self):
+        p = self.problems(self.make(self.drop_columns(table(R1, R2, r3()), 2)))
+        self.assertTrue(self.has(p, "lacks the required column(s) files, needs"), p)
+        self.assertTrue(self.has(p, "F002: no files cell") and self.has(p, "F003: no files cell"), p)
+        p = self.problems(self.make(self.drop_columns(table(R1, R2, r3()), 1)))
+        self.assertTrue(self.has(p, "lacks the required column(s) needs"), p)
+        self.assertFalse(self.has(p, "no files cell") or self.has(p, "cells"), p)
+
+    def test_a_row_without_a_stub_fails_validate(self):
+        p = self.problems(self.make(table(R1, R2, r3(files="src/report_missing.py"))))
+        self.assertTrue(self.has(p, "F003: stub file missing", "src/report_missing.py"), p)

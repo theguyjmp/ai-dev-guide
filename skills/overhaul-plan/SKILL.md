@@ -32,15 +32,17 @@ never collide). Never copy old code into the rebuild.
 ## Step 3. spec/FUNCTIONS.md
 plan_validate.py checks the table in exactly this form:
 ```
-FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status |`
+FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status | files | needs |`
   phase = integer from 1; deps = comma-separated ids or `-`; entry = the public CLI command, route or UI action;
   acceptance = `tests/acceptance/<f>.py::<test>`, `;`-separated; status = planned|building|review|landing|proven|needs-plan.
-  Optional `files` column before status: the function's own files, comma-separated, inside its module's Paths.
-  Optional `needs`: `stub` (default: builds against the dep's stub at once), `behaviour`, or `F03:behaviour, F04:stub`.
+  files = the function's own files (its stub), comma-separated, inside its module's Paths. REQUIRED.
+  needs = `stub` (default), `behaviour`, or `F03:behaviour, F04:stub` per dep. REQUIRED.
 ```
 - files: give each function its own file(s) (`src/shop/cart/add.py`); siblings build at once only when their files do
   not overlap. A file every function edits (an `__init__.py` export list, a registry) goes on the module's `Shared:`
-  line, never in a files cell. Without the column a function locks its whole module.
+  line, never in a files cell. Each function's files hold its stub from the plan commit (Step 5).
+- needs: write `stub`: the dependent builds at once against the dep's stub. `behaviour` only for a dependent whose
+  acceptance test needs the dep's real output; the chain of `behaviour` edges is capped by the depth limit.
 - id: `F01`, `F02`, ... unique, never reused. Phase 1 is the smallest set that makes the product usable end to end
   (under 3k lines, use 1 or 2 phases).
 - module: one from ARCHITECTURE. deps: each in the same or an earlier phase, and only the functions that build an API
@@ -104,17 +106,19 @@ Owns: the cart table.
 - Entry wiring is discovered, never edited: the entry module (F01) finds each module's `register(sub)` or HTTP router
   by scanning the package, so builders stay in their Paths; its section gives the start command and env vars.
 
-## Step 5. tests/acceptance, written now, failing now
+## Step 5. Scaffold, then stubs and tests in parallel (failing now)
+Write the shared scaffold yourself, after Steps 3, 4 and 6: the package skeleton (`__init__.py`, `__main__.py`, entry
+dispatch), `tests/conftest.py` holding every shared fixture once (copies fail shape_check.py), and:
 - `tests/acceptance/_entry.py` is the only door into the product: `run_cli(data, *args)` runs `sys.executable -m
   <pkg>`; `server(data)` starts `-m <pkg> serve --port <free port>`, yields the base URL once `/healthz` answers and
   fails at once if the process exits; UI tests drive that URL with Playwright. Rust or JS: the same, via its binary.
-- One test per function, named as in its row; more cases are `@pytest.mark.parametrize` cases of that test.
-- Shared fixtures live once in `tests/conftest.py` (copies fail shape_check.py). Each test uses its own `tmp_path` data dir, asserts what the user sees (output, exit code, HTTP body, page text)
-  plus at least one error case, and reads results back only through its own entry or a dep's entry.
-- No mocks, fakes, monkeypatching or product imports. For an outside service the test cannot reach, assert up to
-  the product's boundary through a public entry and add one DECISIONS line.
-- It fails because the product is missing, never a broken test: `pytest --collect-only -q tests` exits 0. Each function
-  also gets 1 to 3 Hypothesis `@given` tests in `tests/property/test_<id>.py`, red now; planned tests are anchors.
+Then fan out ONE subagent per module, all in a SINGLE message of parallel Agent calls (model sonnet), each briefed
+from `templates/module-brief.md` (beside this file) filled with that module's rows only; it reads ARCHITECTURE and
+writes the module's stubs (every function's files: signatures, types, docstrings, bodies raising NotImplementedError,
+importable), acceptance tests and 1 to 3 Hypothesis tests per function in `tests/property/test_<id>.py`. Never write
+them serially yourself: one chat writing 23 functions took 22 minutes; the fan-out targets under 10. Then run Step 7
+once and fix what fails. An outside service a test cannot reach: assert up to the product's boundary through a
+public entry and add one DECISIONS line. Planned tests are anchors.
 
 ## Step 6. overhaul.toml
 The commands are the gates land.py runs on the whole tree. Python, with `<overhaul-build>` filled in:
@@ -154,7 +158,7 @@ One numbered line per decision, no ceremony: `D3: drop export-xml; nothing reach
 entry, deliberate behaviour change, dependency added after the plan, and acceptance test changed after the plan.
 ## Re-plan a needs-plan function (drive.py exited 3)
 Read only its row, `.overhaul/reviews/<id>.txt` and its `.overhaul/log.jsonl` lines, never the diff. Do one, add one
-DECISIONS line, pass Step 7, make a plan commit on main touching only spec/, tests/acceptance/ and
+DECISIONS line, pass Step 7, make a plan commit on main touching only spec/, tests/, new stubs and
 overhaul.toml, then run `drive.py --repo <rebuild> --reset <id>` and restart drive.py:
 1. Split it: new ids with one new failing test each; update deps and OLD-ENTRIES lines naming it; drop its row and test.
 2. Fix its acceptance test, only where it contradicts OLD-ENTRIES or DECISIONS, never to make it easier.
@@ -163,12 +167,10 @@ Acceptance already green before the change: strengthen the test in a plan commit
 it, have a blind reviewer confirm and run `drive.py --repo <rebuild> --mark-proven <id> --evidence <review file>`.
 
 ## What good looks like (a CLI app; F02 is `shop product add`, F03 is `shop cart show`)
-`| F04 | 1 | cart | F02,F03 | cli: shop cart add <sku> <qty> | tests/acceptance/test_cart.py::test_f04_cart_add | planned |`
+`| F04 | 1 | cart | F02,F03 | cli: shop cart add <sku> <qty> | tests/acceptance/test_cart.py::test_f04_cart_add | planned | src/shop/cart/add.py | F02:behaviour, F03:stub |`
 ```python
 # tests/acceptance/_entry.py: the only door from a test into the product
-import os
-import subprocess
-import sys
+import os, subprocess, sys
 from pathlib import Path
 SRC = Path(__file__).resolve().parents[2] / "src"
 def run_cli(data, *args):
@@ -181,20 +183,18 @@ def test_f04_cart_add(tmp_path):
     assert run_cli(tmp_path, "product", "add", "MUG1", "Mug", "4.50").returncode == 0
     added = run_cli(tmp_path, "cart", "add", "MUG1", "2")
     assert added.returncode == 0, added.stderr
-    cart = run_cli(tmp_path, "cart", "show").stdout  # read back through dep F03
-    assert "MUG1" in cart and "9.00" in cart
+    assert "MUG1" in added.stdout and "9.00" in added.stdout  # F03 (totals) is a code dep: its stub is enough
     bad = run_cli(tmp_path, "cart", "add", "NOPE", "1")
     assert bad.returncode != 0 and "unknown sku" in bad.stderr.lower()
 ```
-Good: only public commands of F04 and its deps, its own data dir, what the user sees plus an error case, red today
-(`shop` does not exist), and `-k test_f04_cart_add` runs exactly it. Bad: importing `shop.cart`, a mocked store, or
-checking only the exit code.
+Good: only public commands of F04 and its deps, its own data dir, what the user sees plus an error case, red today,
+`-k test_f04_cart_add` runs exactly it. Bad: importing `shop.cart`, a mocked store, or checking only the exit code.
 ## Rules
 - The plan is done only at PLAN OK: every function has a public entry, an acceptance test that exists and fails now, and deps in the same or an earlier phase [by plan_validate.py --run].
 - Acceptance tests reach the product only through `_entry.py`: no product imports, mocks or fakes [by entry_lint.py].
 - The module graph is acyclic and modules import each other only through `Public:` names [by check_cycles.py].
 - Each cross-cutting policy has one owner, each domain rule one function, every concurrent writer a concurrent test and every boundary a negative test [by plan_validate.py].
 - Lint enforces line length and the strict set, no 20+ char literal is written twice, functions stay within 30 lines, constants sit at the top and no fixture is copied [by plan_validate.py, dup_literals.py and shape_check.py].
-- With `needs`, the plan commit lands a stub per function in its files (signatures, types, docstrings, bodies raising NotImplementedError) that imports; the longest chain of blocking (`behaviour`) deps is at most max(4, ceil(N/4)), or `[plan] max_depth` [by plan_validate.py].
+- The plan commit lands a stub per function in its required `files` cell (signatures, types, docstrings, bodies raising NotImplementedError) that imports; the longest chain of blocking (`behaviour`) deps is at most max(4, ceil(N/4)), or `[plan] max_depth` [by plan_validate.py].
 - A function counts only when its test is red on main, green after the merge, and every proven test stays green [by land.py].
 - Builders never edit tests/acceptance or leave their module's Paths [by drive.py's brief and the blind review].

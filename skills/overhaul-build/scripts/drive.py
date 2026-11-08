@@ -70,8 +70,8 @@ ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 PATHS_LINE = re.compile(r"\W*(?:paths?|files)\W*?[:=]\s*(.+)", re.I)
 SHARED_LINE = re.compile(r"\W*shared\W*?[:=]\s*(.+)", re.I)  # files every function may touch; never a lock
 CONFLICT_SYNC = "merge conflict merging"
-FILES_COLUMN = "files"  # optional FUNCTIONS.md column: the function's own files, the unit of the build lock
-NEEDS_COLUMN = "needs"  # optional FUNCTIONS.md column: which deps must land first (behaviour) or only stub (default)
+FILES_COLUMN = "files"  # required FUNCTIONS.md column (plan_validate): the function's own files, the unit of the build lock
+NEEDS_COLUMN = "needs"  # required FUNCTIONS.md column: which deps must land first (behaviour) or only stub (default)
 
 
 def parse_needs(cell: str, deps: list[str]) -> list[str] | None:

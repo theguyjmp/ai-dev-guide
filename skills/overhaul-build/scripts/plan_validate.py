@@ -5,9 +5,11 @@
 Reads R/overhaul.toml, spec/FUNCTIONS.md and spec/ARCHITECTURE.md (paths from [paths], else those defaults) and prints one
 line per problem, then `PLAN OK n functions` (exit 0) or `PLAN FAIL k problems` (exit 1). Exit 2 is bad usage. It writes nothing.
 
-FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status |`
+FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status | files | needs |`
   phase = integer from 1; deps = comma-separated ids or `-`; entry = the public CLI command, route or UI action;
   acceptance = `tests/acceptance/<f>.py::<test>`, `;`-separated; status = planned|building|review|landing|proven|needs-plan.
+  files = the function's own files (its stub), comma-separated, inside its module's Paths. REQUIRED.
+  needs = `stub` (default), `behaviour`, or `F03:behaviour, F04:stub` per dep. REQUIRED.
 ARCHITECTURE.md: `## Module <name>` sections, each with `Paths:` and `Depends on:` (`-` or `none` = none), and one
   `## Policies` section: `Concurrency:`, `Persistence:`, `Errors:`, `Untrusted input:` and `Retries:` lines, each
   `<owner module> - <policy>`; a `Concurrent writers:` line naming every function that writes shared state reachable
@@ -25,8 +27,9 @@ Problems (each is one line):
   - an acceptance file or its `def <test>` is missing;
   - a function's acceptance tests never invoke the exact entry its row names (entry_match.py);
   - deps are unknown, point to a later phase, or form a cycle;
-  - with the optional `needs` column: a malformed needs cell, or an unproven row whose stub files are missing, raise
-    no NotImplementedError or do not import; the critical path then counts only `behaviour` deps;
+  - the table lacks the required `files` or `needs` column; a malformed needs cell; an unproven row with no files
+    cell, or whose stub files are missing, raise no NotImplementedError or do not import (every function lands an
+    importable stub in the plan commit); the critical path counts only `behaviour` deps;
   - a module is unknown, ARCHITECTURE is missing, or its module graph is broken (no Paths/Depends on, unknown module, cycle);
   - a function has no entry;
   - an overhaul.toml command is missing, or a ruff lint misses the line-length rule or the strict set;
@@ -75,13 +78,13 @@ ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ACCEPT = re.compile(r"^tests/acceptance/[\w./-]+\.py(::[A-Za-z_]\w*)+$")
 NO_ENTRY = {"", "-", "--", "none", "n/a", "na", "tbd", "todo", "?"}
 SEPARATOR = re.compile(r"^:?-+:?$")
-OPTIONAL = ("files", "needs")
+STUB_COLUMNS = ("files", "needs")  # required beside COLUMNS, in any order after them
 STUB_CHECK = """import importlib, sys
 bad = []
 for name in sys.argv[1:]:
     try:
         importlib.import_module(name)
-    except Exception as e:  # noqa: BLE001
+    except BaseException as e:  # noqa: BLE001  (a module that calls sys.exit on import)
         bad.append(f"{name}: {type(e).__name__}: {e}")
 print("\\n".join(bad))
 """
@@ -151,14 +154,18 @@ def parse_functions(text, problems, label):
     rows, header_at, lines, names = [], None, text.splitlines(), COLUMNS
     for i, line in enumerate(lines):
         head = [bare(c).lower().strip("*") for c in cells(line)] if line.lstrip().startswith("|") else []
-        if (head and [c for c in head if c not in OPTIONAL] == COLUMNS
-                and all(head.count(c) <= 1 for c in OPTIONAL)):
-            # optional `files` (the function's own files, drive.py's lock) and `needs` (stub or behaviour) columns
+        if (head and [c for c in head if c not in STUB_COLUMNS] == COLUMNS
+                and all(head.count(c) <= 1 for c in STUB_COLUMNS)):
+            # `files` (the function's own files: its stub, drive.py's lock) and `needs` (stub or behaviour per dep)
             header_at, names = i, head
             break
     if header_at is None:
-        problems.append(f"{label}: no table with the header | {' | '.join(COLUMNS)} |")
+        problems.append(f"{label}: no table with the header | {' | '.join(COLUMNS + list(STUB_COLUMNS))} |")
         return rows
+    lacking = [c for c in STUB_COLUMNS if c not in names]
+    if lacking:
+        problems.append(f"{label}:{header_at + 1}: the table lacks the required column(s) {', '.join(lacking)}: "
+                        "`files` names each function's stub files, `needs` is stub (default) or behaviour per dep")
     i = header_at + 1
     if i < len(lines) and lines[i].lstrip().startswith("|") and all(SEPARATOR.match(c) for c in cells(lines[i])):
         i += 1
@@ -310,7 +317,7 @@ def row_deps(r):
 
 
 def check_needs(rows, problems, flabel):
-    """The optional `needs` cell: `stub` (default), `behaviour`, or `F03:behaviour, F04:stub` per dep."""
+    """The required `needs` cell: `stub` (default), `behaviour`, or `F03:behaviour, F04:stub` per dep."""
     for r in rows:
         if "needs" in r and drive.parse_needs(r["needs"], row_deps(r)) is None:
             problems.append(f"{flabel}:{r['line']} {bare(r['id'])}: malformed needs {r['needs']!r}; want stub, "
@@ -325,17 +332,15 @@ def module_name(path):
 
 
 def check_stubs(rows, repo, problems, flabel, timeout=120):
-    """A plan with a `needs` column lands an interface stub for every function: each unproven row's files exist,
-    its .py files raise NotImplementedError somewhere (the stub bodies) and import cleanly."""
-    if not any("needs" in r for r in rows):
-        return
+    """The plan commit lands an interface stub for every function: each unproven row's files exist, its .py files
+    raise NotImplementedError somewhere (the stub bodies) and import cleanly."""
     mods = []
     for r in rows:
         where = f"{flabel}:{r['line']} {bare(r['id'])}"
         if bare(r["status"]).lower() == "proven":
             continue
         if not bare(r.get("files", "")).strip("-"):
-            problems.append(f"{where}: a needs column needs a files column: the files that hold this function's stub")
+            problems.append(f"{where}: no files cell: name the files that hold this function's stub")
             continue
         files = [bare(x) for x in re.split(r"[,;]", r["files"]) if bare(x) and not any(c in bare(x) for c in "*?[")]
         missing = [f for f in files if not (repo / f).is_file()]

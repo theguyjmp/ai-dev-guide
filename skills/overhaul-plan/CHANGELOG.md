@@ -1,5 +1,13 @@
 # overhaul-plan changelog
 
+## v3 parallel plan: stubs and needs required, 2026-11-07
+Trial 6: one chat wrote 23 functions' tests serially (22 minutes), and left out the optional `needs`/`files`
+columns, so no stubs landed and every dep blocked (3 of 6 builders ran). Now `files` and `needs` are required
+columns and every unproven row needs an importable stub; plan_validate fails without them (needs defaults to
+`stub`; `behaviour` only when the acceptance test needs the dep's real output). Step 5 writes the shared scaffold
+(package skeleton, conftest.py, _entry.py) in the main chat, then fans out one sonnet subagent per module in one
+message from templates/module-brief.md for that module's stubs, acceptance and property tests; target under 10
+minutes for about 20 functions.
 ## v3 speed: stubs and needs, 2026-11-07
 The plan commit lands an interface stub for every function (signatures, types, docstrings, bodies raising
 NotImplementedError) in its own files. Optional FUNCTIONS `needs` column: `stub` (default, the dependent builds

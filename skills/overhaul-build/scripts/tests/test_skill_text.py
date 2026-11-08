@@ -36,7 +36,7 @@ class TestSkillText(unittest.TestCase):
         first = next(n for n, ln in enumerate(doc) if ln.startswith("FUNCTIONS.md table:"))
         last = next(n for n, ln in enumerate(doc) if ln.startswith("ARCHITECTURE.md:"))
         block = doc[first:last]
-        self.assertEqual(len(block), 3)
+        self.assertEqual(len(block), 5)
         self.assertTrue(contains_block(stripped(SKILLS / "overhaul-plan" / "SKILL.md"), block), block)
 
     def test_build_skill_names_the_manager_commands(self):
