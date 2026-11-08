@@ -1,6 +1,7 @@
 # overhaul-build changelog
 
 ## v3 gap, 2026-11-07
+Pass 2: a verified blocking NO of a dedup item (DEDUP_IDS: C03, C05, C06, C07, C08) tied to a PLAN-GAP passes the function and goes to plan-gaps.jsonl; only a behaviour NO parks it. The probe and polish fix retry count is kept in state.json.
 Trial 6 lost 5 functions to needs-plan over PLAN-GAP lines about shared constants (F06's had 0 blocking NOs and
 said "Optional"), and threw away probe-core's fix of 31 mutation survivors over one verified P1. Now a PLAN-GAP goes
 to needs-plan only when it is tied to a verified blocking NO (its id or file named in the gap, or the NO itself says

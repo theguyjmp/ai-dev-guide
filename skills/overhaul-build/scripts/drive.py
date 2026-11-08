@@ -100,6 +100,9 @@ CONFLICT = "merge conflict"  # land.py: "merge conflict merging <main> into fn/<
 # pass would only re-learn it. Any other PLAN-GAP goes to .overhaul/plan-gaps.jsonl: one cross-module pass after
 # the build (polish_step) fixes them all, since a shared constant needs its owner and every caller changed together.
 PLAN_GAP = re.compile(r"\bPLAN-GAP\b")
+# Checklist items whose only fix lives in another module (a shared constant, rule or helper its owner should export).
+# A verified blocking NO of one of these, tied to a PLAN-GAP, does not park the function: the gap is batched.
+DEDUP_IDS = frozenset({"C03", "C05", "C06", "C07", "C08"})
 OUTSIDE = re.compile(r"\boutside\s+(?:the\s+|my\s+|its\s+|your\s+)?allowed\s+paths\b", re.I)
 FENCE = {".py": "python", ".rs": "rust", ".js": "javascript", ".ts": "typescript"}
 REVIEW_MAX_CALLS = 20
@@ -570,7 +573,6 @@ class Driver:
         self.polish_queue: list[tuple[str, list[dict]]] = []  # (module, issues) fix passes waiting for a slot
         self.polish_lands: list[str] = []
         self.polish_meta: dict[str, tuple[str, str]] = {}  # fix fid -> (module(s), issues text)
-        self.polish_tries: dict[str, dict] = {}  # fix fid -> {"round", "head", "ids"} of its last failed review
         probe = {**DEFAULTS["probe"], **(cfg.get("probe") or {})}
         self.probe_on = bool(probe["enabled"])
         self.mutation_floor = float(probe["mutation_floor"])
@@ -896,6 +898,11 @@ class Driver:
         allowed = [p for group in self.allowed_lists(self.fns[fid]) for p in group]
         changed = git(self.repo, "diff", "--name-only", f"{self.main}...fn/{fid}").splitlines()
         return hits if all(in_paths(p, allowed) for p in changed) else []  # else the builder strayed: ordinary FAIL
+
+    @property
+    def polish_tries(self) -> dict[str, dict]:
+        """fix fid -> {"round", "head", "ids"} of its last failed review; kept in state.json across a restart."""
+        return self.st.setdefault("polish_tries", {})
 
     def gaps_path(self) -> Path:
         return self.ov / "plan-gaps.jsonl"
@@ -1279,6 +1286,14 @@ class Driver:
             self.set(fid, status="landing")
             return
         stuck = self.gap_nos(fid, gap, real)
+        if stuck and gap and all(n["id"] in DEDUP_IDS for n in stuck) and len(stuck) == len(real):
+            self.keep_gap(fid, gap)  # only another module's shared constant or helper can fix it: batch it
+            self.log(fid, "review_pass", f"{len(real)} verified dedup NOs ({', '.join(n['id'] for n in stuck)}) "
+                     f"recorded as plan gap model={job.model}", secs, tokens)
+            self.land_queue.append(fid)
+            self.set(fid, status="landing")
+            return
+        stuck = [n for n in stuck if n["id"] not in DEDUP_IDS]
         if stuck:
             notes = (f"PLAN-GAP: {gap} / " if gap else "") + " / ".join(
                 f"[{n['id']} {where(n)}] {n.get('evidence', '')} {n.get('fix', '')}" for n in stuck)
@@ -1670,6 +1685,7 @@ class Driver:
             return False
         module, issues = self.polish_meta[fid]
         self.polish_tries[fid] = {"round": n, "head": head, "ids": sorted({x["id"] for x in real})}
+        self.save()
         self.reset_wt(fid, head)
         listing = format_nos(real)
         path = self.polish_fix_brief(fid, rnd, module, issues + (

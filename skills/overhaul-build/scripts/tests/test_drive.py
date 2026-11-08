@@ -456,9 +456,20 @@ class TestTrial3Waste(Toy):
         self.assertEqual([(g["fn"], g["module"], g["gap"]) for g in gaps], [("F1", "alpha", gap)])
         self.assertFalse(any(e["event"] == "needs_plan" for e in self.events(repo)))
 
-    def test_plan_gap_tied_to_a_verified_blocking_no_goes_to_needs_plan(self):  # F15, trial 6 F05
+    def test_verified_dedup_no_with_plan_gap_passes_and_records_the_gap(self):
         review = {"checklist": "v1", "plan_gap": "C07: beta must export LIMIT; beta is outside the allowed paths",
                   "items": [{"id": "C07", "answer": "no", "file": "src/alpha/f1.py", "line": 1,
+                             "evidence": "LIMIT = 9 repeats beta's literal", "fix": "import it from beta"}]}
+        repo = self.make_repo({"F1": {"review": [review]}}, retries=2)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "proven")
+        gaps = (repo / ".overhaul" / "plan-gaps.jsonl").read_text(encoding="utf-8")
+        self.assertIn("beta must export LIMIT", gaps)
+
+    def test_plan_gap_with_a_verified_behaviour_no_goes_to_needs_plan(self):  # F15, trial 6 F05
+        review = {"checklist": "v1", "plan_gap": "C13: beta must export LIMIT; beta is outside the allowed paths",
+                  "items": [{"id": "C13", "answer": "no", "file": "src/alpha/f1.py", "line": 1,
                              "evidence": "LIMIT = 9 repeats beta's literal", "fix": "import it from beta"}]}
         repo = self.make_repo({"F1": {"review": [review, "PASS"]}}, retries=2)
         rc, out = self.drive_cli(repo)
@@ -1121,6 +1132,13 @@ class TestFixRetry(Toy):
         self.assertIn("unused import", self.seen("probe-alpha-fix.md"))
         self.assertIn("Retry 1 of a polish fix", self.seen("probe-alpha-review-2.md"))
         self.assertEqual(self.state(repo)["probe"]["alpha"]["status"], "fixed")
+
+    def test_retry_count_is_kept_in_state_json(self):
+        repo = self.probe_repo(0.5)
+        put(self.root / "scenario.json", json.dumps({"probe-alpha": {"review": [self.NO]}}))
+        self.drive_cli(repo)
+        tries = self.state(repo).get("polish_tries", {})
+        self.assertEqual(tries.get("probe-alpha", {}).get("round"), 1, tries)
 
     def test_probe_fix_fails_after_its_one_retry(self):
         repo = self.probe_repo(0.5)
