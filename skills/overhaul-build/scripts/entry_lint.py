@@ -6,6 +6,10 @@ Every .py file under tests/acceptance/ may import only these modules (a name als
     (tests/acceptance/_entry.py)
 It may not use unittest.mock, MagicMock, patch or monkeypatch (nor Mock, AsyncMock, MonkeyPatch, mocker), and it may
 not import any product package. Drive the product as a user does: a CLI through subprocess, a server over HTTP.
+Rust (.rs files there, read by rust_src.py): no mock crate (mockall, mockito, wiremock, httpmock, faux) and no
+`automock`, no `#[path = ..]` and no `include!`, and no use of a product crate (a package or lib name from a Cargo.toml
+in the repo, `-` read as `_`). One exception: a file holding a `lib:` row's test (spec/FUNCTIONS.md) may use that
+row's crate, since a library's public entry is its API.
     py -3 entry_lint.py [--repo R] [path ...]      repo-relative files or dirs; default tests/acceptance
 Prints `file:line: message` per violation. Exit 0 clean, 1 violations.
 """
@@ -13,7 +17,11 @@ import argparse
 import ast
 import os
 import posixpath
+import re
 import sys
+import tomllib
+
+import rust_src  # beside this script
 
 ALLOWED = ("subprocess", "urllib", "http.client", "json", "pathlib", "tempfile", "os", "sys", "time", "socket", "re",
            "shutil", "signal", "threading", "concurrent.futures", "pytest", "_entry")
@@ -21,6 +29,9 @@ BANNED = frozenset(("MagicMock", "Mock", "AsyncMock", "patch", "monkeypatch", "M
 BANNED_TEXT = frozenset(("monkeypatch", "mocker", "unittest.mock"))
 DEFAULT = "tests/acceptance"
 NOT_PRODUCT = ("tests", "test", "node_modules", "__pycache__")
+RUST_MOCKS = frozenset(("mockall", "mockito", "wiremock", "httpmock", "faux", "automock"))
+CARGO_SKIP = {"target", "node_modules", "tests", "test", "__pycache__"}
+FUNCTIONS = "spec/FUNCTIONS.md"
 
 
 def allowed(name):
@@ -121,8 +132,79 @@ def lint_source(rel, text, product):
     return sorted(set(out))
 
 
+def crate_names(repo):
+    """Package and lib names (`-` read as `_`) of every Cargo.toml in the repo, test and build dirs aside."""
+    names = set()
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = sorted(d for d in dirs if d not in CARGO_SKIP and not d.startswith("."))
+        if "Cargo.toml" not in files:
+            continue
+        try:
+            with open(os.path.join(root, "Cargo.toml"), "rb") as fh:
+                data = tomllib.load(fh)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        for table in ("package", "lib"):
+            name = (data.get(table) or {}).get("name")
+            if isinstance(name, str):
+                names.add(name.replace("-", "_"))
+    return names
+
+
+def lib_crates(repo):
+    """{acceptance file: {crate}} for the `lib: <crate>::..` rows of spec/FUNCTIONS.md."""
+    try:
+        with open(os.path.join(repo, FUNCTIONS), encoding="utf-8-sig", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return {}
+    out, cols = {}, None
+    for line in lines:
+        if not line.lstrip().startswith("|"):
+            cols = None
+            continue
+        cells = [c.strip().strip("`").strip() for c in re.split(r"(?<!\\)\|",line.strip().strip("|"))]
+        if cols is None:
+            low = [c.lower().strip("*") for c in cells]
+            cols = (low.index("entry"), low.index("acceptance")) if {"entry", "acceptance"} <= set(low) else None
+            continue
+        if len(cells) <= max(cols):
+            continue
+        m = re.match(r"lib\s*:\s*`?\s*([\w-]+)", cells[cols[0]], re.I)
+        for item in cells[cols[1]].split(";") if m else ():
+            path = item.strip().strip("`").split("::")[0].strip()
+            if path:
+                out.setdefault(posixpath.normpath(path), set()).add(m.group(1).replace("-", "_"))
+    return out
+
+
+def lint_rust(text, crates, allowed_crates=()):
+    """[(line, message)] for one Rust acceptance file."""
+    toks, out = rust_src.tokens(text), []
+    for i, (kind, tok, line) in enumerate(toks):
+        nxt = toks[i + 1][1] if i + 1 < len(toks) else ""
+        prev = toks[i - 1][1] if i else ""
+        if kind != "ident":
+            continue
+        if tok in RUST_MOCKS:
+            out.append((line, f"`{tok}` is banned: acceptance tests use no mocks, fakes or patching; "
+                              "drive the real entry point"))
+        elif tok == "path" and prev == "[" and nxt == "=" and i > 1 and toks[i - 2][1] in ("#", "!"):
+            out.append((line, "`#[path = ..]` pulls a file in by path, maybe product code; use `mod` on a helper "
+                              "beside the test"))
+        elif tok == "include" and nxt == "!":
+            out.append((line, "`include!` pastes in source the lint cannot see; drive the product through its entry"))
+        elif tok in crates and tok not in allowed_crates and (nxt == "::" or prev == "use"
+                                                              or (prev == "crate" and i > 1
+                                                                  and toks[i - 2][1] == "extern")):
+            out.append((line, f"uses product crate `{tok}`: drive the product through its entry point "
+                              "(the built binary via env!(\"CARGO_BIN_EXE_<bin>\"), a server over HTTP), never "
+                              "link it; only a `lib:` row's test may use its crate"))
+    return sorted(set(out))
+
+
 def collect(repo, paths):
-    """(repo-relative .py files, problems) for repo-relative files and dirs."""
+    """(repo-relative .py and .rs files, problems) for repo-relative files and dirs."""
     files, probs = [], []
     for p in paths:
         rel = posixpath.normpath(p.replace("\\", "/")) if p else "."
@@ -131,7 +213,7 @@ def collect(repo, paths):
             for root, dirs, names in os.walk(full):
                 dirs[:] = sorted(d for d in dirs if d != "__pycache__" and not d.startswith("."))
                 files += [os.path.relpath(os.path.join(root, n), repo).replace(os.sep, "/")
-                          for n in sorted(names) if n.endswith(".py")]
+                          for n in sorted(names) if n.endswith((".py", ".rs"))]
         elif os.path.isfile(full):
             files.append(os.path.relpath(full, repo).replace(os.sep, "/"))
         else:
@@ -148,10 +230,14 @@ def main(argv=None):
     default = [DEFAULT] if os.path.isdir(os.path.join(repo, DEFAULT)) else []
     files, out = collect(repo, args.paths or default)
     product = product_names(repo)
+    rust = [rel for rel in files if rel.endswith(".rs")]
+    crates, libs = (crate_names(repo), lib_crates(repo)) if rust else (set(), {})
     for rel in files:
         with open(os.path.join(repo, rel), encoding="utf-8-sig", errors="replace") as fh:
             text = fh.read()
-        out += [f"{rel}:{line}: {msg}" for line, msg in lint_source(rel, text, product)]
+        found = (lint_rust(text, crates, libs.get(rel, ())) if rel.endswith(".rs")
+                 else lint_source(rel, text, product))
+        out += [f"{rel}:{line}: {msg}" for line, msg in found]
     sys.stdout.reconfigure(errors="replace")
     print("\n".join(out + [f"ENTRY LINT FAIL {len(out)} problems" if out else f"ENTRY LINT OK {len(files)} files"]))
     return 1 if out else 0

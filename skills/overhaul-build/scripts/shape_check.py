@@ -6,6 +6,9 @@ Fails on:
   - a pytest fixture (decorated `fixture` or `pytest.fixture`) defined identically in two or more test files
     (define it once in the nearest shared conftest.py).
 Product files are .py files outside test dirs (tests/, test/) and test files (test_*.py, *_test.py, conftest.py).
+Rust (.rs, read by rust_src.py): a product fn longer than --max-lines (outside test dirs, tests.rs / *_test.rs files
+and `#[cfg(test)]` mods), and a file-level const or static after the first file-level fn or impl, unless its value
+names a fn above it. Rust has no fixtures, so no fixture check.
     py -3 shape_check.py [--repo R] [--max-lines 30] [path ...]     repo-relative files or dirs; default src tests
 Prints `file:line: message` per problem. Exit 0 clean, 1 problems. Python standard library only.
 """
@@ -15,26 +18,31 @@ import os
 import re
 import sys
 
+import rust_src  # beside this script
+
 MAX_LINES = 30
 SKIP_DIRS = {"node_modules", "__pycache__", "target", "dist", "build", ".venv", "venv"}
 TEST_DIRS = {"tests", "test"}
 TEST_FILE = re.compile(r"(^test_.*\.py$|_test\.py$|^conftest\.py$)")
 CONSTANT = re.compile(r"^_?[A-Z][A-Z0-9_]*$")
 FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
+RS_TEST_FILE = re.compile(r"(^tests\.rs$|_tests?\.rs$)")
+ITEM_START = {None, ";", "}", "]", "pub", ")"}  # the token before a file-level item
 
 
-def py_files(repo, paths):
-    """Repo-relative posix .py files under the paths."""
+def py_files(repo, paths, ext=".py"):
+    """Repo-relative posix files ending in ext under the paths."""
     out = []
     for top in paths:
         full = os.path.join(repo, top)
         if os.path.isfile(full):
-            out.append(top.replace("\\", "/"))
+            if top.endswith(ext):
+                out.append(top.replace("\\", "/"))
             continue
         for root, dirs, names in os.walk(full):
             dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith("."))
             rel = os.path.relpath(root, repo).replace(os.sep, "/")
-            out += [f"{rel}/{n}" for n in sorted(names) if n.endswith(".py")]
+            out += [f"{rel}/{n}" for n in sorted(names) if n.endswith(ext)]
     return out
 
 
@@ -105,6 +113,66 @@ def duplicate_fixtures(found):
     return out
 
 
+def rs_is_test(rel):
+    """True for a Rust test file (tests.rs, *_test.rs, *_tests.rs) or a file under a test dir."""
+    parts = rel.split("/")
+    return bool(RS_TEST_FILE.search(parts[-1])) or any(p in TEST_DIRS for p in parts[:-1])
+
+
+def rs_long_functions(rel, toks, max_lines):
+    """Problems for Rust fns with a body longer than max_lines, `#[cfg(test)]` mods and #[test] fns aside."""
+    spans = rust_src.cfg_test_spans(toks)
+    out = []
+    for f in rust_src.functions(toks):
+        if not f["body"] or f["test"] or any(a <= f["start"] <= b for a, b in spans):
+            continue
+        size = f["end_line"] - f["line"] + 1
+        if size > max_lines:
+            out.append(f"{rel}:{f['line']}: function {f['name']} is {size} lines, over {max_lines}; "
+                       "split it into named steps")
+    return out
+
+
+def rs_late_constants(rel, toks):
+    """Problems for file-level const/static items after the first file-level fn or impl, unless the value names
+    one of the fns above it (a dispatch table must follow its handlers)."""
+    out, fns, depth, seen = [], set(), 0, False
+    for i, (kind, tok, line) in enumerate(toks):
+        if kind == "punct" and tok in "{}":
+            depth += 1 if tok == "{" else -1
+            continue
+        if depth or kind != "ident":
+            continue
+        nxt = toks[i + 1] if i + 1 < len(toks) else ("", "", 0)
+        if tok == "fn" and nxt[0] == "ident":
+            seen = True
+            fns.add(nxt[1])
+        elif tok == "impl" and (toks[i - 1][1] if i else None) in ITEM_START | {"unsafe"}:
+            seen = True
+        elif seen and tok in ("const", "static") and (toks[i - 1][1] if i else None) in ITEM_START:
+            j = i + 1 + (nxt[1] == "mut")
+            if j >= len(toks) or toks[j][0] != "ident" or toks[j][1] == "fn":
+                continue
+            end = next((k for k in range(j, len(toks)) if toks[k][1] == ";"), len(toks))
+            if any(t[0] == "ident" and t[1] in fns for t in toks[j + 1:end]):
+                continue
+            out.append(f"{rel}:{line}: {tok} {toks[j][1]} is defined after the first fn or impl; "
+                       "move it to the top of the file")
+    return out
+
+
+def rs_check(repo, files, max_lines):
+    """Problems for the Rust product files."""
+    out = []
+    for rel in files:
+        if rs_is_test(rel):
+            continue
+        with open(os.path.join(repo, rel), encoding="utf-8-sig", errors="replace") as fh:
+            toks = rust_src.tokens(fh.read())
+        out += rs_long_functions(rel, toks, max_lines) + rs_late_constants(rel, toks)
+    return out
+
+
 def check(repo, paths, max_lines):
     """(problems as 'file:line: message', files scanned)."""
     out, found = [], []
@@ -121,7 +189,8 @@ def check(repo, paths, max_lines):
             found += [(rel, line, name, key) for key, line, name in fixtures(tree)]
         else:
             out += long_functions(rel, tree, max_lines) + late_constants(rel, tree)
-    return sorted(out + duplicate_fixtures(found)), len(files)
+    rs = py_files(repo, paths, ".rs")
+    return sorted(out + duplicate_fixtures(found) + rs_check(repo, rs, max_lines)), len(files) + len(rs)
 
 
 def main(argv=None):
