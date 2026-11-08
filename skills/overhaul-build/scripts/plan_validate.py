@@ -64,6 +64,8 @@ import anchors  # beside this script
 import drive  # beside this script: parse_needs, the one reading of the needs cell
 import entry_match  # beside this script
 import rust_src  # beside this script
+os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
+os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 
 COLUMNS = ["id", "phase", "module", "deps", "entry", "acceptance", "status"]
 STATUSES = {"planned", "building", "review", "landing", "proven", "needs-plan"}

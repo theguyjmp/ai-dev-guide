@@ -46,6 +46,8 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
+os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 
 try:
     import tomllib

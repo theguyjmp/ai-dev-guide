@@ -46,6 +46,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import land as land_mod  # noqa: E402  the lock protocol is land.py's
+os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
+os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 
 HERE = Path(os.path.abspath(__file__)).parent
 TEMPLATES = HERE / "templates"
@@ -734,6 +736,11 @@ class Driver:
 
     # ---- the loop ----
     def run(self) -> int:
+        main_wt = land_mod.checked_out_at(str(self.repo), self.main)
+        dirty = land_mod.dirty_tracked(main_wt) if main_wt else []
+        if dirty:  # every land would fail to fast-forward main (vc1: a manager's plan fix left uncommitted)
+            raise DriveError(f"{land_mod.DIRTY_MAIN} {main_wt}: {', '.join(dirty[:5])}; commit the plan fix "
+                             "(plan_validate PLAN OK first) or revert it, then run again")
         for f in self.order:
             rec = self.st["functions"][f.id]
             if rec["status"] == "planned" and (problem := self.plan_problem(f)):
@@ -2204,6 +2211,15 @@ class Driver:
     def mark_proven(self, fid: str, evidence: Path) -> None:
         if not evidence.is_file() or not read_text(evidence).strip():
             raise DriveError(f"evidence file missing or empty: {evidence}")
+        if not acquire_lock(self.repo, LOCK_WAIT_S, "drive.py --mark-proven"):
+            raise DriveError(f"lock held by {lock_holder(self.repo)}")
+        try:  # the row's status cell, committed on main like a land's
+            land_mod.commit_status(str(self.repo), self.main, self.cfg["paths"]["functions"], fid,
+                                   f"mark {fid}: proven (manager; evidence {evidence.name})")
+        except land_mod.LandFail as e:
+            raise DriveError(str(e)) from e
+        finally:
+            release_lock(self.repo)
         self.set(fid, status="proven", last_reason="")
         self.log(fid, "land_ok", f"marked proven by the manager; evidence {evidence.as_posix()}")
         self.record_proven()

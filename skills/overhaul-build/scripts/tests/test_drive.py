@@ -853,6 +853,15 @@ class TestManagerCommands(Toy):
         self.assertIn("already had 2 plan fixes", out)
         self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "needs-plan")
 
+    def test_an_uncommitted_plan_edit_in_main_stops_the_drive(self):  # vc1: every land then aborted
+        repo = self.make_repo()
+        f = repo / "spec" / "FUNCTIONS.md"
+        f.write_text(f.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("uncommitted changes to tracked files in the main checkout", out)
+        self.assertIn("spec/FUNCTIONS.md", out)
+
     def test_reset_and_mark_proven_and_exit_codes(self):
         repo = self.make_repo(brief_max=50)
         rc, out = self.drive_cli(repo)
@@ -881,6 +890,9 @@ class TestManagerCommands(Toy):
         st = self.state(repo)
         self.assertEqual(st["functions"]["F1"]["status"], "proven")
         self.assertEqual(st["proven_history"][-1][1], 1)
+        row = next(ln for ln in git(repo, "show", "main:spec/FUNCTIONS.md").splitlines() if ln.startswith("| F1 "))
+        self.assertIn(" proven ", row)  # the status cell is committed on main, as a land would (vc1 F05)
+        self.assertIn("mark F1: proven", git(repo, "log", "-1", "--format=%s", "main"))
 
         rc, out = self.drive_cli(repo)  # F2 is ready now, but its brief is still over budget
         self.assertEqual(rc, 3, out)

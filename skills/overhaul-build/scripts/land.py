@@ -42,6 +42,8 @@ import tomllib
 from pathlib import PurePosixPath
 
 import anchors  # beside this script
+os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
+os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WHOLE_TREE = ("test", "lint", "dup", "literals", "shape", "cycles", "entry_lint")
@@ -67,8 +69,9 @@ def now_iso():
 def git(cwd, *args, check=True):
     p = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if check and p.returncode != 0:
-        msg = (p.stderr.strip() or p.stdout.strip()).splitlines()
-        raise LandFail(f"git {args[0]} failed: {msg[-1] if msg else 'exit %d' % p.returncode}")
+        msg = [ln.strip() for ln in (p.stderr.strip() or p.stdout.strip()).splitlines() if ln.strip()]
+        text = " / ".join(msg)[:600] if msg else "exit %d" % p.returncode  # git's cause comes before "Aborting"
+        raise LandFail(f"git {args[0]} failed: {text}")
     return p
 
 
@@ -199,6 +202,30 @@ def set_status(text, row, status="proven"):
     return "".join(lines)
 
 
+def commit_status(repo, main, fpath, fid, message):
+    """Set fid's status cell to proven in one commit on main, as a land does (a manager's --mark-proven: without it
+    the row says planned while the state says proven, and plan_validate fails every later plan fix; vc1 F05)."""
+    wt = os.path.join(repo, ".overhaul", "wt", "mark")
+    prepare_worktree(repo, wt)
+    main_sha = git(repo, "rev-parse", main).stdout.strip()
+    git(wt, "checkout", "-q", "--detach", main_sha)
+    fp = os.path.join(wt, fpath)
+    with open(fp, encoding="utf-8", newline="") as f:
+        text = f.read()
+    rows = parse_functions(text)
+    if fid not in rows:
+        raise LandFail(f"{fid} is not a row of {fpath}")
+    if rows[fid]["status"] == "proven":
+        return main_sha
+    with open(fp, "w", encoding="utf-8", newline="") as f:
+        f.write(set_status(text, rows[fid]))
+    git(wt, "add", "--", fpath)
+    git(wt, "commit", "-q", "-m", message)
+    new = git(wt, "rev-parse", "HEAD").stdout.strip()
+    advance(repo, main, new, main_sha)
+    return new
+
+
 # ---- commands -------------------------------------------------------------------------------------------------------
 
 def passes(cmd, code):
@@ -258,6 +285,15 @@ def prepare_worktree(repo, wt):
     git(repo, "worktree", "add", "-q", "--detach", wt, "HEAD")
 
 
+DIRTY_MAIN = "uncommitted changes to tracked files in the main checkout"
+
+
+def dirty_tracked(wt):
+    """Tracked files with uncommitted changes in a worktree (untracked files do not count)."""
+    out = git(wt, "status", "--porcelain", "--untracked-files=no", check=False).stdout
+    return [ln[3:].strip() for ln in out.splitlines() if ln.strip()]
+
+
 def checked_out_at(repo, branch):
     """Path of the worktree that has `branch` checked out, else None."""
     path = None
@@ -275,6 +311,9 @@ def advance(repo, branch, new, old):
         raise LandFail(f"{branch} moved during land")
     wt = checked_out_at(repo, branch)
     if wt:
+        dirty = dirty_tracked(wt)
+        if dirty:
+            raise LandFail(f"{DIRTY_MAIN} {wt}: {', '.join(dirty[:5])}")
         git(wt, "merge", "--ff-only", "-q", new)
     else:
         git(repo, "update-ref", f"refs/heads/{branch}", new, old)
