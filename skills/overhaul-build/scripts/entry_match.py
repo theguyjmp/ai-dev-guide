@@ -8,9 +8,17 @@ CLI: some call in the named tests must have positional string arguments (from th
 match the grammar, with or without the program name. A non-literal argument matches one placeholder or word.
 HTTP: some call must hold a string matching the route (`<id>` matches one path segment; a `?query` may follow) and,
 for a method other than GET, the method as a string literal.
+Rust acceptance tests (`tests/acceptance/<f>.rs::<fn>`, read by rust_src.py, best effort): a call is any call, macro
+call or array literal in the named `fn`s, and a `.arg(..)`/`.args([..])` chain counts as one argument list, so
+`run_cli(&dir, &["cart", "add", "MUG1", "2"])` and `Command::new(bin).arg("cart").arg("add")` both match. A CLI row's
+test file, or a `mod x;` helper beside it, must also run the built binary: `env!("CARGO_BIN_EXE_<bin>")` (or
+assert_cmd's `cargo_bin(`). Library entry `lib: <crate>::<path>::<fn>` (Rust only): some call's path must be a
+suffix of it by whole `::` segments, and a call shorter than the full path needs a `use` of the crate in the file.
 """
 import ast
 import re
+
+import rust_src  # beside this script
 
 HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
 ANY = object()  # a call argument that is not a string literal
@@ -19,13 +27,13 @@ ANY = object()  # a call argument that is not a string literal
 def tokens(entry):
     """(kind, tokens) of an entry cell; kind is cli, http or '' (not checkable)."""
     text = re.sub(r"\([^)]*\)\s*$", "", entry.strip().strip("`")).strip()
-    m = re.match(r"(cli|http|ui|gui)\s*:\s*", text, re.I)
+    m = re.match(r"(cli|http|ui|gui|lib)\s*:\s*", text, re.I)
     kind = m.group(1).lower() if m else ""
     text = text[m.end():] if m else text
     parts = re.findall(r"\[|\]|<[^>]*>|[^\s\[\]]+", text)
     if not kind:
         kind = "http" if parts and parts[0].upper() in HTTP_METHODS else "cli"
-    return (kind if kind in ("cli", "http") else ""), parts
+    return (kind if kind in ("cli", "http", "lib") else ""), parts
 
 
 def grammar_regex(parts):
@@ -48,15 +56,14 @@ def grammar_regex(parts):
 
 def call_args(node):
     """Positional arguments of a call from its first string literal on: str for a literal, ANY otherwise."""
-    args, started = [], False
-    for a in node.args:
-        if isinstance(a, ast.Starred):
+    if isinstance(node, tuple):  # a Rust call: (path, args, texts), None for a non-literal argument
+        args = node[1]
+    else:
+        if any(isinstance(a, ast.Starred) for a in node.args):
             return None
-        lit = a.value if isinstance(a, ast.Constant) and isinstance(a.value, str) else None
-        started = started or lit is not None
-        if started:
-            args.append(lit if lit is not None else ANY)
-    return args
+        args = [a.value if isinstance(a, ast.Constant) and isinstance(a.value, str) else None for a in node.args]
+    first = next((n for n, a in enumerate(args) if a is not None), len(args))
+    return [a if a is not None else ANY for a in args[first:]]
 
 
 def stream(args):
@@ -94,6 +101,8 @@ def route_regex(route):
 
 def strings(call):
     """String literals and f-string patterns among a call's arguments, as regex-ready text and literals."""
+    if isinstance(call, tuple):
+        return list(call[2])
     out = []
     for a in [*call.args, *(k.value for k in call.keywords)]:
         if isinstance(a, ast.Constant) and isinstance(a.value, str):
@@ -118,6 +127,64 @@ def http_ok(calls, parts):
     return False, ""
 
 
+def lib_ok(calls, parts, uses=()):
+    """A Rust call whose path is a whole-segment suffix of the `lib:` entry path; a partial path needs a `use` of
+    the entry's crate (uses: the crate names the test files `use`)."""
+    want = parts[0].replace("-", "_").split("::") if parts else []
+    for call in calls:
+        if not isinstance(call, tuple) or not call[0]:
+            continue
+        have = call[0].split("::")
+        if len(have) <= len(want) and want[-len(have):] == have and (len(have) == len(want) or want[0] in uses):
+            return True, ""
+    return False, ""
+
+
+def matches(kind, calls, parts, uses=()):
+    if kind == "lib":
+        return lib_ok(calls, parts, uses)
+    return (cli_ok if kind == "cli" else http_ok)(calls, parts)
+
+
+def rust_uses(toks):
+    """Crate names `use`d at the top of a path (`use shop_core::cart;` -> shop_core)."""
+    return {toks[i + 1][1] for i in range(len(toks) - 1) if toks[i][1] == "use" and toks[i + 1][0] == "ident"}
+
+
+def read_calls(repo, r):
+    """(every call inside a row's acceptance tests, crates the Rust files `use`, the text of each Rust test file
+    and of the `mod x;` helpers beside it)."""
+    calls, uses, rust_text = [], set(), []
+    names = {name for _, name in r.get("tests") or []}
+    for path in sorted({item.split("::")[0] for item, _ in r.get("tests") or []}):
+        try:
+            text = (repo / path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if path.endswith(".rs"):
+            toks = rust_src.tokens(text)
+            for f in rust_src.functions(toks):
+                if f["name"] in names and f["body"]:
+                    calls += rust_src.calls(toks, *f["body"])
+            uses |= rust_uses(toks)
+            rust_text.append(text)
+            here = (repo / path).parent
+            for mod in rust_src.mod_decls(toks):
+                for helper in (here / f"{mod}.rs", here / mod / "mod.rs"):
+                    if helper.is_file():
+                        rust_text.append(helper.read_text(encoding="utf-8", errors="replace"))
+            continue
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            continue
+        calls += list(test_calls(tree, names))
+    return calls, uses, rust_text
+
+
+RUNS_BINARY = re.compile(r"CARGO_BIN_EXE_|cargo_bin\s*\(")
+
+
 def entry_problems(repo, rows, flabel):
     """Rows whose acceptance tests never invoke the row's entry, as plan_validate problem lines."""
     problems = []
@@ -125,30 +192,23 @@ def entry_problems(repo, rows, flabel):
         kind, parts = tokens(r.get("entry", ""))
         if not kind or not parts or not r.get("tests"):
             continue
-        calls = []
-        for path in sorted({item.split("::")[0] for item, _ in r["tests"]}):
-            try:
-                tree = ast.parse((repo / path).read_text(encoding="utf-8", errors="replace"))
-            except (OSError, SyntaxError, ValueError):
-                continue
-            calls += list(test_calls(tree, {name for _, name in r["tests"]}))
-        ok, hint = (cli_ok if kind == "cli" else http_ok)(calls, parts)
+        calls, uses, rust_text = read_calls(repo, r)
+        if kind == "lib" and not rust_text:
+            continue  # a library entry is checked in Rust tests only
+        where = f"{flabel}:{r.get('line', '?')}: {r.get('id', '?')}"
+        ok, hint = matches(kind, calls, parts, uses)
         if not ok:
-            problems.append(f"{flabel}:{r.get('line', '?')}: {r.get('id', '?')} acceptance never invokes its entry "
+            problems.append(f"{where} acceptance never invokes its entry "
                             f"`{r['entry'].strip().strip('`')}`{hint}: drive the exact entry, or fix the row")
+        if kind == "cli" and rust_text and not any(RUNS_BINARY.search(t) for t in rust_text):
+            problems.append(f"{where} acceptance does not run the built binary: drive the CLI through "
+                            'env!("CARGO_BIN_EXE_<bin>") in the test file or its `mod` helper')
     return problems
 
 
 def row_calls(repo, r):
     """Every call inside a row's acceptance tests."""
-    calls = []
-    for path in sorted({item.split("::")[0] for item, _ in r.get("tests") or []}):
-        try:
-            tree = ast.parse((repo / path).read_text(encoding="utf-8", errors="replace"))
-        except (OSError, SyntaxError, ValueError):
-            continue
-        calls += list(test_calls(tree, {name for _, name in r["tests"]}))
-    return calls
+    return read_calls(repo, r)[0]
 
 
 def cross_problems(repo, rows, flabel, waits_on):
@@ -158,14 +218,14 @@ def cross_problems(repo, rows, flabel, waits_on):
     problems = []
     entries = [(r.get("id", "?"), *tokens(r.get("entry", ""))) for r in rows]
     for r in rows:
-        calls = row_calls(repo, r)
+        calls, uses, _ = read_calls(repo, r)
         if not calls:
             continue
         mine, before, own = r.get("id", "?"), waits_on(r.get("id", "?")), tokens(r.get("entry", ""))[1]
         for oid, kind, parts in entries:
             if oid == mine or oid in before or not kind or not parts or parts == own:  # same entry: not a cross call
                 continue
-            ok, _ = (cli_ok if kind == "cli" else http_ok)(calls, parts)
+            ok, _ = matches(kind, calls, parts, uses)
             if ok:
                 problems.append(f"{flabel}:{r.get('line', '?')}: {mine} acceptance drives {oid}'s entry "
                                 f"`{' '.join(parts)}` but {mine} does not wait on {oid}'s behaviour: add "
