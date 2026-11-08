@@ -1,6 +1,6 @@
-# Review checklist v2
+# Review checklist v3
 
-checklist-version: v2
+checklist-version: v3
 
 Fixed yes/no items built from `quality-standard.md` (the `Q` numbers) plus the function's contract (`K` items).
 Each is answered `yes`, `no` or `unknown`, always with `file:line` evidence. Blocking means P0 or P1. A NO blocks
@@ -8,7 +8,8 @@ only when a verifier reproduces it with a failing test or an exact line and inpu
 logged, never dispatched. Items change only between runs (bump the version); a finding class seen twice becomes an
 item or a gate, never a fix pass. Each item line is `- <id> [<severity>] <Q rules> | <question> | <how to decide>`;
 drive.py parses these lines, so keep the shape. `R` in the rules field asks the item only of a row whose `rules`
-column cites project rules ([paths] patterns and standards).
+column cites project rules ([paths] patterns and standards). `W` marks a whole-tree item: the polish audit asks it,
+a function review does not.
 
 ## Contract (every function review)
 
@@ -63,6 +64,16 @@ column cites project rules ([paths] patterns and standards).
 - C27 [P1] Q34 | Is a stale lock recovered and a lock wait bounded? | NO with the lock code line and the killed-holder case.
 - C28 [P0] Q35 | Does every network read have a timeout and a size cap? | NO with the read line and a stalled or oversized request.
 - C29 [P1] Q36 | Are exported cells escaped and the export written atomically? | NO with the export line and a `=1+1` cell.
+
+## Polish audit lessons (blind audits found these P0s past the items above)
+
+- C31 [P0] Q33 | Is every product call of a low-level write primitive (file write, atomic replace, rename into place) inside the persistence owner's lock-held edit API, or on a short allowlist with the lock taken on the line before? | Grep the callers of the write primitives outside the owner's edit API; NO with each hit off the allowlist (a load-modify-save outside the lock loses a concurrent update).
+- C32 [P0] Q35 | Does every server socket read (request line, headers, body) run under a read timeout, and does the stalled-body test declare a length above the HTTP library's in-memory pre-read buffer while checking another client is still served? | Read the library's buffer size; open a request that declares a body larger than it and sends nothing, then a health request must answer within 5 s. NO with the read line that has no timeout, or the stall test whose length fits the buffer.
+- C33 [P1] Q36 | Does every verb that writes a user-named output path refuse an existing target unless an explicit overwrite flag is given, never overwrite a file in the product's own format, and compare same-file guards by canonical identity, not path text? | Point the output at an existing product document, also as `x/../name` and as an absolute path: each must be refused and the file left byte-identical. NO with the write line and the form that got through.
+- C34 [P1] Q30 | Is every growing stored collection (journal, history, notes, log, any append-only list) capped so the largest storable record stays under the read/decode limit and an edit's cost does not grow with history? | Repeat the cheapest edit until the cap: the write must be refused before a read refuses the file, and an edit at the cap stays within 2x of one on an empty record. NO with the collection that has no cap.
+- C35 [P1] Q19 | Does each OS error kind map to the user error of the same meaning (permission denied to permission, already exists or sharing violation to conflict, not found to not found), never all to one code, with the OS text kept out of the stable message? | Give each write verb a read-only file, a directory in place of the file and a locked file; check the error code and exit status. NO with the mapping line that folds kinds together.
+- C36 [P1] Q35 | Do network error bodies (HTTP, RPC, MCP) leave out absolute host paths and raw OS error text, naming paths relative to the data directory? | Trigger a corrupt-store, a lock and an I/O error over the network, then grep each body for the data directory's absolute path. NO with the line that puts the path in the response.
+- C37 [P1] Q12,Q16 W | Does every threshold in the lint configuration (complexity, function lines, arguments, line length) equal or tighten the standard's number? | Diff each lint config value (clippy.toml, ruff and the like) against the standard: Q16 says 30 lines and complexity 10. NO with the config line and the standard's number.
 
 ## Project rules (only for a row with a rules column entry)
 

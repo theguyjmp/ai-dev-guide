@@ -64,6 +64,7 @@ RULE_TRIGGERS = (  # words in a function's row, module section or acceptance tes
     (r"store|json|file|save|write|persist|database|\bdb\b|record", (23, 29, 30, 31, 32, 33, 34)),
     (r"lock", (34,)),
     (r"csv|export", (31, 36)),
+    (r"output|--out|save as|write to", (36,)),  # a user-named output target must not clobber (C33)
     (r"\bcli\b|argparse|command|argv", (5, 6)),
     (r"total|tax|price|sum|report", (9, 11)),
 )
@@ -276,6 +277,7 @@ class Item:
     question: str
     decide: str
     project: bool = False  # `R` in the rules field: asked only of a row that cites project rules
+    whole: bool = False  # `W` in the rules field: a whole-tree item, asked only by the polish audit
 
 
 @lru_cache(maxsize=1)
@@ -289,18 +291,19 @@ def checklist() -> tuple[str, dict[str, Item]]:
         if it:
             nums = tuple(int(n) for n in re.findall(r"Q(\d+)", it[3]))
             items[it[1]] = Item(it[1], it[2], nums, it[4].strip(), it[5].strip(),
-                                bool(re.search(r"(?<![A-Za-z])R(?![A-Za-z0-9])", it[3])))
+                                bool(re.search(r"(?<![A-Za-z])R(?![A-Za-z0-9])", it[3])),
+                                bool(re.search(r"(?<![A-Za-z])W(?![A-Za-z0-9])", it[3])))
     return (m[1] if m else "v?"), items
 
 
 def applicable_items(text: str | None, project_rules: bool = False) -> list[Item]:
     """Contract items always, plus the items whose rules apply to the text; None means the whole checklist. The
-    project-rules item (C30) only for a row that cites project rules."""
+    project-rules item (C30) only for a row that cites project rules; whole-tree (W) items only for None."""
     items = [i for i in checklist()[1].values() if project_rules or not i.project]
     if text is None:
         return items
     want = wanted_rules(text)
-    return [i for i in items if not i.rules or want.intersection(i.rules)]
+    return [i for i in items if not i.whole and (not i.rules or want.intersection(i.rules))]
 
 
 def checklist_text(items: list[Item]) -> str:
@@ -2322,6 +2325,32 @@ class Driver:
         self.log(fid, "cycle", "reset to planned, attempts 0")
         self.say(f"reset {fid}")
 
+    def repolish(self) -> None:
+        """--repolish: the next run audits again with the current checklist (a new item, a bumped version), as a
+        fresh polish phase of at most polish_rounds fix rounds. Old rounds stay in history and the plan-gaps pass
+        does not rerun. Bounded too: at most polish_rounds repolishes per build."""
+        if self.polish_rounds < 1:
+            raise DriveError("[limits] polish_rounds is 0: there is no polish to run again")
+        old = self.st.get("polish") or {}
+        if old.get("status", "idle") not in ("idle", "done", "failed"):
+            raise DriveError(f"polish is {old.get('status')} (round {old.get('round')}): let it finish first")
+        done = int(old.get("repolishes", 0))
+        if done >= self.polish_rounds:
+            raise DriveError(f"already repolished {done} times ([limits] polish_rounds {self.polish_rounds}): "
+                             "report the issues left in .overhaul/polish/ to the owner instead")
+        new = {"round": 0, "status": "idle", "issues": None, "history": list(old.get("history") or []),
+               "repolishes": done + 1, "checklist": checklist()[0]}
+        if old.get("gaps"):
+            new["gaps"] = old["gaps"]
+        self.st["polish"] = new
+        for ph in (self.st.get("polish_phases") or {}).values():  # per-phase polish: audit each phase again
+            ph.update(round=0, status="idle", issues=None, best=None, audit_retry=None)
+        self.dirty = True
+        self.flush()
+        self.log(None, "polish_repolish", f"polish reset ({done + 1} of {self.polish_rounds}), checklist "
+                 f"{checklist()[0]}")
+        self.say(f"repolish: the next run audits again with checklist {checklist()[0]}")
+
     def mark_proven(self, fid: str, evidence: Path) -> None:
         if not evidence.is_file() or not read_text(evidence).strip():
             raise DriveError(f"evidence file missing or empty: {evidence}")
@@ -2351,6 +2380,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reset", metavar="ID", help="set ID to planned with attempts 0, then exit")
     ap.add_argument("--mark-proven", metavar="ID", help="mark ID proven (needs --evidence), then exit")
     ap.add_argument("--evidence", metavar="FILE", help="blind review file backing --mark-proven")
+    ap.add_argument("--repolish", action="store_true",
+                    help="reset the polish state so the next run audits again with the current checklist, then exit")
     args = ap.parse_args(argv)
     repo = Path(os.path.abspath(args.repo))
     try:
@@ -2361,6 +2392,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise DriveError(f"{fid} is not in {drv.cfg['paths']['functions']}")
         if args.reset:
             drv.reset(args.reset)
+            return 0
+        if args.repolish:
+            drv.repolish()
             return 0
         if args.mark_proven:
             if not args.evidence:

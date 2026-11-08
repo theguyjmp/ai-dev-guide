@@ -73,7 +73,8 @@ os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .propte
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 
 COLUMNS = ["id", "phase", "module", "deps", "entry", "acceptance", "status"]
-STATUSES = {"planned", "building", "review", "landing", "proven", "needs-plan"}
+STATUSES = {"planned", "building", "review", "landing", "proven", "needs-plan", "deferred"}
+DEFERRED = "deferred"  # planned later (rolling plan): id, phase, module, deps and entry are checked, nothing else
 COMMANDS = ["test", "acceptance", "lint", "dup", "literals", "shape", "cycles", "entry_lint"]
 POLICIES = ("concurrency", "persistence", "errors", "untrusted input", "retries")
 ID_LISTS = ("concurrent writers", "boundaries", "multi-store writes")
@@ -164,19 +165,34 @@ def bare(cell):
     return cell.strip().strip("`").strip()
 
 
+def function_header(line):
+    """The lower-cased column names when `line` is a FUNCTIONS.md table header, else None."""
+    head = [bare(c).lower().strip("*") for c in cells(line)] if line.lstrip().startswith("|") else []
+    if (head and [c for c in head if c not in STUB_COLUMNS + OPTIONAL_COLUMNS] == COLUMNS
+            and all(head.count(c) <= 1 for c in STUB_COLUMNS + OPTIONAL_COLUMNS)):
+        # `files` (the function's own files: its stub, drive.py's lock) and `needs` (stub or behaviour per dep)
+        return head
+    return None
+
+
 def parse_functions(text, problems, label):
-    """Rows of the FUNCTIONS.md table as dicts (with `line`); malformed cell counts are reported and dropped."""
-    rows, header_at, lines, names = [], None, text.splitlines(), COLUMNS
-    for i, line in enumerate(lines):
-        head = [bare(c).lower().strip("*") for c in cells(line)] if line.lstrip().startswith("|") else []
-        if (head and [c for c in head if c not in STUB_COLUMNS + OPTIONAL_COLUMNS] == COLUMNS
-                and all(head.count(c) <= 1 for c in STUB_COLUMNS + OPTIONAL_COLUMNS)):
-            # `files` (the function's own files: its stub, drive.py's lock) and `needs` (stub or behaviour per dep)
-            header_at, names = i, head
-            break
-    if header_at is None:
+    """Rows of every FUNCTIONS.md table (one per phase is fine; drive.py reads them all) as dicts with `line`."""
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if function_header(line)]
+    if not starts:
         problems.append(f"{label}: no table with the header | {' | '.join(COLUMNS + list(STUB_COLUMNS))} |")
-        return rows
+        return []
+    rows = []
+    for i in starts:
+        rows += parse_table(lines, i, function_header(lines[i]), problems, label)
+    if not rows:
+        problems.append(f"{label}: no function rows")
+    return rows
+
+
+def parse_table(lines, header_at, names, problems, label):
+    """The rows of the one FUNCTIONS.md table whose header is on line index header_at."""
+    rows = []
     lacking = [c for c in STUB_COLUMNS if c not in names]
     if lacking:
         problems.append(f"{label}:{header_at + 1}: the table lacks the required column(s) {', '.join(lacking)}: "
@@ -184,8 +200,6 @@ def parse_functions(text, problems, label):
     i = header_at + 1
     if i < len(lines) and lines[i].lstrip().startswith("|") and all(SEPARATOR.match(c) for c in cells(lines[i])):
         i += 1
-    if i >= len(lines) or not lines[i].lstrip().startswith("|"):
-        problems.append(f"{label}: no function rows")
     for n in range(i, len(lines)):
         if not lines[n].lstrip().startswith("|"):
             break
@@ -339,7 +353,7 @@ def check_rows(rows, mods, repo, problems, flabel):
             problems.append(f"{where}: malformed module (empty)")
         elif mods is not None and module not in mods:
             problems.append(f"{where}: module {module!r} is not in ARCHITECTURE (has: {', '.join(sorted(mods)) or 'none'})")
-        elif mods is not None and mods[module]["paths"] and "files" in r:
+        elif mods is not None and mods[module]["paths"] and "files" in r and status != DEFERRED:
             for f in (bare(x) for x in re.split(r"[,;]", r["files"])):
                 if f not in ("", "-") and not any(f == p or (p.endswith("/") and f.startswith(p))
                                                   for p in mods[module]["paths"]):
@@ -359,8 +373,12 @@ def check_rows(rows, mods, repo, problems, flabel):
                 problems.append(f"{where}: dep {d} is unknown")
             elif r["ph"] is not None and phases[d] is not None and phases[d] > r["ph"]:
                 problems.append(f"{where}: dep {d} is in phase {phases[d]}, a later phase than {r['ph']}")
+            elif status != DEFERRED and bare(by_id[d]["status"]) == DEFERRED:
+                problems.append(f"{where}: dep {d} is deferred; defer {rid} too, or plan {d} now")
         if rid in by_id and by_id[rid] is r:
             graph[rid] = [d for d in deps if d in phases]
+        if status == DEFERRED:  # planned later: no files, stubs or tests yet
+            continue
         items = [bare(x) for x in r["acceptance"].split(";")]
         if not any(items):
             problems.append(f"{where}: no acceptance (want tests/acceptance/<f>.py::<test>)")
@@ -969,6 +987,7 @@ def validate(repo, run=False, timeout=600, notes=None):
     else:
         rows = parse_functions(fun_file.read_text(encoding="utf-8", errors="replace"), problems, paths["functions"])
         check_rows(rows, mods, repo, problems, paths["functions"])
+        every, rows = rows, [r for r in rows if r.get("st") != DEFERRED]  # deferred rows: check_rows only
         check_cargo_targets(rows, repo, problems, paths["functions"])
         check_phase_size(rows, cfg, problems, paths["functions"])
         check_project_rules(rows, cfg, paths, repo, problems, paths["functions"])
@@ -981,7 +1000,8 @@ def validate(repo, run=False, timeout=600, notes=None):
         check_property(rows, cfg, repo, problems, paths["functions"])
         depth, width, _ = check_depth(rows, cfg, problems, paths["functions"])
         if notes is not None:
-            notes.append(f"{paths['functions']}: critical path {depth} functions, widest level {width}")
+            notes.append(f"{paths['functions']}: critical path {depth} functions, widest level {width}"
+                         + (f", {len(every) - len(rows)} deferred" if len(every) > len(rows) else ""))
     if arch_file.is_file():
         check_policies(arch_file.read_text(encoding="utf-8", errors="replace"), mods, rows, problems,
                        paths["architecture"])
