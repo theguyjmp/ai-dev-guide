@@ -246,6 +246,65 @@ class LandTest(unittest.TestCase):
         self.assertFalse(land.passes("py -3 -m pytest -q tests/unit", 1))
 
 
+class StackedLandTest(LandTest):
+    """--stack: a land whose footprint is disjoint from the one in flight gates on main + that branch + its own,
+    outside the lock, and commits right after it with no second gate; if the stacked land fails it regates."""
+
+    def make_stacked(self, f2_files=None):
+        repo = self.make_repo(branch=f2_files)
+        extra = ("import sys\n\nop, a, b = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])\n"
+                 "print(a - b if op == 'sub' else '?')\n")
+        sub = ACCEPTANCE.format(op="sub", want=-1).replace('"toy.py"', '"extra.py"')
+        rows = FUNCTIONS + "| F3 | 1 | toy | F1 | extra.py | `tests/acceptance/test_sub.py::test_sub` | planned |\n"
+        write(repo, {"spec/FUNCTIONS.md": rows, "tests/acceptance/test_sub.py": sub})
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "plan F3")
+        git(repo, "checkout", "-q", "-b", "fn/F3")
+        write(repo, {"extra.py": extra})
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "build F3")
+        git(repo, "checkout", "-q", "main")
+        return repo
+
+    def start_stacked(self, repo):
+        p = subprocess.Popen([PY, LAND, "--repo", repo, "--fn", "F3", "--stack", "F2", "--timeout", "120"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        wt = os.path.join(repo, ".overhaul", "wt", "land-F3")
+        for _ in range(600):  # its worktree exists once it has read main
+            if os.path.isdir(wt) or p.poll() is not None:
+                break
+            import time
+            time.sleep(0.05)
+        return p
+
+    def test_stacked_land_commits_after_the_first_without_a_second_gate(self):
+        repo = self.make_stacked()
+        p = self.start_stacked(repo)
+        code, out, err = self.land(repo, "--wait", "60")
+        self.assertEqual(code, 0, out + err)
+        out3, err3 = p.communicate(timeout=300)
+        self.assertEqual(p.returncode, 0, out3 + err3)
+        self.assertIn("stacked on F2, no second gate", out3)
+        rows = git(repo, "show", "main:spec/FUNCTIONS.md")
+        self.assertRegex(rows, r"(?m)^\| F2 \|.*\| proven *\|$")
+        self.assertRegex(rows, r"(?m)^\| F3 \|.*\| proven *\|$")
+        self.assertIn('"mul"', git(repo, "show", "main:toy.py"))
+        self.assertIn("sub", git(repo, "show", "main:extra.py"))
+        self.assertEqual(git(repo, "log", "-1", "--format=%s", "main"), "land F3: proven")
+        self.assertEqual([e["event"] for e in self.log(repo)], ["land_ok", "land_ok"])
+
+    def test_stacked_land_regates_when_the_first_fails(self):
+        repo = self.make_stacked(f2_files={"toy.py": toy(mul="a * b") + "# BADLINT\n"})
+        p = self.start_stacked(repo)
+        code, out, _ = self.land(repo, "--wait", "60")
+        self.assertEqual(code, 1, out)
+        out3, err3 = p.communicate(timeout=300)
+        self.assertEqual(p.returncode, 0, out3 + err3)
+        self.assertIn("gated alone on the new main", out3)
+        self.assertNotIn('"mul"', git(repo, "show", "main:toy.py"))  # the failed land's code never reaches main
+        self.assertRegex(git(repo, "show", "main:spec/FUNCTIONS.md"), r"(?m)^\| F3 \|.*\| proven *\|$")
+
+
 class FunctionsTableTest(unittest.TestCase):
     def test_set_status_keeps_the_rest_of_the_row(self):
         rows = land.parse_functions(FUNCTIONS)

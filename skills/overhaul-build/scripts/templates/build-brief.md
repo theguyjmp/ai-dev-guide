@@ -72,8 +72,12 @@ land.py also refuses any branch that edits them, so such an edit can never reach
    module's package exists, every name on its Public line must exist in it.
 7. If the acceptance test is already green before you change anything, change nothing, commit nothing and say
    "acceptance already green before change" in your final message.
-8. Commit all your work on `{{branch}}` in `{{worktree}}` (`git add -A` then `git commit`). Do not push, do not
-   merge, do not switch branches, do not touch any other worktree or the main checkout.
+8. Commit all your work on `{{branch}}` in `{{worktree}}` (`git add -A` then `git commit`). Then merge main
+   into it (`git merge main`), resolve any conflict inside the allowed paths, and rerun the commands above until
+   they pass, so a land conflict can only come from the seconds between. drive.py merges main and reruns the gate
+   again before review. Do not push, do not switch branches, do not touch any other worktree or the main checkout.
+   Code that calls a dependency still raising NotImplementedError builds against its stub's signature and
+   docstring; do not implement another function's stub.
 
 ## Budget
 

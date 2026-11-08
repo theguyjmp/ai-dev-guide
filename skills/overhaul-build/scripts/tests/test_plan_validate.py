@@ -491,3 +491,68 @@ class DepthCheck(Base):
         with contextlib.redirect_stderr(out), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(pv.main(["--repo", str(self.make())]), 0)
         self.assertIn("critical path 3 functions, widest level 1", out.getvalue())
+
+
+class StubsAndNeeds(Base):
+    """v3: the plan commit lands a stub per function; `needs` says which deps must land first."""
+
+    @staticmethod
+    def row(rid, deps="-", needs="stub", files="", status="planned", line=1):
+        return {"id": rid, "deps": deps, "needs": needs, "files": files, "status": status, "line": line}
+
+    def stub_repo(self, files):
+        root = Path(tempfile.mkdtemp(prefix="pv_stub_"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return root
+
+    STUB = 'def add(a: int, b: int) -> int:\n    """Sum."""\n    raise NotImplementedError\n'
+
+    def test_needs_cell_forms(self):
+        p = []
+        rows = [self.row("A"), self.row("B", "A", "behaviour"), self.row("C", "A, B", "A:stub, B:behaviour"),
+                self.row("D", "A", "sometimes"), self.row("E", "A", "Z:behaviour")]
+        pv.check_needs(rows, p, "F")
+        self.assertEqual(len(p), 2, p)
+        self.assertTrue(self.has(p, "D: malformed needs") and self.has(p, "E: malformed needs"), p)
+
+    def test_critical_path_counts_behaviour_edges_only(self):
+        stub_chain = [self.row(f"F{n}", f"F{n - 1}" if n else "-") for n in range(8)]
+        p = []
+        self.assertEqual(pv.check_depth(stub_chain, {}, p, "F")[:2], (1, 8))  # all stub: no chain at all
+        self.assertEqual(p, [])
+        mixed = [self.row("F0"), self.row("F1", "F0", "behaviour"), self.row("F2", "F1", "stub"),
+                 self.row("F3", "F1, F2", "F1:behaviour, F2:stub")]
+        self.assertEqual(pv.check_depth(mixed, {}, [], "F")[2], ["F0", "F1", "F3"])
+        legacy = [{k: v for k, v in r.items() if k != "needs"} for r in stub_chain]  # no column: every dep blocks
+        self.assertEqual(pv.check_depth(legacy, {"plan": {"max_depth": 9}}, [], "F")[0], 8)
+
+    def test_stubs_exist_raise_and_import(self):
+        repo = self.stub_repo({"src/calc/__init__.py": "", "src/calc/add.py": self.STUB,
+                               "src/calc/done.py": "def done():\n    return 1\n",
+                               "src/calc/broken.py": "import no_such_module_xyz\nraise NotImplementedError\n"})
+        rows = [self.row("A", files="src/calc/add.py"), self.row("B", files="src/calc/missing.py"),
+                self.row("C", files="src/calc/done.py"), self.row("D", files="src/calc/broken.py"),
+                self.row("E"), self.row("P", files="src/calc/done.py", status="proven")]
+        p = []
+        pv.check_stubs(rows, repo, p, "F")
+        self.assertEqual(len(p), 4, p)
+        self.assertTrue(self.has(p, "B: stub file missing", "src/calc/missing.py"), p)
+        self.assertTrue(self.has(p, "C: no stub", "NotImplementedError"), p)
+        self.assertTrue(self.has(p, "stub does not import", "calc.broken"), p)
+        self.assertTrue(self.has(p, "E: a needs column needs a files column"), p)
+
+    def test_no_needs_column_skips_the_stub_check(self):
+        p = []
+        pv.check_stubs([{"id": "A", "deps": "-", "status": "planned", "line": 1}], Path("."), p, "F")
+        self.assertEqual(p, [])
+
+    def test_validate_reads_the_needs_column(self):
+        text = table(R1, R2, r3()).replace("| status |", "| status | needs |", 1)
+        lines = [ln + (" stub |" if ln.startswith("| F") else " --- |" if set(ln) <= set("|-: ") else "")
+                 for ln in text.splitlines()]
+        p = self.problems(self.make(functions="\n".join(lines) + "\n"))
+        self.assertTrue(self.has(p, "a needs column needs a files column"), p)
+        self.assertFalse(self.has(p, "cells"), p)

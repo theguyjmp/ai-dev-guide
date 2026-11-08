@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Overhaul v2 harness: build, review and land every function in spec/FUNCTIONS.md.
 
-A READY function (planned, deps proven, retries left, no in-flight function whose files overlap its own) gets a
-worktree at .overhaul/wt/<id> on fn/<id> from main, a brief from templates/, and a `claude -p`
-builder. A finished build gets a blind reviewer; a PASS goes to land.py. A failure retries from main
+A READY function (planned, its `behaviour` deps proven, retries left, no in-flight function whose files overlap
+its own) gets a worktree at .overhaul/wt/<id> on fn/<id> from main, a brief from templates/, and a `claude -p`
+builder. A dep marked `stub` in the FUNCTIONS.md `needs` column does not block: the plan commit landed its interface
+stub, so the dependent builds against that contract at once. A finished build merges main into its branch and reruns
+the gate in its worktree (a conflict there goes to the conflict-fix pass), then gets a blind reviewer; a PASS goes to
+land.py. Lands whose footprints do not overlap run at once, the later ones stacked on the earlier (land.py --stack). A failure retries from main
 with its reason in the brief, then parks the function as needs-plan for the manager. A land.py
 "merge conflict" is not an attempt: a conflict-fix builder pass merges main into the same worktree
 and branch (templates/conflict-brief.md, [limits] conflict_retries per attempt), then the function
@@ -61,7 +64,28 @@ COLUMNS = ("id", "phase", "module", "deps", "entry", "acceptance", "status")
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 PATHS_LINE = re.compile(r"\W*(?:paths?|files)\W*?[:=]\s*(.+)", re.I)
 SHARED_LINE = re.compile(r"\W*shared\W*?[:=]\s*(.+)", re.I)  # files every function may touch; never a lock
+CONFLICT_SYNC = "merge conflict merging"
 FILES_COLUMN = "files"  # optional FUNCTIONS.md column: the function's own files, the unit of the build lock
+NEEDS_COLUMN = "needs"  # optional FUNCTIONS.md column: which deps must land first (behaviour) or only stub (default)
+
+
+def parse_needs(cell: str, deps: list[str]) -> list[str] | None:
+    """The deps of a row that block its build: `stub` (or empty) blocks none, `behaviour` blocks all, and a list
+    `F03:behaviour, F04:stub` blocks the named ones. None when the cell is malformed (plan_validate reports it)."""
+    cell = cell.strip().strip("`").strip().lower()
+    if cell in ("", "-", "stub"):
+        return []
+    if cell in ("behaviour", "behavior"):
+        return list(deps)
+    out: list[str] = []
+    for part in re.split(r"[,;]", cell):
+        did, _, kind = part.strip().strip("`").partition(":")
+        did, kind = did.strip().upper(), kind.strip()
+        if kind not in ("stub", "behaviour", "behavior") or did not in {d.upper() for d in deps}:
+            return None
+        if kind != "stub":
+            out.append(next(d for d in deps if d.upper() == did))
+    return out
 IN_FLIGHT = ("building", "review", "landing")
 POLISH_KINDS = ("polish_audit", "polish_fix", "polish_review", "polish_land")
 GREEN_BEFORE = "acceptance already green before change"
@@ -103,6 +127,11 @@ class Fn:
     row: str
     order: int
     files: list[str] = field(default_factory=list)
+    needs: list[str] | None = None  # deps that must land before the build starts (behaviour); None = all deps
+
+    @property
+    def blocking(self) -> list[str]:
+        return self.deps if self.needs is None else self.needs
 
 
 @dataclass
@@ -260,6 +289,7 @@ def parse_functions(text: str) -> list[Fn]:
     fns: list[Fn] = []
     idx: dict[str, int] | None = None
     names_files: int | None = None
+    names_needs: int | None = None
     header = ""
     for line in text.splitlines():
         if not line.lstrip().startswith("|"):
@@ -270,14 +300,18 @@ def parse_functions(text: str) -> list[Fn]:
         if all(c in names for c in COLUMNS):
             idx, header = {c: names.index(c) for c in COLUMNS}, line.strip()
             names_files = names.index(FILES_COLUMN) if FILES_COLUMN in names else None
+            names_needs = names.index(NEEDS_COLUMN) if NEEDS_COLUMN in names else None
             continue
         if idx is None or all(set(c) <= set(":- ") for c in row):
             continue
         get = {c: (row[i] if i < len(row) else "") for c, i in idx.items()}
         files = row[names_files] if names_files is not None and names_files < len(row) else ""
+        deps = [bare(d) for d in get["deps"].split(",") if bare(d) not in ("", "-")]
+        # no needs column: every dep blocks (the v2 behaviour, so old plans are unchanged)
+        needs = parse_needs(row[names_needs], deps) if names_needs is not None and names_needs < len(row) else None
         fns.append(Fn(
             id=bare(get["id"]), phase=bare(get["phase"]), module=bare(get["module"]),
-            deps=[bare(d) for d in get["deps"].split(",") if bare(d) not in ("", "-")],
+            deps=deps, needs=deps if names_needs is not None and needs is None else needs,
             entry=get["entry"], acceptance=[bare(a) for a in get["acceptance"].split(";") if bare(a)],
             status=bare(get["status"]).lower(), header=header, row=line.strip(), order=len(fns),
             files=[bare(x) for x in re.split(r"[,;]", files) if bare(x) not in ("", "-")]))
@@ -401,6 +435,7 @@ class Driver:
         self.repo, self.cfg = repo, cfg
         # [harness] max_parallel, else the older [limits] key, else 6
         self.max_parallel = max(1, int(har.get("max_parallel") or lim.get("max_parallel") or 6))
+        self.max_lands = max(1, int(har.get("max_lands") or 3))  # lands at once; overlapping footprints never
         self.max_calls = int(lim["builder_max_calls"])
         self.max_tokens = int(lim["brief_max_tokens"])
         self.retries = int(lim["retries_per_function"])
@@ -422,6 +457,7 @@ class Driver:
         self.jobs: dict[str, Job] = {}
         self.land_queue: list[str] = []
         self.land_job: Job | None = None
+        self.side_lands: dict[str, Job] = {}  # lands stacked on the ones in flight (land.py --stack)
         self.fns: dict[str, Fn] = {}
         self.order: list[Fn] = []
         self.arch = ""
@@ -587,7 +623,11 @@ class Driver:
             raise
 
     def busy(self) -> set[str]:
-        return set(self.jobs) | set(self.land_queue) | ({self.land_job.fn} if self.land_job else set())
+        return set(self.jobs) | set(self.land_queue) | {j.fn for j in self.land_jobs()}
+
+    def land_jobs(self) -> list[Job]:
+        """Lands in flight, the plain one (or a polish land) first, then the stacked ones in start order."""
+        return [*([self.land_job] if self.land_job else []), *self.side_lands.values()]
 
     def claims(self, f: Fn) -> list[str]:
         """The files a function's build locks: its FUNCTIONS.md `files` cell, else its whole module's paths.
@@ -597,8 +637,9 @@ class Driver:
         return [p for p in (f.files or module_paths(section, f.module)) if p not in shared]
 
     def ready(self) -> list[Fn]:
-        """Functions to launch now: planned, deps proven, retries left, and no file overlap with a function in
-        flight (building, in review or landing) or with one launched before it in this pass.
+        """Functions to launch now: planned, every blocking dep proven, retries left, and no file overlap with a
+        function in flight (building, in review or landing) or with one launched before it in this pass. A dep the
+        `needs` column marks `stub` does not block: its stub is on main from the plan commit.
 
         Two builders that edit one file fail to land with a merge conflict, so a function waits while an in-flight
         function's claimed files overlap its own. A plan with a `files` column runs one module's functions at once;
@@ -610,7 +651,7 @@ class Driver:
         ready: list[Fn] = []
         for f in self.order:
             if (recs[f.id]["status"] != "planned" or f.id in busy or recs[f.id]["attempts"] > self.retries
-                    or not all(d in proven for d in f.deps)):
+                    or not all(d in proven for d in f.blocking)):
                 continue
             mine = self.claims(f)
             if any(paths_overlap(mine, other) for other in taken):
@@ -631,7 +672,7 @@ class Driver:
     def reap(self) -> bool:
         """Handle finished or timed-out jobs; True if any finished."""
         now, done = time.monotonic(), False
-        for job in [*self.jobs.values(), *([self.land_job] if self.land_job else [])]:
+        for job in [*self.jobs.values(), *self.land_jobs()]:
             if job.proc.poll() is None:
                 if now < job.deadline:
                     continue
@@ -641,7 +682,10 @@ class Driver:
             if job.kind in POLISH_KINDS:
                 self.reap_polish(job)
             elif job.kind == "land":
-                self.land_job = None
+                if job is self.land_job:
+                    self.land_job = None
+                else:
+                    del self.side_lands[job.fn]
                 self.after_land(job)
             else:
                 del self.jobs[job.fn]
@@ -771,11 +815,53 @@ class Driver:
                 (" timeout" if job.timed_out else "")
         self.log(job.fn, "build_end", f"rc={job.proc.returncode} turns={turns}/{self.max_calls}{flags} "
                  f"model={job.model}", time.monotonic() - job.started, tokens)
-        problem = self.build_problem(job, text)
-        if problem:
+        self.to_review(job, self.build_problem(job, text) or self.sync_problem(job.fn))
+
+    def to_review(self, job: Job, problem: str) -> None:
+        """After a build or conflict pass: review when clean, a conflict pass on a pre-review merge conflict."""
+        if problem == CONFLICT_SYNC:
+            if not self.start_conflict(job.fn, f"{CONFLICT_SYNC} {self.main} into fn/{job.fn} before review"):
+                self.fail(job.fn, f"{CONFLICT_SYNC} {self.main} before review; conflict_retries spent")
+        elif problem:
             self.fail(job.fn, problem)
         else:
             self.start_review(job.fn, job.attempt)
+
+    def sync_problem(self, fid: str) -> str:
+        """Merge main into fn/<id> and rerun the gate in its worktree before review, so a land conflict means main
+        moved in the seconds between. '' when clean, CONFLICT_SYNC on a merge conflict, else the failing gate."""
+        wt = self.ov / "wt" / fid
+        self.log(fid, "sync", f"merge {self.main} before review")
+        p = run(["git", "merge", "-q", "--no-edit", "-m", f"{fid}: merge {self.main} before review", self.main], wt)
+        if p.returncode != 0:
+            run(["git", "merge", "--abort"], wt)
+            return CONFLICT_SYNC
+        return self.gate_problem(wt)
+
+    def gate_problem(self, wt: Path) -> str:
+        """The whole-tree gate commands land.py runs ([harness] pre_review names them; default all of them), run
+        in the worktree on the merged branch. '' when all pass."""
+        names = self.cfg["harness"].get("pre_review", land_mod.WHOLE_TREE)
+        for name in names:
+            cmd = self.cfg["commands"].get(name)
+            if not cmd:
+                continue
+            if name == "cycles":
+                problem = self.cycles_problem(wt)
+                if problem:
+                    return problem
+                continue
+            cmd = land_mod.fill(cmd)
+            try:
+                p = subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", timeout=self.timeout_s, stdin=subprocess.DEVNULL)
+            except subprocess.TimeoutExpired:
+                return f"{name} timed out in the worktree after merging {self.main}: `{cmd}`"
+            if not land_mod.passes(cmd, p.returncode):
+                tail = " / ".join([ln.strip() for ln in (p.stdout + p.stderr).splitlines() if ln.strip()][-3:])
+                return (f"{name} failed (exit {p.returncode}) in the worktree after merging {self.main}, before "
+                        f"review: `{cmd}`: {tail}. Merge {self.main} and rerun the gate before you hand back")
+        return ""
 
     def build_problem(self, job: Job, text: str) -> str:
         """Why this build cannot go to review, or ''. Commits leftover changes first."""
@@ -798,7 +884,7 @@ class Driver:
         hits = [p for p in changed if p.startswith(self.protected)]
         if hits:
             return f"changed protected files ({', '.join(hits[:5])}); never edit tests/acceptance, spec or overhaul.toml"
-        return self.cycles_problem(wt)
+        return ""  # the gate, cycles included, runs after the pre-review merge (sync_problem)
 
     def cycles_problem(self, wt: Path) -> str:
         """The builder gate's cycles check, run on the branch before review: land.py runs it again on the merged
@@ -858,7 +944,7 @@ class Driver:
         if problem:  # a conflict pass that fails is a failed attempt: the retry rebuilds from the new main
             self.fail(job.fn, f"conflict pass {self.st['functions'][job.fn].get('conflicts', 0)}: {problem}")
         else:
-            self.start_review(job.fn, job.attempt)
+            self.to_review(job, self.sync_problem(job.fn))
 
     def conflict_problem(self, job: Job, text: str) -> str:
         """Why this conflict pass cannot go back to review, or ''. Commits a merge the builder left staged."""
@@ -937,19 +1023,41 @@ class Driver:
                 self.fail(fid, f"review FAIL: {notes or 'no reason given'}")
 
     # ---- land ----
+    def footprint(self, fid: str) -> list[str]:
+        """What a land touches: the function's claimed files plus every file its branch changes."""
+        changed = run(["git", "diff", "--name-only", f"{self.main}...fn/{fid}"], self.repo).stdout.split()
+        return [*self.claims(self.fns[fid]), *changed]
+
     def pump_land(self) -> bool:
-        if self.land_job or not self.land_queue:
+        """Start the next land. With none in flight it is a plain land under the lock. Otherwise the first queued
+        function whose footprint overlaps no in-flight land's starts stacked on them (land.py --stack): its gate
+        runs alongside theirs on main + their branches, and it commits right after them. Overlapping lands wait."""
+        flying = self.land_jobs()
+        if not self.land_queue or len(flying) >= self.max_lands or any(j.kind != "land" for j in flying):
             return False
-        fid = self.land_queue.pop(0)
+        fid = self.land_queue[0]
+        if flying:
+            taken = [self.footprint(j.fn) for j in flying]
+            fid = next((q for q in self.land_queue
+                        if not any(paths_overlap(self.footprint(q), t) for t in taken)), "")
+            if not fid:
+                return False
+        self.land_queue.remove(fid)
         out = self.ov / "runs" / f"{fid}-a{self.st['functions'][fid]['attempts'] + 1}-land.out"
-        # land.py takes .overhaul/lock itself for the whole land, so drive.py must hold nothing while it runs.
+        # land.py takes .overhaul/lock itself (a stacked land only to commit), so drive.py holds nothing meanwhile.
         cmd = [sys.executable, str(self.scripts / "land.py"), "--repo", str(self.repo), "--fn", fid,
                "--main", self.main]
+        if flying:
+            cmd += ["--stack", ",".join(j.fn for j in flying)]
         log = self.ov / "log.jsonl"
         log_at = log.stat().st_size if log.exists() else 0
         start = time.monotonic()
-        self.land_job = Job(fid, "land", spawn(cmd, self.repo, out), out, start,
-                            start + 2 * self.timeout_s, 0, log_at=log_at)
+        job = Job(fid, "land", spawn(cmd, self.repo, out), out, start, start + 2 * self.timeout_s, 0, log_at=log_at)
+        if flying:
+            self.side_lands[fid] = job
+            self.log(fid, "land_stacked", f"on {', '.join(j.fn for j in flying)}")
+        else:
+            self.land_job = job
         return True
 
     def after_land(self, job: Job) -> None:
@@ -1226,7 +1334,7 @@ class Driver:
             self.polish_failed(fid, f"review {verdict or 'file missing'}: {notes or 'no reason given'}")
 
     def pump_polish_land(self) -> bool:
-        if self.land_job or self.land_queue or not self.polish_lands:
+        if self.land_job or self.side_lands or self.land_queue or not self.polish_lands:
             return False
         fid = self.polish_lands.pop(0)
         out = self.ov / "runs" / f"{fid}-land.out"
@@ -1325,7 +1433,7 @@ class Driver:
 
     def abort(self) -> None:
         """Kill every worker tree this run started; their functions go back to planned."""
-        jobs = [*self.jobs.values(), *([self.land_job] if self.land_job else [])]
+        jobs = [*self.jobs.values(), *self.land_jobs()]
         for job in jobs:
             kill_tree(job.proc)
         for fid in [*(j.fn for j in jobs), *self.land_queue]:
@@ -1335,6 +1443,7 @@ class Driver:
         self.jobs.clear()
         self.land_queue.clear()
         self.land_job = None
+        self.side_lands.clear()
         try:
             self.save(5.0)
         except (OSError, DriveError):

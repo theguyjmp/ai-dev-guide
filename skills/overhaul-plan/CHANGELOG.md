@@ -1,5 +1,11 @@
 # overhaul-plan changelog
 
+## v3 speed: stubs and needs, 2026-11-07
+The plan commit lands an interface stub for every function (signatures, types, docstrings, bodies raising
+NotImplementedError) in its own files. Optional FUNCTIONS `needs` column: `stub` (default, the dependent builds
+against the stub at once), `behaviour` (wait for the dep to land), or per dep `F03:behaviour, F04:stub`.
+plan_validate checks the cell, that each unproven row's stub files exist, raise NotImplementedError and import, and
+computes the critical path over blocking (behaviour) edges only. Plans without the column are unchanged.
 ## v2 one quality standard, 2026-11-07
 The Policies section opens with a `Standard:` line citing overhaul-build's quality-standard.md, and the design
 rules trial 4's judge found missing (stored invariants, atomic multi-store writes, stale locks, network timeouts,

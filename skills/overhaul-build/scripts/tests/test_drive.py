@@ -228,7 +228,7 @@ class Toy(unittest.TestCase):
     def make_repo(self, scenario: dict | None = None, retries: int = 1, timeout_min: float = 30,
                   brief_max: int = 40000, functions: str = FUNCTIONS, max_parallel: int = 2,
                   conflict_retries: int | None = None, worker_args: str = "", harness_extra: str = "",
-                  commands_extra: str = "") -> Path:
+                  commands_extra: str = "", pre_review: str = '["cycles"]') -> Path:
         self.root = Path(tempfile.mkdtemp(prefix="drive-test-")).resolve()
         self.addCleanup(self.cleanup_root)
         repo, scripts = self.root / "repo", self.root / "scripts"
@@ -263,6 +263,7 @@ builder_timeout_min = {timeout_min}
 [harness]
 worker_cmd = ["{py}", "{worker}"{worker_args}]
 scripts_dir = "{scripts.as_posix()}"
+pre_review = {pre_review}
 {harness_extra}
 """)
         git(repo, "init", "-q", "-b", "main")
@@ -492,6 +493,55 @@ class TestModules(Toy):
         events = [(e["fn"], e["event"]) for e in self.events(repo)]
         self.assertLess(events.index(("F1", "land_ok")), events.index(("F3", "build_start")))  # F3 waited
         self.assertLess(events.index(("F2", "build_start")), events.index(("F1", "land_ok")))  # F2 did not
+
+
+NEEDS = CHAIN.replace("| files | status |", "| files | needs | status |").replace(
+    "|-------|--------|", "|-------|-------|--------|").replace("| planned |", "| {n} | planned |")
+
+
+class TestNeeds(Toy):
+    """v3: a `stub` dep does not block (its stub is on main); a `behaviour` dep must land first."""
+
+    SLOW = {"F1": {"build": ["slow"]}}
+
+    def order(self, repo: Path) -> list[tuple[str, str]]:
+        return [(e["fn"], e["event"]) for e in self.events(repo)]
+
+    def test_stub_dependents_start_before_their_dependency_lands(self):
+        repo = self.make_repo(self.SLOW, functions=NEEDS.format(n="stub"), max_parallel=6)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.order(repo)
+        for fn in ("F2", "F3", "F4"):
+            self.assertLess(ev.index((fn, "build_start")), ev.index(("F1", "land_ok")), f"{fn} waited for F1")
+
+    def test_behaviour_dependents_wait(self):
+        repo = self.make_repo(self.SLOW, functions=NEEDS.format(n="behaviour"), max_parallel=6)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.order(repo)
+        for fn, dep in (("F2", "F1"), ("F3", "F2"), ("F4", "F1")):
+            self.assertLess(ev.index((dep, "land_ok")), ev.index((fn, "build_start")), f"{fn} before {dep}")
+
+    def test_parse_needs(self):
+        self.assertEqual(drive.parse_needs("stub", ["F1"]), [])
+        self.assertEqual(drive.parse_needs("", ["F1"]), [])
+        self.assertEqual(drive.parse_needs("behaviour", ["F1", "F2"]), ["F1", "F2"])
+        self.assertEqual(drive.parse_needs("F1:stub, F2:behaviour", ["F1", "F2"]), ["F2"])
+        self.assertIsNone(drive.parse_needs("F9:behaviour", ["F1"]))
+
+    def test_merge_before_review_is_called_and_gates(self):
+        repo = self.make_repo(functions=NEEDS.format(n="stub"), max_parallel=6)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.order(repo)
+        for fn in ("F1", "F2", "F3", "F4"):
+            self.assertLess(ev.index((fn, "sync")), ev.index((fn, "review_pass")))
+        repo = self.make_repo(functions=NEEDS.format(n="stub"), pre_review='["lint"]',
+                              commands_extra='lint = "py -3 -c \\"import sys; sys.exit(3)\\""')
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 3, out)
+        self.assertIn("lint failed (exit 3) in the worktree after merging main, before review", out)
 
 
 class TestFileLock(Toy):

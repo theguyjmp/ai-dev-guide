@@ -2,6 +2,17 @@
 
 Why each rule exists, newest first. Full v1 history: `git log -- skills/overhaul-build` (71 commits, 2026-11-05 to 2026-11-07).
 
+## v3 speed and conflicts, 2026-11-07
+Trial 4's floor was the deps chain (29.8 of 41.7 min) and serial lands (48 s each). drive.py now starts a function
+once its `behaviour` deps land; `stub` deps never block (the stub is on main). The file-footprint lock stays. After a
+build (and after a conflict pass) drive.py merges main into fn/<id> and reruns the gate ([harness] pre_review, default
+land.py's whole-tree commands) before review; a merge conflict there goes to the conflict-fix pass. The build brief
+tells the builder to do the same before handing back. Lands whose footprints (claimed plus changed files) do not
+overlap run at once ([harness] max_lands, default 3): land.py --stack gates outside the lock on main + the in-flight
+branches + its own, waits for them, then commits under the lock with no second gate when exactly the stacked
+functions landed; otherwise it regates on the new main, and a failed stacked gate retries as a plain land. main only
+fast-forwards, and only to a tree the gate passed.
+
 ## v2 one quality standard for every step, 2026-11-07
 Trial 4's polish audit (sonnet, a condensed brief) ended at 4 issues while the final judge (opus, AUDIT-BRIEF)
 found 18: polish optimised against a weaker, open-ended bar. The new issues were design-level (a two-store pay

@@ -269,9 +269,17 @@ def advance(repo, branch, new, old):
 
 
 def land(repo, fid, main, timeout):
+    """The whole land under the caller's lock: gate, then commit and fast-forward."""
+    return commit_land(repo, gate_branch(repo, fid, main, timeout), main, timeout)
+
+
+def gate_branch(repo, fid, main, timeout, stack=()):
+    """Steps 1 to 5 on main as it is now; returns the context commit_land needs. With `stack` (functions whose lands
+    are in flight, footprints disjoint from this one) the gate runs on main + their branches + this branch, so this
+    land can commit right after theirs without a second gate. Runs without the lock when stacked."""
     ovh = os.path.join(repo, ".overhaul")
-    out_path = os.path.join(ovh, "land.out")
-    wt = os.path.join(ovh, "wt", "land")
+    out_path = os.path.join(ovh, f"land-{fid}.out" if stack else "land.out")
+    wt = os.path.join(ovh, "wt", f"land-{fid}" if stack else "land")
     branch = f"fn/{fid}"
 
     main_sha = git(repo, "rev-parse", "--verify", f"refs/heads/{main}^{{commit}}").stdout.strip()
@@ -322,7 +330,27 @@ def land(repo, fid, main, timeout):
     if merged.returncode != 0:
         git(wt, "merge", "--abort", check=False)
         raise LandFail(f"merge conflict merging {main} into {branch}")
+    plain = git(wt, "rev-parse", "HEAD").stdout.strip()
+    stacked = [s for s in stack if s in rows and rows[s]["status"] != "proven"]
+    for sid in stacked:
+        got = git(wt, "merge", "-q", "--no-edit", "-m", f"land {fid}: stack fn/{sid}", f"refs/heads/fn/{sid}",
+                  check=False)
+        if got.returncode != 0:  # overlaps after all: land unstacked, commit_land regates on the new main
+            git(wt, "merge", "--abort", check=False)
+            git(wt, "checkout", "-q", "--detach", plain)
+            stacked = []
+            break
+    ctx = dict(fid=fid, wt=wt, out_path=out_path, branch=branch, main_sha=main_sha, fn_sha=fn_sha,
+               commands=commands, fpath=fpath, rows=rows, mine=mine, stacked=stacked)
+    gate_tree(ctx, rows, stacked, timeout)
+    ctx["gated"] = git(wt, "rev-parse", "HEAD").stdout.strip()
+    return ctx
 
+
+def gate_tree(ctx, rows, extra, timeout):
+    """Steps 4 and 5 on the tree checked out in ctx's worktree: whole-tree commands, this function's acceptance,
+    then every proven row (and every stacked row in `extra`) still passes."""
+    wt, out_path, commands, fid = ctx["wt"], ctx["out_path"], ctx["commands"], ctx["fid"]
     for name in WHOLE_TREE:
         cmd = commands.get(name)
         if not cmd:
@@ -333,19 +361,48 @@ def land(repo, fid, main, timeout):
             raise LandFail(f"{name} failed (exit {code}) on merged tree: {tail}")
 
     # GREEN AFTER, then no regression of proven rows
-    for node, cmd in mine:
+    for node, cmd in ctx["mine"]:
         code, tail = run(cmd, wt, out_path, timeout)
         if code != 0:
             raise LandFail(f"acceptance still red after merge: {node} (exit {code}): {tail}")
     for rid, row in rows.items():
-        if row["status"] != "proven" or rid == fid:
+        if (row["status"] != "proven" and rid not in extra) or rid == fid:
             continue
         for node, cmd in acceptance_cmds(commands["acceptance"], row["acceptance"]):
             code, tail = run(cmd, wt, out_path, timeout)
             if code != 0:
                 raise LandFail(f"regression: proven {rid} {node} fails (exit {code}): {tail}")
 
+
+def commit_land(repo, ctx, main, timeout):
+    """Step 6 under the lock. When main has not moved and nothing was stacked, the gated tree lands as is. When
+    main moved, main is merged in: if every stacked function landed and nothing else did, the tree equals the gated
+    one (FUNCTIONS.md aside) and no gate reruns; otherwise the branch is merged with main afresh and gated again.
+    main only fast-forwards, and only to a tree the gate passed."""
+    wt, fpath, fid, branch = ctx["wt"], ctx["fpath"], ctx["fid"], ctx["branch"]
+    cur = git(repo, "rev-parse", "--verify", f"refs/heads/{main}^{{commit}}").stdout.strip()
+    if cur != ctx["main_sha"] or ctx["stacked"]:
+        now = parse_functions(git(repo, "show", f"{cur}:{fpath}").stdout)
+        before = {r for r, row in ctx["rows"].items() if row["status"] == "proven"}
+        after = {r for r, row in now.items() if row["status"] == "proven"}
+        if fid in after:
+            raise LandFail(f"function {fid} already proven")
+        stack_ok = bool(ctx["stacked"]) and after - before == set(ctx["stacked"])
+        git(wt, "checkout", "-q", "--detach", ctx["gated"] if stack_ok else ctx["fn_sha"])
+        merged = git(wt, "merge", "-q", "--no-edit", "-m", f"land {fid}: merge {main} into {branch}", cur,
+                     check=False)
+        if merged.returncode != 0:
+            git(wt, "merge", "--abort", check=False)
+            raise LandFail(f"merge conflict merging {main} into {branch}")
+        same = stack_ok and git(wt, "diff", "--quiet", ctx["gated"], "HEAD", "--", ".",
+                                f":(exclude){fpath}", check=False).returncode == 0
+        ctx["regated"] = not same
+        if not same:  # main moved by something the gate did not see: gate the real tree, under the lock
+            gate_tree(ctx, now, (), timeout)
+        ctx["main_sha"] = cur
+
     # The land commit: status proven, then main and the branch fast-forward to it
+    main_sha, fn_sha = ctx["main_sha"], ctx["fn_sha"]
     fp = os.path.join(wt, fpath)
     with open(fp, encoding="utf-8", newline="") as f:
         text = f.read()
@@ -465,6 +522,30 @@ def state_path(repo):
     return os.path.join(repo, rel or ".overhaul/state.json")
 
 
+def wait_stack(repo, main, fpath, stack, log_at, timeout):
+    """Wait, without the lock, until every stacked function is proven on main or has a land_fail logged since
+    byte `log_at` of log.jsonl. commit_land checks the outcome; this only avoids taking the lock too early."""
+    end, log = time.monotonic() + timeout, os.path.join(repo, ".overhaul", "log.jsonl")
+    while stack and time.monotonic() < end:
+        rows = parse_functions(git(repo, "show", f"{main}:{fpath}", check=False).stdout)
+        failed = set()
+        try:
+            with open(log, "rb") as f:
+                f.seek(log_at)
+                for line in f.read().decode("utf-8", errors="replace").splitlines():
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(rec, dict) and rec.get("event") == "land_fail":
+                        failed.add(rec.get("fn"))
+        except OSError:
+            pass
+        if all(s in failed or rows.get(s, {}).get("status") == "proven" for s in stack):
+            return
+        time.sleep(0.5)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", required=True)
@@ -473,8 +554,13 @@ def main(argv=None):
     ap.add_argument("--wait", type=float, default=30.0, help="seconds to wait for .overhaul/lock")
     ap.add_argument("--timeout", type=float, default=1800.0, help="seconds per command")
     ap.add_argument("--polish", action="store_true", help="land a polish fix branch (no FUNCTIONS row)")
+    ap.add_argument("--stack", default="", help="ids of in-flight lands (disjoint footprints) to gate on top of; "
+                    "the gate runs without the lock, which is taken only to commit")
     a = ap.parse_args(argv)
     repo = os.path.abspath(a.repo)
+    stack = [x.strip() for x in a.stack.split(",") if x.strip()]
+    if stack and not a.polish:
+        return main_stacked(repo, a, stack)
 
     if not acquire_lock(repo, a.wait):
         try:
@@ -489,7 +575,45 @@ def main(argv=None):
             return main_polish(repo, a.fid, a.main, a.timeout)
         finally:
             release_lock(repo)
-    start = time.monotonic()
+    return finish(repo, a, time.monotonic(), lambda: land(repo, a.fid, a.main, a.timeout))
+
+
+def functions_path(repo, main):
+    src = git(repo, "show", f"{main}:overhaul.toml", check=False).stdout
+    try:
+        return tomllib.loads(src).get("paths", {}).get("functions", "spec/FUNCTIONS.md")
+    except tomllib.TOMLDecodeError:
+        return "spec/FUNCTIONS.md"
+
+
+def main_stacked(repo, a, stack):
+    """--stack: gate outside the lock on main + the stacked branches, wait for their lands, then commit under it.
+    If that gate fails, a stacked branch may be the cause: once the stack is done it lands alone, gated under the
+    lock on main as it is then (a plain land)."""
+    start, log = time.monotonic(), os.path.join(repo, ".overhaul", "log.jsonl")
+    log_at = os.path.getsize(log) if os.path.exists(log) else 0
+    try:
+        ctx = gate_branch(repo, a.fid, a.main, a.timeout, stack)
+    except Exception:  # noqa: BLE001 - LandFail or a crash: retried once as a plain land below
+        ctx = None
+    wait_stack(repo, a.main, functions_path(repo, a.main), stack if ctx is None else ctx["stacked"], log_at,
+               a.timeout)
+    if not acquire_lock(repo, a.timeout):
+        print("lock held: .overhaul/lock")
+        return 1
+
+    def step():
+        if ctx is None:
+            sha, proven = land(repo, a.fid, a.main, a.timeout)
+            return sha, proven, " (stacked gate failed; gated alone on the new main)"
+        sha, proven = commit_land(repo, ctx, a.main, a.timeout)
+        how = "regated on the new main" if ctx.get("regated") else "no second gate"
+        return sha, proven, f" (stacked on {', '.join(ctx['stacked']) or 'nothing'}, {how})"
+    return finish(repo, a, start, step)
+
+
+def finish(repo, a, start, step):
+    """Run `step` (the land) under the held lock, record state.json and log.jsonl, then release the lock."""
     try:
         spath = state_path(repo)
         try:
@@ -498,8 +622,8 @@ def main(argv=None):
             print(f"state.json unreadable: {e}")
             return 1
         try:
-            sha, proven = land(repo, a.fid, a.main, a.timeout)
-            ok, detail = True, f"{a.main} -> {sha[:12]}"
+            sha, proven, *note = step()
+            ok, detail = True, f"{a.main} -> {sha[:12]}" + "".join(note)
         except LandFail as e:
             ok, detail = False, str(e)
         except Exception as e:  # noqa: BLE001 - any crash is one reason line, main untouched

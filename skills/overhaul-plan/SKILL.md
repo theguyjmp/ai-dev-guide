@@ -36,6 +36,7 @@ FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status 
   phase = integer from 1; deps = comma-separated ids or `-`; entry = the public CLI command, route or UI action;
   acceptance = `tests/acceptance/<f>.py::<test>`, `;`-separated; status = planned|building|review|landing|proven|needs-plan.
   Optional `files` column before status: the function's own files, comma-separated, inside its module's Paths.
+  Optional `needs`: `stub` (default: builds against the dep's stub at once), `behaviour`, or `F03:behaviour, F04:stub`.
 ```
 - files: give each function its own file(s) (`src/shop/cart/add.py`); siblings build at once only when their files do
   not overlap. A file every function edits (an `__init__.py` export list, a registry) goes on the module's `Shared:`
@@ -188,13 +189,12 @@ def test_f04_cart_add(tmp_path):
 Good: only public commands of F04 and its deps, its own data dir, what the user sees plus an error case, red today
 (`shop` does not exist), and `-k test_f04_cart_add` runs exactly it. Bad: importing `shop.cart`, a mocked store, or
 checking only the exit code.
-
 ## Rules
 - The plan is done only at PLAN OK: every function has a public entry, an acceptance test that exists and fails now, and deps in the same or an earlier phase [by plan_validate.py --run].
 - Acceptance tests reach the product only through `_entry.py`: no product imports, mocks or fakes [by entry_lint.py].
 - The module graph is acyclic and modules import each other only through `Public:` names [by check_cycles.py].
 - Each cross-cutting policy has one owner, each domain rule one function, every concurrent writer a concurrent test and every boundary a negative test [by plan_validate.py].
 - Lint enforces line length and the strict set, no 20+ char literal is written twice, functions stay within 30 lines, constants sit at the top and no fixture is copied [by plan_validate.py, dup_literals.py and shape_check.py].
-- The longest deps chain is at most max(4, ceil(N/4)) functions, or `[plan] max_depth`; each link lands one after another [by plan_validate.py].
+- With `needs`, the plan commit lands a stub per function in its files (signatures, types, docstrings, bodies raising NotImplementedError) that imports; the longest chain of blocking (`behaviour`) deps is at most max(4, ceil(N/4)), or `[plan] max_depth` [by plan_validate.py].
 - A function counts only when its test is red on main, green after the merge, and every proven test stays green [by land.py].
 - Builders never edit tests/acceptance or leave their module's Paths [by drive.py's brief and the blind review].
