@@ -1,5 +1,18 @@
 # overhaul-build changelog
 
+## Rust plan and land path, 2026-11-08
+- rust_src.py (new): a stdlib Rust lexer (comments dropped, literals as one token) with fn spans, #[test] flags,
+  calls, `#[cfg(test)]` and `proptest!` spans.
+- entry_match.py: Rust acceptance tests are matched against cli/http entries; new `lib: <crate>::<path>::<fn>` entry;
+  a CLI row whose .rs tests never run the built binary (`CARGO_BIN_EXE_` / `cargo_bin(`) is a problem.
+- plan_validate.py: acceptance may be `tests/acceptance/<f>.rs::<test>` (a `#[test] fn`), each .rs file a root
+  Cargo.toml `[[test]]` named by its stem; .rs stubs call `todo!()`/`unimplemented!()`; a clippy lint needs
+  `-D warnings` and `--all-targets`; cargo lint-green gets 1200 s; no conftest.py for an all-Rust plan; property tests
+  are 1 to 3 `#[test]` fns in `proptest!` in tests/property/test_<id>.rs; --run fills `{stem}`.
+- land.py/drive.py: the acceptance template takes `{stem}`; the build brief shows the gate's exact commands; the Rust
+  probe hands mutate.py the module's `#[cfg(test)]` files, `<path>/tests` dirs and .rs property files.
+- anchors.py: every `tests/**.rs` file is an anchor; `property_file(fid, ".rs")`. Python behaviour unchanged.
+
 ## Rust probe, 2026-11-08
 - mutate.py: when every --paths entry is Rust, the probe runs cargo-mutants on its own temp copy (never --in-place),
   samples --max-mutants of the listed mutants with --seed and runs only those; --tests map to cargo test targets

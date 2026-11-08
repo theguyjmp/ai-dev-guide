@@ -26,15 +26,14 @@ Reuse an overhaul-check report's sizes and duplication if one exists. Launch thr
 `git init -b main <rebuild>`, same language and stack as `<old>` unless the owner says otherwise. Add `spec/`,
 `src/<pkg>/__init__.py` (empty), `tests/acceptance/`, `tests/unit/test_smoke.py` importing `<pkg>`, a `.gitignore`
 with the Python caches and `.overhaul/` (never committed), and `spec/OLD-ENTRIES.txt`, Step 1's entries one per line. `pyproject.toml` holds only `[tool.pytest.ini_options]`
-with `pythonpath = ["src", "tests/acceptance"]` and `addopts = "--import-mode=importlib"` (repeated test file names
-never collide). Never copy old code into the rebuild.
+with `pythonpath = ["src", "tests/acceptance"]` and `addopts = "--import-mode=importlib"` (repeated test file names never collide). Never copy old code into the rebuild.
 
 ## Step 3. spec/FUNCTIONS.md
 plan_validate.py checks the table in exactly this form:
 ```
 FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status | files | needs |`
   phase = integer from 1; deps = comma-separated ids or `-`; entry = the public CLI command, route or UI action;
-  acceptance = `tests/acceptance/<f>.py::<test>`, `;`-separated; status = planned|building|review|landing|proven|needs-plan.
+  acceptance = `tests/acceptance/<f>.py::<test>` (Rust: `<f>.rs`), `;`-separated; status = planned|building|review|landing|proven|needs-plan.
   files = the function's own files (its stub), comma-separated, inside its module's Paths. REQUIRED.
   needs = `stub` (default), `behaviour`, or `F03:behaviour, F04:stub` per dep. REQUIRED.
 ```
@@ -43,8 +42,7 @@ FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status 
   line, never in a files cell. Each function's files hold its stub from the plan commit (Step 5).
 - needs: write `stub`: the dependent builds at once against the dep's stub. `behaviour` only for a dependent whose
   acceptance test needs the dep's real output; the chain of `behaviour` edges is capped by the depth limit.
-- id: `F01`, `F02`, ... unique, never reused. Phase 1 is the smallest set that makes the product usable end to end
-  (under 3k lines, use 1 or 2 phases).
+- id: `F01`, `F02`, ... unique, never reused. Phase 1 is the smallest set that makes the product usable end to end (under 3k lines, use 1 or 2 phases).
 - module: one from ARCHITECTURE. deps: each in the same or an earlier phase, and only the functions that build an API
   item this one's code calls; shared types, the store and errors come from the foundation, never from a sibling. Over
   the depth limit, move what siblings share into the foundation; never drop a real call.
@@ -142,7 +140,9 @@ retries_per_function = 1
 mutation_floor = 0.9
 max_mutants = 40
 ```
-Rust: `cargo clippy -- -D warnings`, `cargo test`, `cargo metadata`; JS: `npx eslint .`, `npx jscpd src`, `node --test`.
+Rust (plan_validate checks it): acceptance in `tests/acceptance/<f>.rs`, each a root Cargo.toml `[[test]]` named by its stem, through `mod entry;`;
+stubs `todo!()`; unit tests in-crate `#[cfg(test)] mod tests`; property `tests/property/test_<id>.rs` with `proptest!`; no conftest.py. Commands: test `cargo test -q --workspace --lib --bins`,
+acceptance `cargo test -q --test {stem} -- --exact {test}`, property `cargo test -q --test {stem}`, lint `cargo clippy -q --workspace --all-targets -- -D warnings`, the scripts on `crates src`. JS: `npx eslint .`, `npx jscpd src`, `node --test`.
 Install what is missing now (`py -3 -m pip install ruff pylint pytest`); every command but acceptance exits 0 on the skeleton.
 
 ## Step 7. Validate until PLAN OK

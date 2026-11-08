@@ -13,6 +13,10 @@ Write, for each row:
    exit code, HTTP body) plus at least one error case; read results back only through this entry or a dep's entry.
    More cases are `@pytest.mark.parametrize` cases of the one test. Fixtures come from tests/conftest.py; add none.
 3. Property: tests/property/test_<id>.py with 1 to 3 Hypothesis `@given` tests through `_entry.py`, red now.
+Rust plan: stub bodies are `todo!()`, the files compile (`cargo check --workspace --all-targets`); acceptance tests are
+`#[test] fn`s in tests/acceptance/<f>.rs through `mod entry;` (tests/acceptance/entry/mod.rs), each file a root
+Cargo.toml `[[test]]` named after its stem; property tests are 1 to 3 `#[test] fn`s inside `proptest!` in
+tests/property/test_<id>.rs, also a `[[test]]`. Check with `cargo test --no-run --workspace` instead of pytest.
 
 Never edit spec/, overhaul.toml, conftest.py, _entry.py or another module's files: report a needed change instead.
 Check before handing back: `py -3 -m pytest --collect-only -q tests` exits 0, and your tests fail (the product is

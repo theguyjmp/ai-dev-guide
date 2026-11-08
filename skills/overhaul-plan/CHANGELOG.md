@@ -1,5 +1,10 @@
 # overhaul-plan changelog
 
+## Rust plans, 2026-11-08
+Step 6 gives the Rust command set and layout (acceptance in tests/acceptance/<f>.rs as root `[[test]]` targets
+named by stem, `{stem}` in the commands, `todo!()` stubs, in-crate unit tests, proptest property files, no
+conftest.py); the FUNCTIONS format accepts `<f>.rs`; module-brief.md carries the Rust stub, test and proptest wording.
+
 ## v3 parallel plan: stubs and needs required, 2026-11-07
 Trial 6: one chat wrote 23 functions' tests serially (22 minutes), and left out the optional `needs`/`files`
 columns, so no stubs landed and every dep blocked (3 of 6 builders ran). Now `files` and `needs` are required

@@ -22,7 +22,7 @@ Every start or resume, in at most 15 tool calls; an interactive turn ends with d
 
 ## M0: configure, build no machinery
 The harness is the machinery. M0 adds no scheduler entry, bot, hook, guard, wait script, status file or home-grown lint; a missing check is a standard tool named in overhaul.toml.
-1. overhaul.toml names the stack's standard tools (Python: ruff, pylint duplicate-code, pytest; Rust: clippy, cargo test, a cycle check from `cargo metadata`; JS: eslint, jscpd, node --test), and every `<skill>` in it resolves to an installed path.
+1. overhaul.toml names the stack's standard tools (Python: ruff, pylint duplicate-code, pytest; Rust: clippy, cargo test, a cycle check from `cargo metadata`; JS: eslint, jscpd, node --test), and every `<skill>` in it resolves to an installed path. Rust acceptance runs one test per command through `{stem}` (the root `[[test]]` target named by the file stem: `cargo test -q --test {stem} -- --exact {test}`); Rust unit tests are in-crate `#[cfg(test)]` mods, which the probe hands mutate.py with the module's `<path>/tests` dirs and `tests/property/test_<id>.rs`; every `tests/**.rs` file is an anchor.
 2. `.gitignore` covers the scratch drive.py writes under `.overhaul/`, its builder worktrees above all, so the whole-tree checks never scan them.
 3. test, lint, dup, cycles and entry_lint each exit 0 on main. A configuration failure (a missing tool, a wrong path) is fixed in overhaul.toml; a real finding is fixed now, by the tool's own fixer (`ruff check --fix`) or a plan fix. Never loosen a check or a limit to get green.
 4. Once plan_validate prints PLAN OK, commit it as `m0: configure`.

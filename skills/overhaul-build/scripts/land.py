@@ -17,8 +17,9 @@ R/.overhaul/wt/land, never in R's own working tree.
   6. One commit sets the row's status cell to `proven` in FUNCTIONS.md; main fast-forwards to it (and fn/<ID> too).
 
 FUNCTIONS.md rows: | id | phase | module | deps | entry | acceptance | status |, acceptance =
-`tests/acceptance/<f>.py::<test>` items separated by `;`. The acceptance command template takes {test} (the test name),
-{file} (the test file) or {node} (file::test); `<skill>` in any command is this skill's directory.
+`tests/acceptance/<f>.py::<test>` (or `<f>.rs`) items separated by `;`. The acceptance command template takes {test}
+(the test name), {file} (the test file), {stem} (the file name without suffix: a Rust [[test]] target) or {node}
+(file::test); `<skill>` in any command is this skill's directory.
 
 Writes the untracked R/.overhaul/state.json (functions[ID]: status proven on success, last_reason on failure; attempts
 are drive.py's) and appends one line to R/.overhaul/log.jsonl. Any failure prints one reason line, exits 1 and leaves
@@ -38,6 +39,7 @@ import subprocess
 import sys
 import time
 import tomllib
+from pathlib import PurePosixPath
 
 import anchors  # beside this script
 
@@ -233,10 +235,10 @@ def acceptance_cmds(template, nodes):
     cmds = []
     for node in nodes:
         file, _, name = node.partition("::")
-        if not any(p in template for p in ("{test}", "{file}", "{node}")):
+        if not any(p in template for p in ("{test}", "{file}", "{node}", "{stem}")):
             cmds.append((node, f"{fill(template)} {node}"))
         else:
-            cmds.append((node, fill(template, test=name or file, file=file, node=node)))
+            cmds.append((node, fill(template, test=name or file, file=file, node=node, stem=PurePosixPath(file).stem)))
     return cmds
 
 

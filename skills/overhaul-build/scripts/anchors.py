@@ -2,7 +2,7 @@
 
     py -3 anchors.py --repo R --base <main sha> --head <branch sha> [--functions spec/FUNCTIONS.md] [--plan <sha>]
 
-A test file (under tests/, named test_*.py or *_test.py) that exists in the plan commit may not be modified, renamed or
+A test file (under tests/, named test_*.py or *_test.py, or any .rs file there) that exists in the plan commit may not be modified, renamed or
 deleted by a builder branch; new test files are fine. The plan commit is overhaul.toml [probe] plan_commit at --base,
 else the first commit that added the FUNCTIONS file. Prints each touched anchor and exits 1, or exits 0.
 land.py calls touched_anchors() for every land, polish and probe fix included.
@@ -14,9 +14,10 @@ import sys
 import tomllib
 
 
-def property_file(fid):
-    """The plan's Hypothesis property tests for function `fid`: tests/property/test_<id>.py (F01 -> test_f01.py)."""
-    return f"tests/property/test_{re.sub(r'[^a-z0-9]+', '_', fid.lower()).strip('_')}.py"
+def property_file(fid, suffix=".py"):
+    """The plan's property tests for function `fid`: tests/property/test_<id>.py (F01 -> test_f01.py); Rust plans
+    pass suffix=".rs" (proptest)."""
+    return f"tests/property/test_{re.sub(r'[^a-z0-9]+', '_', fid.lower()).strip('_')}{suffix}"
 
 
 def git(repo, *args):
@@ -26,7 +27,10 @@ def git(repo, *args):
 
 
 def is_test(path):
+    """A test file: tests/**/test_*.py or tests/**/*_test.py, or any tests/**.rs (cargo test targets and helpers)."""
     name = path.rsplit("/", 1)[-1]
+    if path.startswith("tests/") and name.endswith(".rs"):
+        return True
     return path.startswith("tests/") and name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
 
 

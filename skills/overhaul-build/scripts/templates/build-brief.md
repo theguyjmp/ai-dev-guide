@@ -59,7 +59,8 @@ land.py also refuses any branch that edits them, so such an edit can never reach
    test happens to use, no hard-coded expected outputs, no stand-ins, stubs, mocks or fakes in product code.
    A blind reviewer reads your diff and fails any of these.
 3. Add unit tests for the new code under `tests/unit/` (inside the allowed unit-test path above). They test the
-   module's own behavior and must pass.
+   module's own behavior and must pass. Rust: unit tests are an in-crate `#[cfg(test)] mod tests` in the
+   function's own files instead.
 4. Follow the Policies above. Shared state goes through the persistence owner's API (its lock and atomic
    write), and errors are raised, reported and logged the way the Errors policy says. If you write shared state
    that two requests or processes can reach at once, add a unit test that writes it from several threads and
@@ -76,8 +77,8 @@ land.py also refuses any branch that edits them, so such an edit can never reach
    into it (`git merge main`), resolve any conflict inside the allowed paths, and rerun the commands above until
    they pass, so a land conflict can only come from the seconds between. drive.py merges main and reruns the gate
    again before review. Do not push, do not switch branches, do not touch any other worktree or the main checkout.
-   Code that calls a dependency still raising NotImplementedError builds against its stub's signature and
-   docstring; do not implement another function's stub.
+   Code that calls a dependency still raising NotImplementedError (Rust: `todo!()` or `unimplemented!()`) builds
+   against its stub's signature and docstring; do not implement another function's stub.
 9. If the acceptance test fails because code OUTSIDE the allowed paths is wrong (a landed dependency's bug,
    not a stub), do not work around it and do not edit it. Prove it with the failing test output, then end your
    final message with a third line `BLOCKED-BY: <path>:<line> <the input, the wrong result, the right result>`.

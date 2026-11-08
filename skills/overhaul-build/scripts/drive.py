@@ -951,8 +951,8 @@ class Driver:
     def commands_text(self, f: Fn) -> str:
         lines = []
         for name, cmd in self.cfg["commands"].items():
-            if "{test}" in cmd:
-                lines += [f"- {name}: `{cmd.replace('{test}', a.split('::')[-1])}`" for a in f.acceptance]
+            if "{test}" in cmd:  # the exact commands the gate runs ({test}, {file}, {stem}, {node} filled)
+                lines += [f"- {name}: `{c}`" for _, c in land_mod.acceptance_cmds(cmd, f.acceptance)]
             else:
                 lines.append(f"- {name}: `{cmd}`")
         return "\n".join(lines) or "(overhaul.toml has no [commands])"
@@ -1963,9 +1963,19 @@ class Driver:
         return started
 
     def probe_tests(self, module: str) -> list[str]:
-        """The module's unit test dir and its functions' property test files that exist on main."""
-        cands = [f"tests/unit/{module}"] + [land_mod.anchors.property_file(f.id) for f in self.order
-                                            if f.module == module]
+        """The module's unit test dir and its functions' property test files that exist on main. A Rust module (.rs
+        files and no .py in its Paths) gives instead: its .rs files holding `#[cfg(test)]` (mutate.py runs --lib for a
+        path under src/), each `<path>/tests` dir and its functions' tests/property/test_<id>.rs ([[test]] targets)."""
+        paths = module_paths(module_section(self.arch, module), module)
+        tree = run(["git", "ls-tree", "-r", "--name-only", self.main, "--", *paths], self.repo).stdout.split()
+        if any(p.endswith(".rs") for p in tree) and not any(p.endswith(".py") for p in tree):
+            grep = run(["git", "grep", "-l", "-F", "-e", "#[cfg(test)]", self.main, "--", *paths], self.repo)
+            units = [ln.split(":", 1)[1] for ln in grep.stdout.splitlines() if ln.endswith(".rs") and ":" in ln]
+            cands = units + [p.rstrip("/") + "/tests" for p in paths if not p.endswith(".rs")]
+            cands += [land_mod.anchors.property_file(f.id, ".rs") for f in self.order if f.module == module]
+        else:
+            cands = [f"tests/unit/{module}"] + [land_mod.anchors.property_file(f.id) for f in self.order
+                                                if f.module == module]
         return [c for c in cands
                 if run(["git", "cat-file", "-e", f"{self.main}:{c}"], self.repo).returncode == 0]
 

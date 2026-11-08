@@ -7,7 +7,7 @@ line per problem, then `PLAN OK n functions` (exit 0) or `PLAN FAIL k problems` 
 
 FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status | files | needs |`
   phase = integer from 1; deps = comma-separated ids or `-`; entry = the public CLI command, route or UI action;
-  acceptance = `tests/acceptance/<f>.py::<test>`, `;`-separated; status = planned|building|review|landing|proven|needs-plan.
+  acceptance = `tests/acceptance/<f>.py::<test>` (Rust: `<f>.rs`), `;`-separated; status = planned|building|review|landing|proven|needs-plan.
   files = the function's own files (its stub), comma-separated, inside its module's Paths. REQUIRED.
   needs = `stub` (default), `behaviour`, or `F03:behaviour, F04:stub` per dep. REQUIRED.
 ARCHITECTURE.md: `## Module <name>` sections, each with `Paths:` and `Depends on:` (`-` or `none` = none), and one
@@ -21,7 +21,9 @@ ARCHITECTURE.md: `## Module <name>` sections, each with `Paths:` and `Depends on
 overhaul.toml [commands] must hold test, acceptance (with a `{test}` placeholder), lint, dup, literals, shape, cycles
   and entry_lint. A ruff lint must select E501 (or E) and the strict set E W F I B UP SIM RUF ARG A ANN201 PLR0915,
   in the command or the ruff config (ruff.toml, .ruff.toml or pyproject.toml [tool.ruff]). Python acceptance tests
-  need a shared tests/conftest.py.
+  need a shared tests/conftest.py. A clippy lint must hold `-D warnings` and `--all-targets` (or `--tests`).
+Rust plans: each .rs acceptance or property file is a root Cargo.toml `[[test]]` whose name is the file stem
+  (`{stem}` in the commands), a test is a `#[test] fn`, and a .rs stub calls `todo!()` or `unimplemented!()`.
 
 Problems (each is one line):
   - a row is malformed (cells, id, phase, deps, acceptance, status, duplicate id);
@@ -44,9 +46,10 @@ Problems (each is one line):
   - the longest deps chain is over [plan] max_depth, default max(4, ceil(N/4)); depth and widest level print to stderr;
   - with --run: a non-proven function's acceptance test PASSES (it must be red before the build), or a proven one FAILS.
   - a Python plan (acceptance in .py files) without tests/property/test_<id>.py per function holding 1 to 3 Hypothesis
-    tests (`def test_*` under `@given`); [probe] property_tests = false turns this off. With --run and a
-    [commands].property template ({file} = the property file), a non-proven function's property file must FAIL and a
-    proven one must PASS. Planned tests are anchors: land.py rejects a branch that modifies one (anchors.py).
+    tests (`def test_*` under `@given`); a Rust plan without tests/property/test_<id>.rs holding 1 to 3 `#[test]` fns
+    inside `proptest!`; [probe] property_tests = false turns this off. With --run and a [commands].property template
+    ({file} = the property file, {stem} its stem), a non-proven function's property file must FAIL and a proven one
+    must PASS. Planned tests are anchors: land.py rejects a branch that modifies one (anchors.py).
 Python standard library only.
 """
 import argparse
@@ -60,6 +63,7 @@ from pathlib import Path
 import anchors  # beside this script
 import drive  # beside this script: parse_needs, the one reading of the needs cell
 import entry_match  # beside this script
+import rust_src  # beside this script
 
 COLUMNS = ["id", "phase", "module", "deps", "entry", "acceptance", "status"]
 STATUSES = {"planned", "building", "review", "landing", "proven", "needs-plan"}
@@ -76,7 +80,7 @@ WRITE_ROUTE = re.compile(r"\b(POST|PUT|PATCH|DELETE)\b")
 SERIAL = re.compile(r"single[- ]threaded|serial", re.I)
 RUFF_STRICT = ("E", "W", "F", "I", "B", "UP", "SIM", "RUF", "ARG", "A", "ANN201", "PLR0915")
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-ACCEPT = re.compile(r"^tests/acceptance/[\w./-]+\.py(::[A-Za-z_]\w*)+$")
+ACCEPT = re.compile(r"^tests/acceptance/[\w./-]+\.(py|rs)(::[A-Za-z_]\w*)+$")
 NO_ENTRY = {"", "-", "--", "none", "n/a", "na", "tbd", "todo", "?"}
 SEPARATOR = re.compile(r"^:?-+:?$")
 STUB_COLUMNS = ("files", "needs")  # required beside COLUMNS, in any order after them
@@ -239,6 +243,61 @@ def find_cycles(graph):
     return cycles
 
 
+def rust_tokens(path):
+    return rust_src.tokens(Path(path).read_text(encoding="utf-8", errors="replace"))
+
+
+def rust_test_fns(path):
+    """Names of the `#[test]` fns in a Rust file."""
+    return {f["name"] for f in rust_src.functions(rust_tokens(path)) if f["test"]}
+
+
+def rust_stubbed(path):
+    """True when a Rust file calls `todo!` or `unimplemented!` (as code, not in a comment or string)."""
+    toks = rust_tokens(path)
+    return any(k == "ident" and t in ("todo", "unimplemented") and toks[i + 1][1] == "!"
+               for i, (k, t, _) in enumerate(toks[:-1]))
+
+
+def proptest_tests(path):
+    """The number of `#[test]` fns inside `proptest!` invocations in a Rust file."""
+    toks = rust_tokens(path)
+    spans = rust_src.macro_spans(toks, "proptest")
+    return sum(1 for f in rust_src.functions(toks) if f["test"] and any(a < f["start"] < b for a, b in spans))
+
+
+def cargo_test_targets(repo):
+    """{path: name} of the root Cargo.toml `[[test]]` targets."""
+    import tomllib
+    try:
+        conf = tomllib.loads((Path(repo) / "Cargo.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(t.get("path", "")).replace("\\", "/").removeprefix("./"): str(t.get("name", ""))
+            for t in conf.get("test") or [] if isinstance(t, dict)}
+
+
+def cargo_target_problem(rel, targets):
+    """A problem line when the Rust test file `rel` is not a [[test]] named after its stem, else ''."""
+    stem = Path(rel).stem
+    if targets.get(rel) == stem:
+        return ""
+    return f'{rel} is not a cargo test target: add [[test]] name = "{stem}" path = "{rel}" to the root Cargo.toml'
+
+
+def check_cargo_targets(rows, repo, problems, flabel):
+    """Every .rs acceptance file is a root Cargo.toml [[test]] named after its stem (the `{stem}` placeholder)."""
+    targets, seen = cargo_test_targets(repo), set()
+    for r in rows:
+        for item in (bare(x) for x in r["acceptance"].split(";")):
+            rel = item.split("::")[0]
+            if rel.endswith(".rs") and ACCEPT.match(item) and rel not in seen and (repo / rel).is_file():
+                seen.add(rel)
+                bad = cargo_target_problem(rel, targets)
+                if bad:
+                    problems.append(f"{flabel}:{r['line']} {bare(r['id'])}: {bad}")
+
+
 def check_rows(rows, mods, repo, problems, flabel):
     """Per-row checks. Returns {id: row} of the rows with a usable id, and each row's parsed `tests` [(file, def name)]."""
     by_id, phases = {}, {}
@@ -303,6 +362,11 @@ def check_rows(rows, mods, repo, problems, flabel):
             src = repo / parts[0]
             if not src.is_file():
                 problems.append(f"{where}: acceptance file {parts[0]} is missing")
+            elif parts[0].endswith(".rs"):
+                if parts[-1] in rust_test_fns(src):
+                    r["tests"].append((item, parts[-1]))
+                else:
+                    problems.append(f"{where}: {parts[0]} has no #[test] fn {parts[-1]}")
             elif not re.search(rf"^[ \t]*(?:async[ \t]+)?def[ \t]+{re.escape(parts[-1])}[ \t]*\(",
                                src.read_text(encoding="utf-8", errors="replace"), re.M):
                 problems.append(f"{where}: {parts[0]} has no def {parts[-1]}")
@@ -352,7 +416,8 @@ def module_name(path):
 
 def check_stubs(rows, repo, problems, flabel, timeout=120):
     """The plan commit lands an interface stub for every function: each unproven row's files exist, its .py files
-    raise NotImplementedError somewhere (the stub bodies) and import cleanly."""
+    raise NotImplementedError somewhere (the stub bodies) and import cleanly, its .rs files call todo!() or
+    unimplemented!() (the clippy lint-green check compiles them)."""
     mods = []
     for r in rows:
         where = f"{flabel}:{r['line']} {bare(r['id'])}"
@@ -371,7 +436,10 @@ def check_stubs(rows, repo, problems, flabel, timeout=120):
         if py and not any("NotImplementedError" in (repo / f).read_text(encoding="utf-8", errors="replace")
                           for f in py):
             problems.append(f"{where}: no stub in {', '.join(py)}: no body raises NotImplementedError")
-        mods += [module_name(f) for f in py]
+        rs = [f for f in files if f.endswith(".rs")]
+        if rs and not any(rust_stubbed(repo / f) for f in rs):
+            problems.append(f"{where}: no stub in {', '.join(rs)}: no body calls todo!() or unimplemented!()")
+        mods +=[module_name(f) for f in py]
     if not mods:
         return
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(str(repo / d) for d in ("src", ".")))
@@ -644,6 +712,16 @@ def check_ruff(repo, cmd, problems):
         problems.append(f"overhaul.toml: [commands].lint (ruff) misses the strict set: select {' '.join(missing)}")
 
 
+def check_clippy(cmd, problems):
+    """A clippy lint must deny warnings and check every target, so lint-green proves the stubs and tests compile."""
+    if "clippy" not in cmd:
+        return
+    if not re.search(r"(?:-D|--deny)[= ]?\s*warnings\b", cmd):
+        problems.append("overhaul.toml: [commands].lint (clippy) does not deny warnings: end it with `-- -D warnings`")
+    if not re.search(r"--all-targets\b|--tests\b", cmd):
+        problems.append("overhaul.toml: [commands].lint (clippy) does not check the tests: add --all-targets")
+
+
 TEXT_SUFFIXES = (".py", ".md", ".toml", ".json", ".js", ".ts", ".rs", ".txt", ".cfg", ".ini", ".yaml", ".yml")
 CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
@@ -666,14 +744,18 @@ def check_control_chars(repo, problems):
 
 def check_lint_green(repo, cmd, problems, timeout=300):
     """The plan commit (and every manager plan fix) must keep the lint gate green: a red main fails every
-    builder's pre-review gate and parks functions for a fault that is not theirs."""
+    builder's pre-review gate and parks functions for a fault that is not theirs. A cargo lint gets at least 1200 s
+    (a cold build of the dependencies)."""
+    if re.search(r"\bcargo\b", cmd):
+        timeout = max(timeout, 1200)
     try:
         p = subprocess.run(cmd, shell=True, cwd=repo, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         problems.append(f"overhaul.toml: [commands].lint timed out after {timeout}s on the plan tree")
         return
-    missing = "is not recognized as an internal or external command" in p.stderr or "command not found" in p.stderr
+    missing = any(s in p.stderr for s in ("is not recognized as an internal or external command", "command not found",
+                                          "no such command"))
     if p.returncode in (127, 9009) or missing:  # tool not installed here: the toolchain check owns that
         return
     if p.returncode != 0:
@@ -696,10 +778,14 @@ def given_tests(path):
 
 
 def check_property(rows, cfg, repo, problems, flabel):
-    """Python plans: 1 to 3 Hypothesis property tests per function in tests/property/test_<id>.py, written now."""
+    """Python plans: 1 to 3 Hypothesis property tests per function in tests/property/test_<id>.py, written now.
+    Rust plans: 1 to 3 `#[test]` fns inside `proptest!` in tests/property/test_<id>.rs, a root Cargo.toml [[test]]."""
     if (cfg.get("probe") or {}).get("property_tests") is False:
         return
-    if not any(item.split("::")[0].endswith(".py") for r in rows for item, _ in r.get("tests", [])):
+    files = [item.split("::")[0] for r in rows for item, _ in r.get("tests", [])]
+    if not any(f.endswith(".py") for f in files):
+        if any(f.endswith(".rs") for f in files):
+            check_property_rust(rows, repo, problems, flabel)
         return
     for r in rows:
         if not ID.match(r["rid"]):
@@ -712,6 +798,23 @@ def check_property(rows, cfg, repo, problems, flabel):
             problems.append(f"{where}: {rel} does not parse")
         elif not 1 <= n <= 3:
             problems.append(f"{where}: {rel} has {n} @given tests, want 1 to 3")
+        else:
+            r["property"] = rel
+
+
+def check_property_rust(rows, repo, problems, flabel):
+    targets = cargo_test_targets(repo)
+    for r in rows:
+        if not ID.match(r["rid"]):
+            continue
+        rel, where = anchors.property_file(r["rid"], ".rs"), f"{flabel}:{r['line']} {r['rid']}"
+        n = proptest_tests(repo / rel) if (repo / rel).is_file() else None
+        if n is None:
+            problems.append(f"{where}: no property tests: write {rel} with 1 to 3 #[test] fns inside proptest!")
+        elif not 1 <= n <= 3:
+            problems.append(f"{where}: {rel} has {n} #[test] fns inside proptest!, want 1 to 3")
+        elif cargo_target_problem(rel, targets):
+            problems.append(f"{where}: {cargo_target_problem(rel, targets)}")
         else:
             r["property"] = rel
 
@@ -755,6 +858,7 @@ def validate(repo, run=False, timeout=600, notes=None):
     else:
         rows = parse_functions(fun_file.read_text(encoding="utf-8", errors="replace"), problems, paths["functions"])
         check_rows(rows, mods, repo, problems, paths["functions"])
+        check_cargo_targets(rows, repo, problems, paths["functions"])
         problems += entry_match.entry_problems(
             repo, [r for r in rows if r["entry"].strip().strip("`").strip().lower() not in NO_ENTRY], paths["functions"])
         check_needs(rows, problems, paths["functions"])
@@ -771,10 +875,13 @@ def validate(repo, run=False, timeout=600, notes=None):
     if "lint" in cmd:
         before = len(problems)
         check_ruff(repo, cmd["lint"], problems)
+        check_clippy(cmd["lint"], problems)
         if len(problems) == before:  # a lax lint config is the problem to fix first
             check_lint_green(repo, cmd["lint"], problems)
 
-    if (repo / "tests" / "acceptance").is_dir() and not (repo / "tests" / "conftest.py").is_file():
+    accepted = [bare(x).split("::")[0] for r in rows for x in r["acceptance"].split(";") if bare(x)]
+    rust_only = bool(accepted) and all(f.endswith(".rs") for f in accepted)
+    if (repo / "tests" / "acceptance").is_dir() and not rust_only and not (repo / "tests" / "conftest.py").is_file():
         problems.append("tests/conftest.py: missing; scaffold the shared fixtures there, once, for every test file")
     for k in ("cycles", "entry_lint", "literals", "shape"):
         if k in cmd:
@@ -785,7 +892,8 @@ def validate(repo, run=False, timeout=600, notes=None):
     if run and "acceptance" in cmd:
         for r in rows:
             for item, name in r.get("tests", []):
-                code, tail = run_cmd(cmd["acceptance"].replace("{test}", name), repo, timeout)
+                node = f"{item.split('::')[0]}::{name}"  # {test} = the bare test name, {stem} = the file stem
+                code, tail = run_cmd(drive.land_mod.acceptance_cmds(cmd["acceptance"], [node])[0][1], repo, timeout)
                 where = f"{paths['functions']}:{r['line']} {r['rid']}"
                 if r["st"] == "proven" and code:
                     problems.append(f"{where}: proven, but its acceptance {item} FAILS (exit {code})" + (f": {tail}" if tail else ""))
@@ -796,7 +904,8 @@ def validate(repo, run=False, timeout=600, notes=None):
         for r in rows:
             if not r.get("property"):
                 continue
-            code, tail = run_cmd(prop.replace("{file}", r["property"]), repo, timeout)
+            code, tail = run_cmd(prop.replace("{file}", r["property"]).replace("{stem}", Path(r["property"]).stem),
+                                 repo, timeout)
             where = f"{paths['functions']}:{r['line']} {r['rid']}"
             if r["st"] == "proven" and code:
                 problems.append(f"{where}: proven, but its property tests {r['property']} FAIL (exit {code})"
