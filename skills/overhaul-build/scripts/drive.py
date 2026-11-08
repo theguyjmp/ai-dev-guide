@@ -48,6 +48,11 @@ HERE = Path(os.path.abspath(__file__)).parent
 TEMPLATES = HERE / "templates"
 STANDARD = HERE.parent / "references" / "quality-standard.md"
 AUDIT_BRIEF = TEMPLATES / "audit-brief.md"
+CHECKLIST = HERE.parent / "references" / "checklist.md"
+ITEM_LINE = re.compile(r"- ([A-Z]\d+) \[(P0|P1|nit)\] ([^|]*)\|([^|]+)\|(.+)")
+BLOCKING = ("P0", "P1")
+NITS_MAX = 5  # nits per pass: logged, never dispatched
+POLISH_ROUNDS_MAX = 2  # v3: at most 2 checklist fix rounds, whatever [limits] polish_rounds says
 BASE_RULES = (2, 3, 8, 10, 13, 16, 17, 18, 19, 20, 21, 24, 25, 26, 27)
 RULE_TRIGGERS = (  # words in a function's row, module section or acceptance test -> the rules they bring in
     (r"http|server|web|socket|request|port|url", (33, 35)),
@@ -63,7 +68,7 @@ PATHS_LINE = re.compile(r"\W*(?:paths?|files)\W*?[:=]\s*(.+)", re.I)
 SHARED_LINE = re.compile(r"\W*shared\W*?[:=]\s*(.+)", re.I)  # files every function may touch; never a lock
 FILES_COLUMN = "files"  # optional FUNCTIONS.md column: the function's own files, the unit of the build lock
 IN_FLIGHT = ("building", "review", "landing")
-POLISH_KINDS = ("polish_audit", "polish_fix", "polish_review", "polish_land")
+POLISH_KINDS = ("polish_audit", "polish_verify", "polish_fix", "polish_review", "polish_land")
 GREEN_BEFORE = "acceptance already green before change"
 CONFLICT = "merge conflict"  # land.py: "merge conflict merging <main> into fn/<id>"
 # A review fix the builder cannot make: the reviewer's PLAN-GAP line, or "outside (the) allowed paths" on a diff
@@ -176,16 +181,122 @@ def standard_rules() -> dict[int, str]:
     return rules
 
 
-def relevant_rules(text: str) -> str:
-    """The quality-standard rules a function's builder and reviewer must cite: a base set plus keyword triggers."""
-    rules = standard_rules()
-    if not rules:
-        return f"(quality standard missing: {STANDARD.as_posix()})"
+def wanted_rules(text: str) -> set[int]:
+    """The quality-standard rule numbers that apply to a function: a base set plus keyword triggers."""
     want = set(BASE_RULES)
     for pattern, nums in RULE_TRIGGERS:
         if re.search(pattern, text, re.I):
             want.update(nums)
-    return "\n".join(f"- {rules[n]}" for n in sorted(want) if n in rules)
+    return want
+
+
+def relevant_rules(text: str) -> str:
+    """The quality-standard rules a function's builder and reviewer must cite."""
+    rules = standard_rules()
+    if not rules:
+        return f"(quality standard missing: {STANDARD.as_posix()})"
+    return "\n".join(f"- {rules[n]}" for n in sorted(wanted_rules(text)) if n in rules)
+
+
+@dataclass(frozen=True)
+class Item:
+    id: str
+    severity: str  # P0 | P1 | nit
+    rules: tuple[int, ...]
+    question: str
+    decide: str
+
+
+@lru_cache(maxsize=1)
+def checklist() -> tuple[str, dict[str, Item]]:
+    """(version, id -> Item) from references/checklist.md."""
+    text = read_text(CHECKLIST)
+    m = re.search(r"^checklist-version:\s*(\S+)", text, re.M)
+    items = {}
+    for line in text.splitlines():
+        it = ITEM_LINE.match(line)
+        if it:
+            nums = tuple(int(n) for n in re.findall(r"Q(\d+)", it[3]))
+            items[it[1]] = Item(it[1], it[2], nums, it[4].strip(), it[5].strip())
+    return (m[1] if m else "v?"), items
+
+
+def applicable_items(text: str | None) -> list[Item]:
+    """Contract items always, plus the items whose rules apply to the text; None means the whole checklist."""
+    items = list(checklist()[1].values())
+    if text is None:
+        return items
+    want = wanted_rules(text)
+    return [i for i in items if not i.rules or want.intersection(i.rules)]
+
+
+def checklist_text(items: list[Item]) -> str:
+    lines = [f"- {i.id} [{i.severity}] {i.question} Decide: {i.decide}" for i in items]
+    return "\n".join(lines) or f"(checklist missing: {CHECKLIST.as_posix()})"
+
+
+def read_json(path: Path) -> object:
+    try:
+        return json.loads(read_text(path))
+    except ValueError:
+        return None
+
+
+def checklist_nos(raw: object) -> list[dict] | None:
+    """The NO answers of a review or polish result, each with its checklist severity; None if malformed.
+
+    A review result is {"items": [...]}; a polish result is the list itself (an entry is a NO unless it says
+    otherwise). An unknown id is P1: blocking, and verified like any other. NEW-RULE entries are not NOs."""
+    entries = raw.get("items") if isinstance(raw, dict) else raw
+    if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+        return None
+    known, nos = checklist()[1], []
+    for e in entries:
+        cid = str(e.get("id") or e.get("rule") or "?").strip()
+        if str(e.get("answer", "no")).strip().lower() != "no" or cid == "NEW-RULE":
+            continue
+        nos.append({**e, "id": cid, "severity": known[cid].severity if cid in known else "P1"})
+    return nos
+
+
+def where(n: dict) -> str:
+    return f"{n.get('file', '?')}:{n.get('line', '?')}"
+
+
+def format_nos(nos: list[dict]) -> str:
+    return "\n".join(f"- [{n['id']} {n['severity']}] `{where(n)}` {n.get('evidence') or n.get('issue') or ''}"
+                     + (f" -> {n['fix']}" if n.get("fix") else "") for n in nos)
+
+
+def changed_lines(cwd: Path, old: str, new: str) -> dict[str, set[int]] | None:
+    """New-side line numbers each file changed between two commits; None when git cannot diff them."""
+    try:
+        diff = git(cwd, "diff", "-U0", "--no-color", old, new)
+    except DriveError:
+        return None
+    out: dict[str, set[int]] = {}
+    name = ""
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            name = line[6:] if line.startswith("+++ b/") else ""
+            out.setdefault(name, set())
+        elif line.startswith("@@") and name:
+            m = re.match(r"@@ -\S+ \+(\d+)(?:,(\d+))? @@", line)
+            if m:
+                start, count = int(m[1]), int(m[2] if m[2] is not None else 1)
+                out[name].update(range(start, start + max(count, 1)))
+    return out
+
+
+def in_changed(n: dict, changed: dict[str, set[int]]) -> bool:
+    """Whether a NO points at code that changed: its file changed and its line (when given) is a changed one."""
+    lines = changed.get(str(n.get("file", "")).replace("\\", "/").removeprefix("./"))
+    if lines is None:
+        return False
+    try:
+        return int(n.get("line")) in lines
+    except (TypeError, ValueError):
+        return True
 
 
 def spawn(cmd: list[str], cwd: Path, out: Path) -> subprocess.Popen:
@@ -411,7 +522,9 @@ class Driver:
         self.builder_model = str(har.get("builder_model") or "")  # also used by conflict passes
         self.review_model = str(har.get("review_model") or "")
         self.audit_model = str(har.get("audit_model") or "opus")  # the final judge's model: one bar
-        self.polish_rounds = int(lim["polish_rounds"])
+        self.polish_rounds = min(int(lim["polish_rounds"]), POLISH_ROUNDS_MAX)
+        self.verify_model = str(har.get("verify_model") or self.review_model)  # a cheap model is fine
+        self.verify_meta: dict[str, dict] = {}  # fid -> the findings a verifier is checking, and their context
         self.polish_queue: list[tuple[str, list[dict]]] = []  # (module, issues) fix passes waiting for a slot
         self.polish_lands: list[str] = []
         self.polish_meta: dict[str, tuple[str, str]] = {}  # fix fid -> (module, issues text)
@@ -645,13 +758,14 @@ class Driver:
                 self.after_land(job)
             else:
                 del self.jobs[job.fn]
-                {"build": self.after_build, "conflict": self.after_conflict}.get(job.kind, self.after_review)(job)
+                {"build": self.after_build, "conflict": self.after_conflict,
+                 "verify": self.after_verify}.get(job.kind, self.after_review)(job)
         return done
 
     # ---- build ----
     def custom_cmd(self, kind: str) -> list[str]:
         har = self.cfg["harness"]
-        custom = (har.get("reviewer_cmd") if kind == "review" else None) or har.get("worker_cmd")
+        custom = (har.get("reviewer_cmd") if kind in ("review", "verify") else None) or har.get("worker_cmd")
         if not custom:
             return []
         return [str(c) for c in custom] if isinstance(custom, list) else shlex.split(custom)
@@ -665,8 +779,8 @@ class Driver:
             raise DriveError("claude CLI not on PATH")
         cmd = [exe, "-p", "--dangerously-skip-permissions", "--output-format", "json"]
         if supports_max_turns(exe):
-            cmd += ["--max-turns", str(REVIEW_MAX_CALLS if kind == "review" else self.max_calls)]
-        model = self.review_model if kind == "review" else self.builder_model
+            cmd += ["--max-turns", str(REVIEW_MAX_CALLS if kind in ("review", "verify") else self.max_calls)]
+        model = {"review": self.review_model, "verify": self.verify_model}.get(kind, self.builder_model)
         return cmd + (["--model", model] if model else [])
 
     def start_job(self, fid: str, kind: str, attempt: int, brief: Path, cwd: Path, tag: str = "") -> None:
@@ -889,14 +1003,29 @@ class Driver:
         text = "\n".join((self.row_table(f), module_section(self.arch, f.module), self.acceptance_text(f)))
         return {"standard_path": STANDARD.as_posix(), "standard": relevant_rules(text)}
 
+    def round_rule(self, fid: str) -> str:
+        prev = self.st["functions"][fid].get("review")
+        if not prev:
+            return ("Round 1: every NO you list may block once verified. List them all now; a later round may "
+                    "raise only items still NO or regressions in changed code.")
+        return (f"Round {prev.get('round', 1) + 1}. The previous round's verified blocking NOs were "
+                f"{', '.join(prev.get('ids') or []) or 'none'}. Answer every item, but a NO now blocks only when "
+                "(a) it is one of those items, still NO, or (b) it points at a line this attempt changed (a "
+                "regression). Any other NO on unchanged code is logged as review_overreach and does not block.")
+
     def start_review(self, fid: str, attempt: int) -> None:
         f, branch = self.fns[fid], f"fn/{fid}"
-        review_file = self.ov / "reviews" / f"{fid}.txt"
+        review_file = self.ov / "reviews" / f"{fid}.json"
+        review_file.parent.mkdir(parents=True, exist_ok=True)
         review_file.unlink(missing_ok=True)
+        values = self.standard_values(f)
+        scope = "\n".join((self.row_table(f), module_section(self.arch, f.module), self.acceptance_text(f)))
         brief = render("review-brief.md", {
             "id": fid, "branch": branch, "row": self.row_table(f), "allowed_paths": self.allowed(f),
             "acceptance_source": self.acceptance_text(f), "review_file": review_file.as_posix(),
-            "policies": self.policies(), **self.standard_values(f),
+            "policies": self.policies(), **values, "checklist_path": CHECKLIST.as_posix(),
+            "checklist_version": checklist()[0], "checklist": checklist_text(applicable_items(scope)),
+            "round_rule": self.round_rule(fid),
             "diffstat": git(self.repo, "diff", "--stat", f"{self.main}...{branch}").rstrip(),
             "diff": git(self.repo, "diff", f"{self.main}...{branch}").rstrip(),
             "max_calls": str(REVIEW_MAX_CALLS)})
@@ -912,29 +1041,127 @@ class Driver:
         self.jobs[fid].head = head
         self.set(fid, status="review")
 
-    def after_review(self, job: Job) -> None:
-        fid = job.fn
-        tokens, _, _ = read_result(job.out)
-        git(self.ov / "wt" / fid, "checkout", "-q", "-f", "-B", f"fn/{fid}", job.head)  # drop reviewer edits
+    def reset_wt(self, fid: str, head: str) -> None:
+        git(self.ov / "wt" / fid, "checkout", "-q", "-f", "-B", f"fn/{fid}", head)  # drop reviewer edits
         git(self.ov / "wt" / fid, "clean", "-fdq")
-        lines = read_text(self.ov / "reviews" / f"{fid}.txt").splitlines()
-        verdict = lines[0].strip() if lines else ""
-        notes = " / ".join(ln.strip() for ln in lines[1:] if ln.strip())
-        if job.timed_out:
-            verdict, notes = "FAIL", "reviewer timed out"
-        elif verdict not in ("PASS", "FAIL"):
-            verdict, notes = "FAIL", "review file missing or line 1 not exactly PASS or FAIL"
-        secs = time.monotonic() - job.started
-        if verdict == "PASS":
-            self.log(fid, "review_pass", f"{notes} model={job.model}".strip(), secs, tokens)
+
+    def log_nits(self, fid: str | None, nits: list[dict], where_from: str) -> None:
+        if nits:
+            shown = nits[:NITS_MAX]
+            more = f" (+{len(nits) - NITS_MAX} over the cap of {NITS_MAX}, dropped)" if len(nits) > NITS_MAX else ""
+            self.log(fid, "review_nits", f"{where_from}: {len(shown)} nits{more}: "
+                     + " / ".join(f"{n['id']} {where(n)}" for n in shown))
+
+    def round_filter(self, fid: str, blocking: list[dict], head: str) -> list[dict]:
+        """The round rule: on a re-review only still-NO items or regressions in changed code may block."""
+        prev = self.st["functions"][fid].get("review")
+        if not prev:
+            return blocking
+        changed = changed_lines(self.repo, prev.get("head", ""), head) if prev.get("head") else None
+        ids = set(prev.get("ids") or [])
+        keep = [n for n in blocking if n["id"] in ids or changed is None or in_changed(n, changed)]
+        over = [n for n in blocking if n not in keep]
+        if over:
+            self.log(fid, "review_overreach", f"{len(over)} NOs on unchanged code, not blocking: "
+                     + " / ".join(f"{n['id']} {where(n)}" for n in over))
+        return keep
+
+    def after_review(self, job: Job) -> None:
+        fid, secs = job.fn, time.monotonic() - job.started
+        tokens, _, _ = read_result(job.out)
+        self.reset_wt(fid, job.head)
+        raw = read_json(self.ov / "reviews" / f"{fid}.json")
+        nos = None if job.timed_out else checklist_nos(raw)
+        if nos is None:
+            why = "reviewer timed out" if job.timed_out else "review file missing or not the checklist JSON shape"
+            self.log(fid, "review_fail", f"{why} model={job.model}", secs, tokens)
+            self.fail(fid, f"review FAIL: {why}")
+            return
+        gap = str(raw.get("plan_gap") or "").strip() if isinstance(raw, dict) else ""
+        blocking = [n for n in nos if n["severity"] in BLOCKING]
+        self.log_nits(fid, [n for n in nos if n["severity"] not in BLOCKING], "review")
+        unknown = sum(1 for e in (raw.get("items") or []) if isinstance(e, dict)
+                      and str(e.get("answer", "")).lower() == "unknown") if isinstance(raw, dict) else 0
+        detail = f"{len(blocking)} blocking NOs, {unknown} unknown model={job.model}"
+        notes = (f"PLAN-GAP: {gap} / " if gap else "") + " / ".join(
+            f"{n.get('evidence', '')} {n.get('fix', '')}" for n in blocking)
+        if (gap or blocking) and self.plan_gap(fid, notes):
+            self.log(fid, "review_fail", f"plan gap: {notes[:REASON_MAX]} {detail}", secs, tokens)
+            self.park(fid, f"review asks for a change outside the allowed paths (plan gap): {notes}")
+            return
+        blocking = self.round_filter(fid, blocking, job.head)
+        if not blocking:
+            self.log(fid, "review_pass", detail, secs, tokens)
             self.land_queue.append(fid)
             self.set(fid, status="landing")
-        else:
-            self.log(fid, "review_fail", f"{notes} model={job.model}".strip(), secs, tokens)
-            if self.plan_gap(fid, notes):
-                self.park(fid, f"review asks for a change outside the allowed paths (plan gap): {notes}")
-            else:
-                self.fail(fid, f"review FAIL: {notes or 'no reason given'}")
+            return
+        self.log(fid, "review_nos", f"{detail}: " + " / ".join(f"{n['id']} {where(n)}" for n in blocking),
+                 secs, tokens)
+        self.start_verify(fid, job, blocking)
+
+    def verify_brief(self, fid: str, branch: str, findings: list[dict], rnd: int) -> Path:
+        """Write the verifier's brief for `findings` (numbered from 1); returns the brief path."""
+        out = self.ov / "verify" / f"{fid}-{rnd}.json"
+        scratch = self.ov / "verify" / f"{fid}-{rnd}-scratch"
+        scratch.mkdir(parents=True, exist_ok=True)
+        out.unlink(missing_ok=True)
+        listed = "\n".join(f"{i}. [{n['id']} {n['severity']}] `{where(n)}`"
+                           + (f" (module {n['module']})" if n.get("module") else "")
+                           + f": {n.get('evidence') or n.get('issue') or ''}" for i, n in enumerate(findings, 1))
+        brief = render("verify-brief.md", {
+            "id": fid, "branch": branch, "verify_file": out.as_posix(), "scratch": scratch.as_posix(),
+            "findings": listed, "commands": self.polish_commands(), "max_calls": str(REVIEW_MAX_CALLS)})
+        path = self.ov / "briefs" / f"verify-{fid}-{rnd}.md"
+        path.write_text(brief, encoding="utf-8")
+        return path
+
+    def verified(self, fid: str, rnd: int, findings: list[dict], timed_out: bool) -> list[dict] | None:
+        """The findings the verifier reproduced; None when it wrote no usable result."""
+        data = None if timed_out else read_json(self.ov / "verify" / f"{fid}-{rnd}.json")
+        if not isinstance(data, list):
+            return None
+        hits = {}
+        for e in data:
+            if isinstance(e, dict) and e.get("reproduced") is True and str(e.get("how") or "").strip():
+                hits[e.get("n")] = str(e["how"]).strip()
+        return [{**n, "how": hits[i]} for i, n in enumerate(findings, 1) if i in hits]
+
+    def start_verify(self, fid: str, job: Job, blocking: list[dict]) -> None:
+        path = self.verify_brief(fid, f"fn/{fid}", blocking, job.attempt)
+        self.verify_meta[fid] = {"findings": blocking, "head": job.head}
+        self.start_job(fid, "verify", job.attempt, path, self.ov / "wt" / fid)
+        self.jobs[fid].head = job.head
+
+    def after_verify(self, job: Job) -> None:
+        fid, secs = job.fn, time.monotonic() - job.started
+        tokens, _, _ = read_result(job.out)
+        self.reset_wt(fid, job.head)
+        findings = self.verify_meta.pop(fid, {}).get("findings") or []
+        real = self.verified(fid, job.attempt, findings, job.timed_out)
+        if real is None:
+            why = "verifier timed out" if job.timed_out else "verify file missing or not a JSON list"
+            self.log(fid, "verify_fail", f"{why} model={job.model}", secs, tokens)
+            self.fail(fid, f"review FAIL: {why}; the review's NOs were not checked")
+            return
+        dropped = [n for n in findings if not any(r["id"] == n["id"] and where(r) == where(n) for r in real)]
+        if dropped:
+            self.log(fid, "review_unverified", f"{len(dropped)} NOs not reproduced, not blocking: "
+                     + " / ".join(f"{n['id']} {where(n)}" for n in dropped))
+        if not real:
+            self.log(fid, "review_pass", f"0 verified of {len(findings)} blocking NOs model={job.model}", secs, tokens)
+            self.land_queue.append(fid)
+            self.set(fid, status="landing")
+            return
+        self.log(fid, "review_fail", f"{len(real)} verified blocking NOs model={job.model}", secs, tokens)
+        prev = self.st["functions"][fid].get("review") or {}
+        self.set(fid, review={"head": job.head, "ids": sorted({n["id"] for n in real}),
+                              "round": prev.get("round", 0) + 1})
+        full = self.ov / "reviews" / f"{fid}-nos.md"
+        listing = format_nos(real)
+        full.write_text(f"# Verified blocking NOs for {fid}: fix every one\n\n{listing}\n", encoding="utf-8")
+        head = f"review FAIL: {len(real)} verified blocking NOs; fix every one (full list: {full.as_posix()}):\n"
+        self.fail(fid, head + (listing if len(head) + len(listing) <= REASON_MAX
+                               else listing[:REASON_MAX - len(head) - 4] + " ..."))
 
     # ---- land ----
     def pump_land(self) -> bool:
@@ -1044,10 +1271,10 @@ class Driver:
 
     def polish_cmd(self, kind: str) -> tuple[list[str], str]:
         """The worker command for a polish kind, and its model label."""
-        custom = self.custom_cmd("review" if kind in ("polish_audit", "polish_review") else "build")
+        custom = self.custom_cmd("review" if kind in ("polish_audit", "polish_review", "polish_verify") else "build")
         if custom:
             return custom, "custom"
-        base = self.worker_cmd("review" if kind == "polish_review" else "build")
+        base = self.worker_cmd({"polish_review": "review", "polish_verify": "verify"}.get(kind, "build"))
         if kind == "polish_audit" and self.audit_model:
             base = (base[:base.index("--model")] if "--model" in base else base) + ["--model", self.audit_model]
         return base, base[base.index("--model") + 1] if "--model" in base[:-1] else "default"
@@ -1072,6 +1299,7 @@ class Driver:
         return "\n".join([f"- `{p}`" for p in paths] + [f"- `{t}` (unit tests for this module only)" for t in tests])
 
     def start_polish_audit(self, rnd: int) -> bool:
+        """The fixed checklist over the whole tree plus the dedup role (template polish-audit.md)."""
         fid, pol = "polish-audit", self.polish_state()
         audit = self.ov / "polish" / f"audit-{rnd}.json"
         audit.parent.mkdir(parents=True, exist_ok=True)
@@ -1080,42 +1308,89 @@ class Driver:
         brief = render("polish-audit.md", {
             "round": str(rnd), "main": self.main, "audit_file": audit.as_posix(), "max_calls": str(self.max_calls),
             "scratch": (self.ov / "polish").as_posix(), "policies": self.policies(), "commands": self.polish_commands(),
-            "standard": STANDARD.as_posix(), "audit_brief": AUDIT_BRIEF.as_posix(),
+            "standard": STANDARD.as_posix(), "checklist_path": CHECKLIST.as_posix(),
+            "checklist_version": checklist()[0], "checklist": checklist_text(applicable_items(None)),
             "modules": "\n".join(f"- `{m}`: " + ", ".join(module_paths(module_section(self.arch, m), m)) for m in modules)})
         path = self.ov / "briefs" / f"polish-audit-{rnd}.md"
         path.write_text(brief, encoding="utf-8")
         self.start_polish_job(fid, "polish_audit", rnd, path, self.prepare_worktree(fid))
         pol.update(round=rnd, status="audit")
         self.save()
-        self.say(f"polish audit round {rnd}")
+        self.say(f"polish checklist round {rnd}")
         return True
 
     @staticmethod
     def read_audit(path: Path) -> list[dict] | None:
-        try:
-            data = json.loads(read_text(path))
-        except ValueError:
-            return None
+        data = read_json(path)
         if not isinstance(data, list) or not all(isinstance(i, dict) for i in data):
             return None
         return data
 
+    def polish_audit_failed(self, rnd: int, why: str, model: str, secs: float, tokens: int | None) -> None:
+        pol = self.polish_state()
+        self.log(None, "polish_audit", f"round {rnd} failed: {why} model={model}", secs, tokens)
+        self.log(None, "polish_done", f"? issues: {why}")
+        pol.update(status="failed", issues=None)
+        self.save()
+        self.say(f"polish audit round {rnd} failed: {why}")
+
     def after_polish_audit(self, job: Job) -> None:
-        rnd, pol, secs = job.attempt, self.polish_state(), time.monotonic() - job.started
+        rnd, secs = job.attempt, time.monotonic() - job.started
         tokens, _, _ = read_result(job.out)
-        issues = self.read_audit(self.ov / "polish" / f"audit-{rnd}.json")
-        if issues is None:
+        raw = None if job.timed_out else self.read_audit(self.ov / "polish" / f"audit-{rnd}.json")
+        nos = None if raw is None else checklist_nos(raw)
+        if nos is None:
             why = "auditor timed out" if job.timed_out else f"audit-{rnd}.json missing or not a JSON list"
-            self.log(None, "polish_audit", f"round {rnd} failed: {why} model={job.model}", secs, tokens)
-            self.log(None, "polish_done", f"? issues: {why}")
-            pol.update(status="failed", issues=None)
-            self.save()
-            self.say(f"polish audit round {rnd} failed: {why}")
+            self.polish_audit_failed(rnd, why, job.model, secs, tokens)
             return
-        n = len(issues)
+        for e in raw:
+            if str(e.get("id") or e.get("rule") or "") == "NEW-RULE":
+                self.log(None, "polish_new_rule", f"{where(e)} {e.get('evidence', '')}"[:REASON_MAX])
+        nits = [n for n in nos if n["severity"] not in BLOCKING]
+        blocking = [n for n in nos if n["severity"] in BLOCKING]
+        self.log_nits(None, nits, f"polish round {rnd}")
+        self.polish_state()["nits"] = min(len(nits), NITS_MAX)
+        meta = {"rnd": rnd, "model": job.model, "secs": secs, "tokens": tokens, "nos": len(nos)}
+        if not blocking:
+            self.polish_checked(meta, [], [])
+            return
+        path = self.verify_brief("polish-verify", self.main, blocking, rnd)
+        self.verify_meta["polish-verify"] = {**meta, "findings": blocking}
+        self.start_polish_job("polish-verify", "polish_verify", rnd, path, self.ov / "wt" / "polish-audit")
+
+    def after_polish_verify(self, job: Job) -> None:
+        fid = job.fn
+        meta = self.verify_meta.pop(fid, {})
+        findings = meta.get("findings") or []
+        real = self.verified(fid, job.attempt, findings, job.timed_out)
+        if fid != "polish-verify":  # a polish fix's review NOs
+            if real is None:
+                self.polish_failed(fid, "verifier wrote no result; the review's NOs were not checked")
+            elif real:
+                self.polish_failed(fid, f"review: {len(real)} verified blocking NOs: {format_nos(real)}")
+            else:
+                self.polish_lands.append(fid)
+            return
+        if real is None:
+            why = "verifier timed out" if job.timed_out else "verify file missing or not a JSON list"
+            self.polish_audit_failed(meta.get("rnd", job.attempt), why, job.model, meta.get("secs", 0.0), None)
+            return
+        dropped = [n for n in findings if n not in [{k: v for k, v in r.items() if k != "how"} for r in real]]
+        self.polish_checked(meta, real, dropped)
+
+    def polish_checked(self, meta: dict, real: list[dict], dropped: list[dict]) -> None:
+        """A polish checklist run is judged: verified blocking NOs become the round's issues."""
+        rnd, pol = meta["rnd"], self.polish_state()
+        (self.ov / "polish" / f"checklist-{rnd}.json").write_text(json.dumps(real, indent=1), encoding="utf-8")
+        if dropped:
+            self.log(None, "review_unverified", f"polish round {rnd}: {len(dropped)} NOs not reproduced, "
+                     "not blocking: " + " / ".join(f"{n['id']} {where(n)}" for n in dropped))
+        n = len(real)
         pol["history"].append([rnd, n])
-        self.log(None, "polish_audit", f"round {rnd}: {n} issues model={job.model}", secs, tokens)
-        issues, n = self.keep_best_polish(pol, rnd, issues)
+        self.log(None, "polish_audit", f"round {rnd}: {n} issues model={meta['model']}", meta["secs"], meta["tokens"])
+        self.log(None, "polish_checklist", f"round {rnd}: {meta['nos']} NOs, {n} verified blocking, "
+                 f"{len(dropped)} unverified, {pol.get('nits', 0)} nits")
+        issues, n = self.keep_best_polish(pol, rnd, real)
         pol["issues"] = n
         if not issues or rnd > self.polish_rounds:
             pol["status"] = "done"
@@ -1131,15 +1406,15 @@ class Driver:
         self.save()
 
     def keep_best_polish(self, pol: dict, rnd: int, issues: list[dict]) -> tuple[list[dict], int]:
-        """A fix round that raised the issue count is reverted: main goes back to the best audited tree.
+        """A fix round that raised the verified NO count is reverted: main goes back to the best checked tree.
 
-        pol["best"] is [round, issues, sha] of the audit with the fewest issues so far. Returns the issue list
+        pol["best"] is [round, issues, sha] of the run with the fewest verified NOs so far. Returns the list
         the next fix round works from (the best round's) and its count."""
         sha, best = git(self.repo, "rev-parse", self.main).strip(), pol.get("best")
         if not best or len(issues) <= best[1]:
             pol["best"] = [rnd, len(issues), sha]
             return issues, len(issues)
-        kept = self.read_audit(self.ov / "polish" / f"audit-{best[0]}.json")
+        kept = self.read_audit(self.ov / "polish" / f"checklist-{best[0]}.json")
         if kept is None or not self.revert_main(best[2], sha, f"polish: revert round {rnd - 1} fixes "
                                                 f"({len(issues)} issues > {best[1]} after round {best[0]})"):
             pol["best"] = [rnd, len(issues), sha]
@@ -1190,7 +1465,8 @@ class Driver:
             self.polish_failed(job.fn, problem)
             return
         module, issues = self.polish_meta[job.fn]
-        branch, review_file = f"fn/{job.fn}", self.ov / "reviews" / f"{job.fn}.txt"
+        branch, review_file = f"fn/{job.fn}", self.ov / "reviews" / f"{job.fn}.json"
+        review_file.parent.mkdir(parents=True, exist_ok=True)
         review_file.unlink(missing_ok=True)
         brief = render("review-brief.md", {
             "id": job.fn, "branch": branch, "allowed_paths": self.polish_allowed(module),
@@ -1199,6 +1475,10 @@ class Driver:
             "acceptance_source": "(none: a polish fix adds no function; land.py re-runs every proven acceptance test)",
             "review_file": review_file.as_posix(), "policies": self.policies(),
             "standard_path": STANDARD.as_posix(), "standard": relevant_rules(module + "\n" + issues),
+            "checklist_path": CHECKLIST.as_posix(), "checklist_version": checklist()[0],
+            "checklist": checklist_text(applicable_items(module + "\n" + issues)),
+            "round_rule": "A polish fix: a NO blocks only when it points at a line this fix changed; NOs on "
+                          "unchanged code are logged as review_overreach and do not block.",
             "diffstat": git(self.repo, "diff", "--stat", f"{self.main}...{branch}").rstrip(),
             "diff": git(self.repo, "diff", f"{self.main}...{branch}").rstrip(), "max_calls": str(REVIEW_MAX_CALLS)})
         if len(brief) // 4 > self.max_tokens:
@@ -1211,19 +1491,34 @@ class Driver:
         self.jobs[job.fn].head = head
 
     def after_polish_review(self, job: Job) -> None:
+        """Only blocking NOs on lines the fix changed may stop it, and only once a verifier reproduces them."""
         fid = job.fn
         tokens, _, _ = read_result(job.out)
-        git(self.ov / "wt" / fid, "checkout", "-q", "-f", "-B", f"fn/{fid}", job.head)  # drop reviewer edits
-        git(self.ov / "wt" / fid, "clean", "-fdq")
-        lines = read_text(self.ov / "reviews" / f"{fid}.txt").splitlines()
-        verdict = "FAIL" if job.timed_out else (lines[0].strip() if lines else "")
-        notes = "reviewer timed out" if job.timed_out else " / ".join(ln.strip() for ln in lines[1:] if ln.strip())
-        self.log(fid, "polish_fix", f"review {verdict or 'missing'}: {notes} model={job.model}",
-                 time.monotonic() - job.started, tokens)
-        if verdict == "PASS":
+        self.reset_wt(fid, job.head)
+        nos = None if job.timed_out else checklist_nos(read_json(self.ov / "reviews" / f"{fid}.json"))
+        if nos is None:
+            why = "reviewer timed out" if job.timed_out else "review file missing or not the checklist JSON shape"
+            self.log(fid, "polish_fix", f"review FAIL: {why} model={job.model}", time.monotonic() - job.started,
+                     tokens)
+            self.polish_failed(fid, f"review FAIL: {why}")
+            return
+        self.log_nits(fid, [n for n in nos if n["severity"] not in BLOCKING], "polish review")
+        base = git(self.repo, "merge-base", self.main, job.head).strip()
+        changed = changed_lines(self.repo, base, job.head)
+        blocking = [n for n in nos if n["severity"] in BLOCKING]
+        mine = [n for n in blocking if changed is None or in_changed(n, changed)]
+        over = [n for n in blocking if n not in mine]
+        if over:
+            self.log(fid, "review_overreach", f"{len(over)} NOs on unchanged code, not blocking: "
+                     + " / ".join(f"{n['id']} {where(n)}" for n in over))
+        self.log(fid, "polish_fix", f"review {'NO' if mine else 'PASS'}: {len(mine)} blocking NOs in changed code "
+                 f"model={job.model}", time.monotonic() - job.started, tokens)
+        if not mine:
             self.polish_lands.append(fid)
-        else:
-            self.polish_failed(fid, f"review {verdict or 'file missing'}: {notes or 'no reason given'}")
+            return
+        path = self.verify_brief(fid, f"fn/{fid}", mine, job.attempt)
+        self.verify_meta[fid] = {"findings": mine}
+        self.start_polish_job(fid, "polish_verify", job.attempt, path, self.ov / "wt" / fid)
 
     def pump_polish_land(self) -> bool:
         if self.land_job or self.land_queue or not self.polish_lands:
@@ -1256,7 +1551,8 @@ class Driver:
             self.land_job = None
         else:
             del self.jobs[job.fn]
-        {"polish_audit": self.after_polish_audit, "polish_fix": self.after_polish_fix,
+        {"polish_audit": self.after_polish_audit, "polish_verify": self.after_polish_verify,
+         "polish_fix": self.after_polish_fix,
          "polish_review": self.after_polish_review, "polish_land": self.after_polish_land}[job.kind](job)
 
     # ---- outcomes ----

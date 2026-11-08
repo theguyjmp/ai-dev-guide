@@ -5,7 +5,7 @@ only the function row, the acceptance test and the diff below. You NEVER edit co
 
 - Branch under review: `{{branch}}` (your working directory is its worktree, read-only for you)
 - Review file to write: `{{review_file}}`
-- Budget: about {{max_calls}} tool calls. The diff below is complete; spend the calls on the searches in item 6.
+- Budget: about {{max_calls}} tool calls. The diff below is complete; spend the calls on the `git grep` searches the checklist asks for.
 
 ## The function
 
@@ -36,42 +36,42 @@ allowed.
 {{policies}}
 `````
 
-## Quality rules for this function (from the quality standard `{{standard_path}}`)
+## Quality rules behind the checklist (from the quality standard `{{standard_path}}`)
 
 {{standard}}
 
-## Checklist: FAIL on any NO, and name the file:line
+## Checklist {{checklist_version}} (from `{{checklist_path}}`): answer every item below
 
-1. Scope: every changed file is inside the allowed paths.
-2. Real behavior: no stubs, mocks, canned data, placeholder returns, `TODO` or `pass` bodies, `unimplemented!`,
-   and no branch on test names, fixtures, paths or the acceptance test's exact inputs.
-3. Concurrency: shared state (files, tables, caches, globals) that two requests, threads or processes can reach is
-   written only through the Persistence owner's API, under its lock, with an atomic write (unique temp file in the
-   same dir, then replace). An unlocked load-modify-save, or a fixed temp-file name, is a FAIL. A new writer of
-   such state has a unit test that writes from several threads and checks no write was lost.
-4. Errors: failures are raised and reported as the Errors policy says, the same way as the module's other
-   errors: no bare or blind `except`, no swallowed exception, no raw traceback reaching the user, no 500 or
-   crash without a log line.
-5. Public API only: every import from another module uses a name its `Public:` line or `__init__` exports.
-6. No re-implementation: search the tree (`git grep -n`) for each new helper, constant and message string. A
-   helper that redoes an existing one, or a message or format literal written a second time, is a FAIL: import
-   the existing one.
-7. Readability: clear names, functions under about 30 lines, no dead or commented-out code, no debug output,
-   no line over the lint's line length.
-8. Quality standard: the change breaks none of the quality rules above. Name the rule number (`Q19`) with the
-   file:line of each break.
+{{checklist}}
 
-Decide from the diff and your searches. A doubt you cannot clear is a FAIL.
+How to answer:
+- Answer each item above exactly once: `yes`, `no` or `unknown`. `unknown` means you could not decide with the
+  calls you had; it never blocks, so do not use it to hide a NO you can show.
+- Every answer carries evidence: `file` and `line` in the change (or the tree line your `git grep` found), and
+  one line saying what you saw. A NO without a file:line is dropped.
+- List EVERY NO in this one pass. The builder fixes the whole list at once; a NO you hold back for a later round
+  will not block then (see the round rule).
+- For each NO give `fix`: the change inside the allowed paths. When the fix needs a file outside them (another
+  module must export or change a helper), write it in `plan_gap` instead; drive.py sends it to the plan.
+- Search the tree (`git grep -n`) for each new helper, constant and message string before answering C03, C05
+  and C07.
 
-## Write the verdict
+## Round rule
 
-Write `{{review_file}}` with exactly this shape and nothing else:
+{{round_rule}}
 
-- Line 1 is exactly `PASS` or exactly `FAIL`. No other words, no punctuation, no markdown on that line.
-- From line 2, the reasons, one short line each. On a FAIL, name the file and what to change. On a PASS, one
-  line saying what you checked.
-- Name only fixes inside the allowed paths. When a fix needs a file outside them (another module must export or
-  change a helper), write that reason on a line starting `PLAN-GAP:`; drive.py sends it to the plan, not the builder.
+## Write the result
 
-Do not edit any other file. Do not run the build. Your final message is 2 lines: the verdict, then the main
-reason.
+Write `{{review_file}}` as one JSON object and nothing else:
+
+```json
+{"checklist": "{{checklist_version}}",
+ "items": [{"id": "C05", "answer": "no", "file": "src/x/y.py", "line": 12,
+            "evidence": "total() re-implements orders.total at src/orders/core.py:40",
+            "fix": "import orders.total"}],
+ "plan_gap": ""}
+```
+
+A separate verifier then tries to reproduce each blocking NO with a failing test or an exact line and input; an
+unreproduced NO does not block, so give it what it needs. Do not edit any other file. Do not run the build. Your
+final message is 2 lines: the number of NOs, then the main one.

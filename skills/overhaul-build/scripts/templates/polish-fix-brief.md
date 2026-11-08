@@ -1,6 +1,6 @@
 # Polish fix {{id}} round {{round}}
 
-You fix code-quality issues a blind audit found in module `{{module}}`. Every function is already proven;
+You fix the verified checklist NOs (each reproduced by a verifier) found in module `{{module}}`. Every function is already proven;
 your change must keep every acceptance test green and change no behaviour.
 
 - Module: `{{module}}`
@@ -25,5 +25,5 @@ Never edit tests/acceptance, spec/ or overhaul.toml.
 
 {{commands}}
 
-Fix each issue at its cause, run the commands until they pass, commit, and end with one line: DONE or
+Fix every issue in the list at its cause in this one pass, run the commands until they pass, commit, and end with one line: DONE or
 STUCK <reason>.
