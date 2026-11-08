@@ -115,6 +115,34 @@ class VerdictTest(unittest.TestCase):
         d = self.repo(["proven", "proven", "needs-plan"], state=state, prev=prev)
         self.assertEqual(self.verdict(d, "--no-checks")[0], 0)
 
+    def test_good_needs_0_verified_blocking_nos_and_ignores_nits_and_the_trend(self):
+        prev = {"t": ago(hours=1), "proven": 3}
+        trend = {"t": ago(minutes=5), "event": "open_audit", "detail": "SCORES 6 5 7 4 6 5 6 | ISSUES 19"}
+        state = {"polish": {"status": "done", "round": 3, "issues": 0, "nits": 5}}
+        code, line, doc = self.verdict(self.repo(["proven"] * 3, state=state, prev=prev, events=[trend]),
+                                       "--no-checks")
+        self.assertEqual(code, 0, line)
+        self.assertTrue(line.startswith("VERDICT GOOD proven 3/3"), line)
+        self.assertIn(" issues 0 nits 5 trend SCORES 6 5 7 4 6 5 6 | ISSUES 19 reds: none", line)
+        self.assertEqual((doc["nits"], doc["trend"][:6]), (5, "SCORES"))
+
+    def test_a_verified_p1_left_after_polish_is_bad(self):
+        state = {"polish": {"status": "done", "round": 3, "issues": 1, "nits": 0}}
+        code, line, doc = self.verdict(self.repo(["proven"] * 2, state=state, prev={"proven": 2}), "--no-checks")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.kinds(doc), ["polish"])
+        self.assertIn("1 issues (verified P0/P1 checklist NOs)", line)
+
+    def test_probe_floors_gate_only_when_probe_events_exist(self):
+        ev = [{"t": ago(minutes=9), "event": "probe_mutation", "module": "mod1", "score": 0.5},
+              {"t": ago(minutes=8), "event": "probe_mutation", "module": "mod1", "score": 93},
+              {"t": ago(minutes=7), "event": "probe_mutation", "module": "mod2", "score": "85%"},
+              {"t": ago(minutes=6), "event": "probe_mutation", "module": "mod3", "score": 0.7, "floor": 0.6}]
+        code, line, doc = self.verdict(self.repo(["proven"] * 3, prev={"proven": 3}, events=ev), "--no-checks")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.kinds(doc), ["probe"])  # mod1 latest is 93%, mod3 meets its own floor
+        self.assertIn("mutation score 85% < floor 90% in mod2", line)
+
     def test_all_proven(self):
         d = self.repo(["proven"] * 3, prev={"t": ago(hours=1), "proven": 3})
         code, line, doc = self.verdict(d, "--no-checks")
