@@ -1,5 +1,11 @@
 # overhaul-plan changelog
 
+## v3 probe, 2026-11-07
+Each function gets 1 to 3 Hypothesis property tests in tests/property/test_<id>.py, written and red at plan time
+beside its acceptance tests. plan_validate.py fails a Python plan without them ([probe] property_tests = false turns
+it off) and, with --run and a [commands].property template, checks they are red before the build. Planned tests are
+anchors. overhaul.toml gains [probe] mutation_floor and max_mutants.
+
 ## v2 one quality standard, 2026-11-07
 The Policies section opens with a `Standard:` line citing overhaul-build's quality-standard.md, and the design
 rules trial 4's judge found missing (stored invariants, atomic multi-store writes, stale locks, network timeouts,

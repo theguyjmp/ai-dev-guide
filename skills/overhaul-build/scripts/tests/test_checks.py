@@ -2,6 +2,7 @@
 
 Run from the scripts dir:  py -3 -m unittest
 """
+import json
 import os
 import shutil
 import re
@@ -364,3 +365,48 @@ class TestProbe(unittest.TestCase):
         p = case.problems(root)
         self.assertTrue(any("no property tests" in x for x in p), p)
         self.assertFalse(any("no property tests" in x for x in case.problems(case.make())))
+
+    def test_land_rejects_a_modified_planned_test_but_allows_a_new_one(self):
+        import land
+        root = Path(tempfile.mkdtemp(prefix="anc_"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+
+        def g(*a):
+            return subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True, check=True).stdout
+
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@e.x")
+        g("config", "user.name", "t")
+        for rel in ("spec/FUNCTIONS.md", "tests/property/test_f1.py", "tests/unit/a/test_a.py"):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("x = 1\n", encoding="utf-8")
+        g("add", "-A")
+        g("commit", "-qm", "plan")
+        base = g("rev-parse", "HEAD").strip()
+        g("checkout", "-qb", "fn/ok")
+        (root / "tests/property/test_extra.py").write_text("y = 2\n", encoding="utf-8")
+        g("add", "-A")
+        g("commit", "-qm", "add a test")
+        land.check_anchors(str(root), base, g("rev-parse", "HEAD").strip(), "fn/ok", "spec/FUNCTIONS.md")
+        g("checkout", "-qb", "fn/bad", base)
+        (root / "tests/property/test_f1.py").write_text("x = 2\n", encoding="utf-8")
+        (root / "tests/unit/a/test_a.py").unlink()
+        g("add", "-A")
+        g("commit", "-qm", "weaken")
+        with self.assertRaises(land.LandFail) as cm:
+            land.check_anchors(str(root), base, g("rev-parse", "HEAD").strip(), "fn/bad", "spec/FUNCTIONS.md")
+        self.assertIn("tests/property/test_f1.py", str(cm.exception))
+        self.assertIn("tests/unit/a/test_a.py", str(cm.exception))
+
+    def test_lint_hook_returns_lint_failures_with_exit_2(self):
+        root = Path(tempfile.mkdtemp(prefix="lh_"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "lint.py").write_text("import sys\nsys.exit(1 if 'bad' in open(sys.argv[1]).read() else 0)\n")
+        lint = f'"{Path(sys.executable).as_posix()}" lint.py .'
+        (root / "overhaul.toml").write_text(f"[commands]\nlint = '{lint}'\n", encoding="utf-8")
+        hook = str(Path(__file__).resolve().parents[1] / "lint_hook.py")
+        for text, code in (("good = 1\n", 0), ("bad = 1\n", 2)):
+            (root / "m.py").write_text(text, encoding="utf-8")
+            event = json.dumps({"tool_name": "Edit", "cwd": str(root), "tool_input": {"file_path": str(root / "m.py")}})
+            p = subprocess.run([sys.executable, hook], input=event, capture_output=True, text=True, timeout=60)
+            self.assertEqual(p.returncode, code, p.stderr)
