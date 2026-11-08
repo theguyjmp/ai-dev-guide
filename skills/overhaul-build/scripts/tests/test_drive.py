@@ -128,9 +128,10 @@ if first.startswith("# Polish audit round "):  # scenario "audit": one list of f
     finish(str(len(found)))
 if first.startswith("# Polish fix "):
     (seen / f"{first.split()[3]}-fix.md").write_text(brief, encoding="utf-8")
-    p = Path("src") / field("- Module:") / "tidy.py"
+    p = Path("src") / field("- Module:").split(",")[0] / "tidy.py"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(f"# tidied by {first.split()[3]}\\n", encoding="utf-8")
+    old = p.read_text(encoding="utf-8") if p.exists() else ""
+    p.write_text(old + f"# tidied by {first.split()[3]}\\n", encoding="utf-8")
     git("add", "-A")
     git("commit", "-q", "-m", first)
     finish("DONE")
@@ -443,12 +444,39 @@ class TestTrial3Waste(Toy):
         self.assertIn("plan gap", rec["last_reason"])
         self.assertEqual(self.builds(repo, "F1"), 1)
 
-    def test_plan_gap_line_goes_to_needs_plan(self):  # F15
-        repo = self.make_repo({"F1": {"review": ["FAIL PLAN-GAP: export a total from inventory", "PASS"]}}, retries=2)
+    def test_optional_plan_gap_with_no_blocking_no_passes_and_is_recorded(self):  # trial 6 F06
+        gap = "Optional: beta could export the tax rate text"
+        repo = self.make_repo({"F1": {"review": ["FAIL PLAN-GAP: " + gap, "PASS"]}}, retries=2)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "proven")
+        self.assertEqual(self.builds(repo, "F1"), 1)
+        gaps = [json.loads(ln) for ln in (repo / ".overhaul" / "plan-gaps.jsonl").read_text(
+            encoding="utf-8").splitlines()]
+        self.assertEqual([(g["fn"], g["module"], g["gap"]) for g in gaps], [("F1", "alpha", gap)])
+        self.assertFalse(any(e["event"] == "needs_plan" for e in self.events(repo)))
+
+    def test_plan_gap_tied_to_a_verified_blocking_no_goes_to_needs_plan(self):  # F15, trial 6 F05
+        review = {"checklist": "v1", "plan_gap": "C07: beta must export LIMIT; beta is outside the allowed paths",
+                  "items": [{"id": "C07", "answer": "no", "file": "src/alpha/f1.py", "line": 1,
+                             "evidence": "LIMIT = 9 repeats beta's literal", "fix": "import it from beta"}]}
+        repo = self.make_repo({"F1": {"review": [review, "PASS"]}}, retries=2)
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 3, out)
-        self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "needs-plan")
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual(rec["status"], "needs-plan")
+        self.assertIn("plan gap", rec["last_reason"])
         self.assertEqual(self.builds(repo, "F1"), 1)
+        self.assertFalse((repo / ".overhaul" / "plan-gaps.jsonl").exists())
+
+    def test_plan_gap_with_an_unverified_no_passes_and_is_recorded(self):
+        review = {"checklist": "v1", "plan_gap": "C07: beta should export LIMIT",
+                  "items": [{"id": "C07", "answer": "no", "file": "src/alpha/f1.py", "line": 1,
+                             "evidence": "LIMIT = 9 repeats beta's literal", "fix": "import it from beta"}]}
+        repo = self.make_repo({"F1": {"review": [review, "PASS"], "verify": ["none"]}}, retries=2)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((repo / ".overhaul" / "plan-gaps.jsonl").is_file())
 
     def test_outside_allowed_paths_on_a_stray_diff_is_a_builder_retry(self):
         why = "FAIL src/beta/f1_stray.py is outside the allowed paths; remove it"
@@ -1041,6 +1069,67 @@ class TestJudge(Toy):
         ev = self.polish_events(repo)
         self.assertEqual(ev[-1], ("polish_done", "2 issues after 2 fix rounds"))
         self.assertTrue(any(e == "polish_checklist" for e, _ in ev))
+
+
+
+class TestPlanGaps(Toy):
+    """Trial 6: five functions went needs-plan over shared-constant PLAN-GAP lines; they now batch into one pass."""
+
+    def test_plan_gaps_batch_into_one_pass_that_runs_alone(self):
+        repo = self.make_repo({"F1": {"review": ["FAIL PLAN-GAP: Optional: beta could export the label"]},
+                               "F2": {"review": ["FAIL PLAN-GAP: alpha should export the label too"]},
+                               "audit": [[]]})
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.events(repo)
+        starts = [e for e in ev if e["event"] == "plan_gaps"]
+        self.assertEqual([e["detail"] for e in starts], ["start: 2 gaps across alpha, beta"])
+        brief = self.seen("polish-gaps-fix.md")
+        self.assertIn("beta could export the label", brief)
+        self.assertIn("alpha should export the label too", brief)
+        self.assertIn("src/alpha/", brief)
+        self.assertIn("src/beta/", brief)
+        self.assertTrue(any(e["event"] == "polish_fix" and e["fn"] == "polish-gaps"
+                            and e["detail"].startswith("landed") for e in ev), ev)
+        i = ev.index(starts[0])
+        end = next(k for k, e in enumerate(ev) if e["fn"] == "polish-gaps" and e["event"] == "polish_land_ok")
+        self.assertFalse([e for e in ev[i:end] if e["fn"] not in (None, "polish-gaps")], ev[i:end])  # alone
+        self.assertLess(end, next(k for k, e in enumerate(ev) if e["event"] == "polish_audit"))
+        self.assertEqual(self.state(repo)["polish"]["gaps"], "started")
+
+
+class TestFixRetry(Toy):
+    """Trial 6: probe-core's fix (31 survivors) was dropped over one verified P1; a fix now gets one retry."""
+    NO = {"checklist": "v1", "items": [{"id": "C10", "answer": "no", "file": "src/alpha/tidy.py", "line": 1,
+                                        "evidence": "unused import", "fix": "remove it"}]}
+
+    def probe_repo(self, score: float) -> Path:
+        return TestProbe.probe_repo(self, score)
+
+    def fix_events(self, repo: Path) -> list[tuple[str, str]]:
+        return [(e["event"], e["detail"]) for e in self.events(repo) if e["fn"] == "probe-alpha"]
+
+    def test_probe_fix_with_a_verified_no_gets_one_retry_then_lands(self):
+        repo = self.probe_repo(0.5)
+        put(self.root / "scenario.json", json.dumps({"probe-alpha": {"review": [self.NO, "PASS"]}}))
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = self.fix_events(repo)
+        self.assertEqual(len([1 for _, d in ev if d.startswith("retry 1/1")]), 1, ev)
+        self.assertIn(("probe_fix", "landed alpha"), ev)
+        self.assertIn("Retry 1", self.seen("probe-alpha-fix.md"))
+        self.assertIn("unused import", self.seen("probe-alpha-fix.md"))
+        self.assertIn("Retry 1 of a polish fix", self.seen("probe-alpha-review-2.md"))
+        self.assertEqual(self.state(repo)["probe"]["alpha"]["status"], "fixed")
+
+    def test_probe_fix_fails_after_its_one_retry(self):
+        repo = self.probe_repo(0.5)
+        put(self.root / "scenario.json", json.dumps({"probe-alpha": {"review": [self.NO]}}))
+        self.drive_cli(repo)
+        ev = self.fix_events(repo)
+        self.assertEqual(len([1 for _, d in ev if d.startswith("retry")]), 1, ev)
+        self.assertTrue(any(d.startswith("failed: review: 1 verified") for _, d in ev), ev)
+        self.assertEqual(self.state(repo)["probe"]["alpha"]["status"], "fix_failed")
 
 
 if __name__ == "__main__":

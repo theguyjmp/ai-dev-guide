@@ -95,8 +95,10 @@ IN_FLIGHT = ("building", "review", "landing")
 POLISH_KINDS = ("polish_audit", "polish_verify", "polish_fix", "polish_review", "polish_land")
 GREEN_BEFORE = "acceptance already green before change"
 CONFLICT = "merge conflict"  # land.py: "merge conflict merging <main> into fn/<id>"
-# A review fix the builder cannot make: the reviewer's PLAN-GAP line, or "outside (the) allowed paths" on a diff
-# that stayed inside them. Such a FAIL goes to needs-plan; another builder pass would only re-learn it.
+# A review fix the builder cannot make: a verified blocking NO tied to the reviewer's PLAN-GAP line, or one saying
+# "outside (the) allowed paths" on a diff that stayed inside them. Such a FAIL goes to needs-plan; another builder
+# pass would only re-learn it. Any other PLAN-GAP goes to .overhaul/plan-gaps.jsonl: one cross-module pass after
+# the build (polish_step) fixes them all, since a shared constant needs its owner and every caller changed together.
 PLAN_GAP = re.compile(r"\bPLAN-GAP\b")
 OUTSIDE = re.compile(r"\boutside\s+(?:the\s+|my\s+|its\s+|your\s+)?allowed\s+paths\b", re.I)
 FENCE = {".py": "python", ".rs": "rust", ".js": "javascript", ".ts": "typescript"}
@@ -116,6 +118,8 @@ DEFAULTS = {
 }
 PROBE_PREFIX = "probe-"  # a probe fix pass: fid probe-<module>, landed like a polish fix
 PROBE_DONE = ("done", "fixed", "fix_failed", "error", "skipped")
+GAPS_FID = "polish-gaps"  # the one cross-module pass over .overhaul/plan-gaps.jsonl, run alone before polish round 1
+FIX_RETRIES = 1  # a probe or polish fix whose review has verified blocking NOs gets this many retry passes
 
 
 class DriveError(Exception):
@@ -565,7 +569,8 @@ class Driver:
         self.verify_meta: dict[str, dict] = {}  # fid -> the findings a verifier is checking, and their context
         self.polish_queue: list[tuple[str, list[dict]]] = []  # (module, issues) fix passes waiting for a slot
         self.polish_lands: list[str] = []
-        self.polish_meta: dict[str, tuple[str, str]] = {}  # fix fid -> (module, issues text)
+        self.polish_meta: dict[str, tuple[str, str]] = {}  # fix fid -> (module(s), issues text)
+        self.polish_tries: dict[str, dict] = {}  # fix fid -> {"round", "head", "ids"} of its last failed review
         probe = {**DEFAULTS["probe"], **(cfg.get("probe") or {})}
         self.probe_on = bool(probe["enabled"])
         self.mutation_floor = float(probe["mutation_floor"])
@@ -877,15 +882,43 @@ class Driver:
         paths, tests = self.allowed_lists(f)
         return "\n".join([f"- `{p}`" for p in paths] + [f"- `{t}` (unit tests for this module only)" for t in tests])
 
-    def plan_gap(self, fid: str, notes: str) -> bool:
-        """Whether a review FAIL asks for a change only the plan can allow (see PLAN_GAP)."""
-        if PLAN_GAP.search(notes):
-            return True
-        if not OUTSIDE.search(notes):
-            return False
+    def gap_nos(self, fid: str, gap: str, real: list[dict]) -> list[dict]:
+        """The verified blocking NOs only the plan can fix (see PLAN_GAP): each tied to the PLAN-GAP line (its id
+        or file named there) or saying PLAN-GAP / outside the allowed paths, on a diff that stayed inside them."""
+        def tied(n: dict) -> bool:
+            text = f"{n.get('evidence', '')} {n.get('fix', '')}"
+            name = Path(str(n.get("file") or "")).name
+            return bool(PLAN_GAP.search(text) or OUTSIDE.search(text) or (gap and (
+                re.search(rf"(?<![\w-]){re.escape(str(n['id']))}(?![\w-])", gap) or (name and name in gap))))
+        hits = [n for n in real if tied(n)]
+        if not hits:
+            return []
         allowed = [p for group in self.allowed_lists(self.fns[fid]) for p in group]
         changed = git(self.repo, "diff", "--name-only", f"{self.main}...fn/{fid}").splitlines()
-        return all(in_paths(p, allowed) for p in changed)  # else the builder strayed: an ordinary FAIL
+        return hits if all(in_paths(p, allowed) for p in changed) else []  # else the builder strayed: ordinary FAIL
+
+    def gaps_path(self) -> Path:
+        return self.ov / "plan-gaps.jsonl"
+
+    def read_gaps(self) -> list[dict]:
+        out = []
+        for line in read_text(self.gaps_path()).splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(e, dict) and str(e.get("gap") or "").strip():
+                out.append(e)
+        return out
+
+    def keep_gap(self, fid: str, gap: str) -> None:
+        """A PLAN-GAP that blocks nothing: record it once for the plan-gaps pass after the build."""
+        if not gap or any(e.get("fn") == fid and e.get("gap") == gap for e in self.read_gaps()):
+            return
+        self.gaps_path().parent.mkdir(parents=True, exist_ok=True)
+        with self.gaps_path().open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"fn": fid, "module": self.fns[fid].module, "gap": gap, "at": now_iso()}) + "\n")
+        self.log(fid, "plan_gap", f"recorded for the plan-gaps pass: {gap[:REASON_MAX]}")
 
     def acceptance_text(self, f: Fn) -> str:
         parts = []
@@ -1179,21 +1212,16 @@ class Driver:
         unknown = sum(1 for e in (raw.get("items") or []) if isinstance(e, dict)
                       and str(e.get("answer", "")).lower() == "unknown") if isinstance(raw, dict) else 0
         detail = f"{len(blocking)} blocking NOs, {unknown} unknown model={job.model}"
-        notes = (f"PLAN-GAP: {gap} / " if gap else "") + " / ".join(
-            f"{n.get('evidence', '')} {n.get('fix', '')}" for n in blocking)
-        if (gap or blocking) and self.plan_gap(fid, notes):
-            self.log(fid, "review_fail", f"plan gap: {notes[:REASON_MAX]} {detail}", secs, tokens)
-            self.park(fid, f"review asks for a change outside the allowed paths (plan gap): {notes}")
-            return
         blocking = self.round_filter(fid, blocking, job.head)
         if not blocking:
+            self.keep_gap(fid, gap)
             self.log(fid, "review_pass", detail, secs, tokens)
             self.land_queue.append(fid)
             self.set(fid, status="landing")
             return
         self.log(fid, "review_nos", f"{detail}: " + " / ".join(f"{n['id']} {where(n)}" for n in blocking),
                  secs, tokens)
-        self.start_verify(fid, job, blocking)
+        self.start_verify(fid, job, blocking, gap)
 
     def verify_brief(self, fid: str, branch: str, findings: list[dict], rnd: int) -> Path:
         """Write the verifier's brief for `findings` (numbered from 1); returns the brief path."""
@@ -1222,9 +1250,9 @@ class Driver:
                 hits[e.get("n")] = str(e["how"]).strip()
         return [{**n, "how": hits[i]} for i, n in enumerate(findings, 1) if i in hits]
 
-    def start_verify(self, fid: str, job: Job, blocking: list[dict]) -> None:
+    def start_verify(self, fid: str, job: Job, blocking: list[dict], gap: str = "") -> None:
         path = self.verify_brief(fid, f"fn/{fid}", blocking, job.attempt)
-        self.verify_meta[fid] = {"findings": blocking, "head": job.head}
+        self.verify_meta[fid] = {"findings": blocking, "head": job.head, "gap": gap}
         self.start_job(fid, "verify", job.attempt, path, self.ov / "wt" / fid)
         self.jobs[fid].head = job.head
 
@@ -1232,7 +1260,8 @@ class Driver:
         fid, secs = job.fn, time.monotonic() - job.started
         tokens, _, _ = read_result(job.out)
         self.reset_wt(fid, job.head)
-        findings = self.verify_meta.pop(fid, {}).get("findings") or []
+        meta = self.verify_meta.pop(fid, {})
+        findings, gap = meta.get("findings") or [], str(meta.get("gap") or "")
         real = self.verified(fid, job.attempt, findings, job.timed_out)
         if real is None:
             why = "verifier timed out" if job.timed_out else "verify file missing or not a JSON list"
@@ -1244,10 +1273,20 @@ class Driver:
             self.log(fid, "review_unverified", f"{len(dropped)} NOs not reproduced, not blocking: "
                      + " / ".join(f"{n['id']} {where(n)}" for n in dropped))
         if not real:
+            self.keep_gap(fid, gap)
             self.log(fid, "review_pass", f"0 verified of {len(findings)} blocking NOs model={job.model}", secs, tokens)
             self.land_queue.append(fid)
             self.set(fid, status="landing")
             return
+        stuck = self.gap_nos(fid, gap, real)
+        if stuck:
+            notes = (f"PLAN-GAP: {gap} / " if gap else "") + " / ".join(
+                f"[{n['id']} {where(n)}] {n.get('evidence', '')} {n.get('fix', '')}" for n in stuck)
+            self.log(fid, "review_fail", f"plan gap: {len(stuck)} of {len(real)} verified blocking NOs need a change "
+                     f"outside the allowed paths: {notes[:REASON_MAX]} model={job.model}", secs, tokens)
+            self.park(fid, f"review asks for a change outside the allowed paths (plan gap): {notes}")
+            return
+        self.keep_gap(fid, gap)
         self.log(fid, "review_fail", f"{len(real)} verified blocking NOs model={job.model}", secs, tokens)
         prev = self.st["functions"][fid].get("review") or {}
         self.set(fid, review={"head": job.head, "ids": sorted({n["id"] for n in real}),
@@ -1365,13 +1404,51 @@ class Driver:
                 started = True
             if not self.polish_pending():
                 return self.start_polish_audit(pol["round"] + 1)
-        elif not self.busy():  # idle, or an audit a previous drive left unfinished
-            return self.start_polish_audit(max(1, pol["round"]))
+        elif pol["status"] == "gaps":  # the plan-gaps pass runs alone; polish round 1 waits for it
+            if not self.polish_pending() and not self.busy():
+                return self.start_polish_audit(max(1, pol["round"]))
+        elif not self.busy() and not self.polish_pending():  # idle, or an audit a previous drive left unfinished
+            return self.start_gap_pass() or self.start_polish_audit(max(1, pol["round"]))
         return started
 
+    def gap_modules(self, gaps: list[dict]) -> list[str]:
+        """Every module a plan gap names (by name or path), plus the modules of the functions that recorded them."""
+        named = {str(e.get("module") or "") for e in gaps} - {""}
+        text = "\n".join(str(e.get("gap") or "") for e in gaps)
+        for m in {f.module for f in self.order}:
+            paths = module_paths(module_section(self.arch, m), m)
+            if re.search(rf"(?<![\w]){re.escape(m)}(?![\w])", text) or any(p.rstrip("/") in text for p in paths):
+                named.add(m)
+        return sorted(named)
+
+    def start_gap_pass(self) -> bool:
+        """The plan gaps the function reviews recorded, as ONE fix pass that may touch every module they name
+        (a shared constant changes in its owner and every caller together). Runs once, alone; False if none."""
+        pol = self.polish_state()
+        if pol.get("gaps") or pol["round"] or pol["status"] != "idle":
+            return False
+        gaps = self.read_gaps()
+        if not gaps:
+            return False
+        modules = self.gap_modules(gaps)
+        items = [{"text": "These are plan gaps the function reviews recorded: duplicated constants, messages or "
+                          "helpers another module should own or export. For each one, export it from the owner "
+                          "module and make every caller import it, all in this pass. No behaviour may change; skip "
+                          "a gap that would change behaviour and say so in your hand-back.\n"}]
+        items += [{"text": f"- [plan gap from {e.get('fn', '?')}, module {e.get('module', '?')}] {e['gap']}"}
+                  for e in gaps]
+        pol.update(gaps="started", status="gaps")
+        self.save()
+        self.log(GAPS_FID, "plan_gaps", f"start: {len(gaps)} gaps across {', '.join(modules)}")
+        self.start_polish_fix(", ".join(modules), items, fid=GAPS_FID)
+        return True
+
     def polish_claims(self, module: str) -> list[str]:
-        section = module_section(self.arch, module)
-        return module_paths(section, module) + module_shared(section)
+        out = []
+        for m in module.split(", "):  # the plan-gaps pass names several modules
+            section = module_section(self.arch, m)
+            out += module_paths(section, m) + module_shared(section)
+        return out
 
     def polish_ready(self) -> list[tuple[str, list[dict]]]:
         """Queued fix passes that may start now: a free slot each and no path overlap with a fix in flight."""
@@ -1414,7 +1491,7 @@ class Driver:
         return "\n".join(lines) or "(overhaul.toml has no whole-tree [commands])"
 
     def polish_allowed(self, module: str, fid: str = "") -> str:
-        paths = module_paths(module_section(self.arch, module), module)
+        paths = [p for m in module.split(", ") for p in module_paths(module_section(self.arch, m), m)]
         tests = unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
         return "\n".join([f"- `{p}`" for p in paths] + [f"- `{t}` (unit tests for this module only)" for t in tests]
                          + (["- `tests/property/` (add property tests; never edit a planned one)"]
@@ -1489,7 +1566,8 @@ class Driver:
             if real is None:
                 self.polish_failed(fid, "verifier wrote no result; the review's NOs were not checked")
             elif real:
-                self.polish_failed(fid, f"review: {len(real)} verified blocking NOs: {format_nos(real)}")
+                if not self.retry_polish_fix(fid, real, meta.get("head", ""), job.attempt):
+                    self.polish_failed(fid, f"review: {len(real)} verified blocking NOs: {format_nos(real)}")
             else:
                 self.polish_lands.append(fid)
             return
@@ -1565,18 +1643,43 @@ class Driver:
     def start_polish_fix(self, module: str, items: list[dict], fid: str = "") -> None:
         rnd = 0 if fid else self.polish_state()["round"]
         fid = fid or f"polish-r{rnd}-" + (re.sub(r"[^A-Za-z0-9._-]+", "-", module).strip("-.") or "misc")
-        issues = "\n".join(f"- `{i.get('file', '?')}:{i.get('line', '?')}` [{i.get('rule', '?')}] "
-                           f"{i.get('evidence') or i.get('issue') or ''}" for i in items)
+        issues = "\n".join(i["text"] if "text" in i else f"- `{i.get('file', '?')}:{i.get('line', '?')}` "
+                           f"[{i.get('rule', '?')}] {i.get('evidence') or i.get('issue') or ''}" for i in items)
         self.polish_meta[fid] = (module, issues)
+        self.polish_tries.pop(fid, None)
+        path = self.polish_fix_brief(fid, rnd, module, issues)
+        self.start_polish_job(fid, "polish_fix", rnd, path, self.prepare_worktree(fid))
+        self.log(fid, self.fix_event(fid), f"start {module}: {len(items)} issues model={self.jobs[fid].model}")
+        self.say(f"polish fix {fid}")
+
+    def polish_fix_brief(self, fid: str, rnd: int, module: str, issues: str) -> Path:
         brief = render("polish-fix-brief.md", {
             "id": fid, "round": str(rnd), "module": module, "branch": f"fn/{fid}", "max_calls": str(self.max_calls),
             "issues": issues, "allowed_paths": self.polish_allowed(module, fid), "policies": self.policies(),
             "commands": self.polish_commands()})
         path = self.ov / "briefs" / f"{fid}.md"
         path.write_text(brief, encoding="utf-8")
-        self.start_polish_job(fid, "polish_fix", rnd, path, self.prepare_worktree(fid))
-        self.log(fid, self.fix_event(fid), f"start {module}: {len(items)} issues model={self.jobs[fid].model}")
-        self.say(f"polish fix {fid}")
+        return path
+
+    def retry_polish_fix(self, fid: str, real: list[dict], head: str, rnd: int) -> bool:
+        """Like a build retry: a fix whose review has verified blocking NOs gets FIX_RETRIES more passes on its own
+        branch, carrying the NO list; the round rule then applies to its review. False once they are spent."""
+        prev = self.polish_tries.get(fid) or {}
+        n = prev.get("round", 0) + 1
+        if n > FIX_RETRIES or fid not in self.polish_meta or not head:
+            return False
+        module, issues = self.polish_meta[fid]
+        self.polish_tries[fid] = {"round": n, "head": head, "ids": sorted({x["id"] for x in real})}
+        self.reset_wt(fid, head)
+        listing = format_nos(real)
+        path = self.polish_fix_brief(fid, rnd, module, issues + (
+            f"\n\nRetry {n}: the branch keeps your last attempt, whose review found {len(real)} verified blocking "
+            f"NOs on lines it changed. Fix every one, and keep the fixes above:\n{listing}"))
+        self.start_polish_job(fid, "polish_fix", rnd, path, self.ov / "wt" / fid)
+        self.log(fid, self.fix_event(fid), f"retry {n}/{FIX_RETRIES}: {len(real)} verified blocking NOs model="
+                 f"{self.jobs[fid].model}: " + " / ".join(f"{x['id']} {where(x)}" for x in real))
+        self.say(f"polish fix {fid}: retry {n}")
+        return True
 
     def after_polish_fix(self, job: Job) -> None:
         tokens, turns, text = read_result(job.out)
@@ -1599,8 +1702,7 @@ class Driver:
             "standard_path": STANDARD.as_posix(), "standard": relevant_rules(module + "\n" + issues),
             "checklist_path": CHECKLIST.as_posix(), "checklist_version": checklist()[0],
             "checklist": checklist_text(applicable_items(module + "\n" + issues)),
-            "round_rule": "A polish fix: a NO blocks only when it points at a line this fix changed; NOs on "
-                          "unchanged code are logged as review_overreach and do not block.",
+            "round_rule": self.polish_round_rule(job.fn),
             "diffstat": git(self.repo, "diff", "--stat", f"{self.main}...{branch}").rstrip(),
             "diff": git(self.repo, "diff", f"{self.main}...{branch}").rstrip(), "max_calls": str(REVIEW_MAX_CALLS)})
         if len(brief) // 4 > self.max_tokens:
@@ -1611,6 +1713,16 @@ class Driver:
         head = git(self.repo, "rev-parse", branch).strip()
         self.start_polish_job(job.fn, "polish_review", job.attempt, path, self.ov / "wt" / job.fn)
         self.jobs[job.fn].head = head
+
+    def polish_round_rule(self, fid: str) -> str:
+        prev = self.polish_tries.get(fid)
+        if not prev:
+            return ("A polish fix: a NO blocks only when it points at a line this fix changed; NOs on unchanged code "
+                    "are logged as review_overreach and do not block.")
+        return (f"Retry {prev['round']} of a polish fix. The previous review's verified blocking NOs were "
+                f"{', '.join(prev['ids']) or 'none'}. A NO now blocks only when (a) it is one of those items, still "
+                "NO, or (b) it points at a line this retry changed (a regression). Any other NO is logged as "
+                "review_overreach and does not block.")
 
     def after_polish_review(self, job: Job) -> None:
         """Only blocking NOs on lines the fix changed may stop it, and only once a verifier reproduces them."""
@@ -1625,10 +1737,12 @@ class Driver:
             self.polish_failed(fid, f"review FAIL: {why}")
             return
         self.log_nits(fid, [n for n in nos if n["severity"] not in BLOCKING], "polish review")
-        base = git(self.repo, "merge-base", self.main, job.head).strip()
+        prev = self.polish_tries.get(fid)
+        base = prev["head"] if prev else git(self.repo, "merge-base", self.main, job.head).strip()
         changed = changed_lines(self.repo, base, job.head)
+        ids = set(prev["ids"]) if prev else set()
         blocking = [n for n in nos if n["severity"] in BLOCKING]
-        mine = [n for n in blocking if changed is None or in_changed(n, changed)]
+        mine = [n for n in blocking if n["id"] in ids or changed is None or in_changed(n, changed)]
         over = [n for n in blocking if n not in mine]
         if over:
             self.log(fid, "review_overreach", f"{len(over)} NOs on unchanged code, not blocking: "
@@ -1639,7 +1753,7 @@ class Driver:
             self.polish_lands.append(fid)
             return
         path = self.verify_brief(fid, f"fn/{fid}", mine, job.attempt)
-        self.verify_meta[fid] = {"findings": mine}
+        self.verify_meta[fid] = {"findings": mine, "head": job.head}
         self.start_polish_job(fid, "polish_verify", job.attempt, path, self.ov / "wt" / fid)
 
     def pump_polish_land(self) -> bool:

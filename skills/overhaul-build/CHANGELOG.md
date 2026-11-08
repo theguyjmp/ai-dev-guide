@@ -1,5 +1,15 @@
 # overhaul-build changelog
 
+## v3 gap, 2026-11-07
+Trial 6 lost 5 functions to needs-plan over PLAN-GAP lines about shared constants (F06's had 0 blocking NOs and
+said "Optional"), and threw away probe-core's fix of 31 mutation survivors over one verified P1. Now a PLAN-GAP goes
+to needs-plan only when it is tied to a verified blocking NO (its id or file named in the gap, or the NO itself says
+PLAN-GAP or outside the allowed paths) on a diff that stayed inside them; otherwise the function passes or retries as
+usual and the gap goes to .overhaul/plan-gaps.jsonl (event plan_gap). After the build and the probes, the gaps run as
+ONE cross-module fix pass (polish-gaps, event plan_gaps) that may touch every module they name, alone, before polish
+round 1. A probe or polish fix whose review has verified blocking NOs gets one retry pass on its branch carrying the
+NO list, reviewed under the round rule, before it fails.
+
 ## v3 probe, 2026-11-07
 mutate.py: a stdlib AST mutation tester (comparisons, boundaries, arithmetic, booleans, returns, raises), one
 subprocess per mutant on a temp copy, at most [probe] max_mutants (40). drive.py runs it once a module's functions are

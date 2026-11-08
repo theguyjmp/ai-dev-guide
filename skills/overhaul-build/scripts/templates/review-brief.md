@@ -52,7 +52,9 @@ How to answer:
 - List EVERY NO in this one pass. The builder fixes the whole list at once; a NO you hold back for a later round
   will not block then (see the round rule).
 - For each NO give `fix`: the change inside the allowed paths. When the fix needs a file outside them (another
-  module must export or change a helper), write it in `plan_gap` instead; drive.py sends it to the plan.
+  module must export or change a helper), write it in `plan_gap` instead. Start it with the id of the blocking NO it
+  belongs to (`C07: ...`); only a verified blocking NO tied to it goes to the plan. Any other gap is batched into one
+  cross-module pass after the build, and the function passes.
 - Search the tree (`git grep -n`) for each new helper, constant and message string before answering C03, C05
   and C07.
 
