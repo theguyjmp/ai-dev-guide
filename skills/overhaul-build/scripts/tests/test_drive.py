@@ -127,7 +127,8 @@ if first.startswith("# Polish audit round "):  # scenario "audit": one list of f
     Path(field("- Findings file to write:")).write_text(json.dumps(found), encoding="utf-8")
     finish(str(len(found)))
 if first.startswith("# Polish fix "):
-    (seen / f"{first.split()[3]}-fix.md").write_text(brief, encoding="utf-8")
+    k = len(list(seen.glob(first.split()[3] + "-fix*.md")))  # the 2nd pass on a fid writes -fix-2.md
+    (seen / (first.split()[3] + ("-fix.md" if not k else f"-fix-{k + 1}.md"))).write_text(brief, encoding="utf-8")
     p = Path("src") / field("- Module:").split(",")[0] / "tidy.py"
     p.parent.mkdir(parents=True, exist_ok=True)
     old = p.read_text(encoding="utf-8") if p.exists() else ""
@@ -192,6 +193,12 @@ if mode == "hang":
 if mode == "slow":  # a build that takes long enough for parallel builds to overlap in time
     time.sleep(2.5)
     mode = "ok"
+if mode == "blockedby" and (seen / (fid + "-blocked")).exists():  # the rebuild after its dependency fix
+    mode = "ok"
+if mode == "blockedby":  # a landed dependency's bug outside the allowed paths: commit nothing, name it
+    (seen / (fid + "-blocked")).write_text("1", encoding="utf-8")
+    finish("BLOCKED " + fid + chr(10) + "alpha add is wrong" + chr(10)
+           + "BLOCKED-BY: src/alpha/f1.py:1 add 1 2 prints 0, want 3")
 if mode == "outside":  # edits a protected file and leaves it uncommitted
     p = Path("spec/FUNCTIONS.md")
     p.write_text(p.read_text(encoding="utf-8") + "\\n<!-- edited by the builder -->\\n", encoding="utf-8")
@@ -414,6 +421,17 @@ class TestRetries(Toy):
         self.assertTrue(rec["last_reason"].startswith("acceptance red in the worktree"), rec["last_reason"])
         self.assertTrue((repo / ".overhaul" / "runs" / "F1-acceptance.out").is_file())
         self.assertFalse(any(e["event"].startswith("review") for e in self.events(repo)))
+
+    def test_blocked_by_sends_the_defect_to_the_owner_and_rebuilds_free(self):  # trials 7-9: F02, F08, F09
+        repo = self.make_repo({"F2": {"build": ["blockedby"]}}, retries=0)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.state(repo)["functions"]["F2"]["status"], "proven")
+        ev = [(e["event"], e["fn"], e["detail"]) for e in self.events(repo)]
+        self.assertTrue(any(e == "blocked_by" and f == "F2" and "src/alpha/f1.py:1 in alpha" in d for e, f, d in ev), ev)
+        self.assertTrue(any(e == "dep_fix" and f == "depfix-F2" and d == "landed alpha" for e, f, d in ev), ev)
+        self.assertIn("add 1 2 prints 0, want 3", self.seen("depfix-F2-fix.md"))
+        self.assertFalse(any(e == "needs_plan" for e, _, _ in ev))
 
     def test_acceptance_already_green_skips_the_retry(self):
         repo = self.make_repo({"F1": {"land": ["green_before"]}}, retries=1)
@@ -1150,10 +1168,10 @@ class TestFixRetry(Toy):
         ev = self.fix_events(repo)
         self.assertEqual(len([1 for _, d in ev if d.startswith("retry 1/1")]), 1, ev)
         self.assertIn(("probe_fix", "landed alpha"), ev)
-        self.assertIn("Retry 1", self.seen("probe-alpha-fix.md"))
-        self.assertIn("unused import", self.seen("probe-alpha-fix.md"))
+        self.assertIn("Retry 1", self.seen("probe-alpha-fix-2.md"))
+        self.assertIn("unused import", self.seen("probe-alpha-fix-2.md"))
         self.assertIn("Retry 1 of a polish fix", self.seen("probe-alpha-review-2.md"))
-        self.assertEqual(self.state(repo)["probe"]["alpha"]["status"], "fixed")
+        self.assertEqual(self.state(repo)["probe"]["alpha"]["status"], "below_floor")
 
     def test_retry_count_is_kept_in_state_json(self):
         repo = self.probe_repo(0.5)
@@ -1197,17 +1215,17 @@ class TestProbe(Toy):
     def probe_events(self, repo: Path) -> list[tuple[str, str]]:
         return [(e["event"], e["detail"]) for e in self.events(repo) if e["event"].startswith("probe_")]
 
-    def test_below_the_floor_runs_one_fix_pass_per_module(self):
+    def test_below_the_floor_is_measured_again_after_each_of_two_fix_passes(self):  # trial 7: 72% never re-read
         repo = self.probe_repo(0.5)
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 0, out)
         ev = self.probe_events(repo)
-        self.assertEqual(len([1 for e, _ in ev if e == "probe_mutation"]), 2, ev)
+        self.assertEqual(len([1 for e, _ in ev if e == "probe_mutation"]), 6, ev)
         self.assertEqual(sorted(d for e, d in ev if e == "probe_fix" and d.startswith("landed")),
-                         ["landed alpha", "landed beta"])
+                         ["landed alpha", "landed alpha", "landed beta", "landed beta"])
         self.assertIn("a >= b", self.seen("probe-alpha-fix.md"))
         self.assertEqual({m: r["status"] for m, r in self.state(repo)["probe"].items()},
-                         {"alpha": "fixed", "beta": "fixed"})
+                         {"alpha": "below_floor", "beta": "below_floor"})
 
     def test_at_or_above_the_floor_runs_no_fix(self):
         repo = self.probe_repo(0.95)

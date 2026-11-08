@@ -78,6 +78,11 @@ land.py also refuses any branch that edits them, so such an edit can never reach
    again before review. Do not push, do not switch branches, do not touch any other worktree or the main checkout.
    Code that calls a dependency still raising NotImplementedError builds against its stub's signature and
    docstring; do not implement another function's stub.
+9. If the acceptance test fails because code OUTSIDE the allowed paths is wrong (a landed dependency's bug,
+   not a stub), do not work around it and do not edit it. Prove it with the failing test output, then end your
+   final message with a third line `BLOCKED-BY: <path>:<line> <the input, the wrong result, the right result>`.
+   drive.py sends that defect to the owning module's fix pass and rebuilds this function after it lands; the
+   attempt is not counted.
 
 ## Budget
 
@@ -87,7 +92,7 @@ repeating it.
 
 ## Final message
 
-Exactly 2 lines, nothing else:
+Exactly 2 lines (3 with a BLOCKED-BY line, rule 9), nothing else:
 
 1. `DONE {{id}}` or `BLOCKED {{id}}`, then the commit sha of your last commit.
 2. One sentence: what you built, or the single reason you are blocked.

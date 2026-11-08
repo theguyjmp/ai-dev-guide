@@ -1,5 +1,17 @@
 # overhaul-build changelog
 
+## v3 trials 7-9, 2026-11-08
+Trials 7 and 8 stalled at 3/21: F02, which 16 functions waited on, parked over faults no F02 builder could fix.
+- plan_validate: an acceptance test that drives another row's entry must wait on that row's behaviour (F02's test ran
+  F05's `stock price`); lint must be green on the plan tree, so a manager plan fix cannot turn main red.
+- drive: the pre-review gate runs the function's own acceptance (saved to runs/<id>-acceptance.out), so a red test
+  no longer costs a review and a land; retries grow by one per 5 waiting functions (max +2); dedup-only verified NOs
+  on the last attempt land and go to plan-gaps.
+- drive: BLOCKED-BY (build brief rule 9). Trial 9's F02/F08/F09 failed on a core store-lock and money bug outside
+  their paths; the owning module now gets one dep fix and the function rebuilds free.
+- drive: a module below its mutation floor is mutated again after each landed probe fix (2 passes max); trial 7's
+  verdict read the 72% from before the fix.
+
 ## v3 gap, 2026-11-07
 Pass 2: a verified blocking NO of a dedup item (DEDUP_IDS: C03, C05, C06, C07, C08) tied to a PLAN-GAP passes the function and goes to plan-gaps.jsonl; only a behaviour NO parks it. The probe and polish fix retry count is kept in state.json.
 Trial 6 lost 5 functions to needs-plan over PLAN-GAP lines about shared constants (F06's had 0 blocking NOs and

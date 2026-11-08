@@ -120,7 +120,10 @@ DEFAULTS = {
     "probe": {"enabled": True, "mutation_floor": 0.9, "max_mutants": 40, "cmd": ""},
 }
 PROBE_PREFIX = "probe-"  # a probe fix pass: fid probe-<module>, landed like a polish fix
-PROBE_DONE = ("done", "fixed", "fix_failed", "error", "skipped")
+PROBE_DONE = ("done", "below_floor", "fix_failed", "error", "skipped")
+PROBE_FIXES = 2  # fix passes per module below its mutation floor; the score is measured again after each
+DEPFIX_PREFIX = "depfix-"  # a dependency fix: a builder's BLOCKED-BY defect, fixed in the owning module
+BLOCKED_BY = re.compile(r"^\s*BLOCKED-BY:\s*`?([^\s`:]+)(?::(\d+))?`?\s*(.*)$", re.M)
 GAPS_FID = "polish-gaps"  # the one cross-module pass over .overhaul/plan-gaps.jsonl, run alone before polish round 1
 FIX_RETRIES = 1  # a probe or polish fix whose review has verified blocking NOs gets this many retry passes
 
@@ -699,6 +702,7 @@ class Driver:
                 rec["status"] = "proven"
             elif rec["status"] in IN_FLIGHT:
                 rec["status"] = "planned"  # a previous drive stopped mid-flight
+            rec.pop("blocked_on", None)  # its dependency fix died with the previous drive
         self.flush()
 
     def plan_problem(self, f: Fn) -> str:
@@ -780,6 +784,7 @@ class Driver:
         ready: list[Fn] = []
         for f in self.order:
             if (recs[f.id]["status"] != "planned" or f.id in busy or recs[f.id]["attempts"] > self.budget(f.id)
+                    or recs[f.id].get("blocked_on")
                     or not all(d in proven for d in f.blocking)):
                 continue
             mine = self.claims(f)
@@ -979,7 +984,48 @@ class Driver:
                 (" timeout" if job.timed_out else "")
         self.log(job.fn, "build_end", f"rc={job.proc.returncode} turns={turns}/{self.max_calls}{flags} "
                  f"model={job.model}", time.monotonic() - job.started, tokens)
+        if self.blocked_by(job.fn, text):
+            return
         self.to_review(job, self.build_problem(job, text) or self.sync_problem(job.fn))
+
+    def owner_module(self, path: str) -> str:
+        """The module whose ARCHITECTURE paths hold path, or ''."""
+        for m in dict.fromkeys(f.module for f in self.order):
+            if any(paths_overlap([path], [p]) for p in module_paths(module_section(self.arch, m), m)):
+                return m
+        return ""
+
+    def blocked_by(self, fid: str, text: str) -> bool:
+        """A builder's BLOCKED-BY line: its acceptance fails on a landed dependency's bug outside its paths, which
+        no retry of it can fix. The owning module gets one fix pass (fid depfix-<id>, built, reviewed and landed
+        like a probe fix) and the function waits for it without spending an attempt. One per function; a second
+        BLOCKED-BY is an ordinary failed attempt."""
+        m = BLOCKED_BY.search(text or "")
+        rec = self.st["functions"][fid]
+        if not m or rec.get("depfixes", 0) >= 1:
+            return False
+        path, line, why = m.group(1).strip("`"), m.group(2) or "?", m.group(3).strip() or "(no detail)"
+        module, dfid = self.owner_module(path), f"{DEPFIX_PREFIX}{fid}"
+        if (not module or module == self.fns[fid].module or dfid in self.jobs or dfid in self.polish_lands
+                or any(paths_overlap([path], [c]) for c in self.claims(self.fns[fid]))):
+            return False
+        out = self.ov / "runs" / f"{fid}-acceptance.out"
+        evidence = (f"{why} (found by {fid}, whose acceptance {', '.join(self.fns[fid].acceptance)} fails on it"
+                    + (f"; its last output: {out.as_posix()}" if out.is_file() else "") + ")")
+        self.set(fid, status="planned", depfixes=rec.get("depfixes", 0) + 1, blocked_on=dfid,
+                 last_reason=f"waiting on {dfid}: {path}:{line} {why}"[:REASON_MAX])
+        self.log(fid, "blocked_by", f"{path}:{line} in {module}: {why}"[:REASON_MAX])
+        self.start_polish_fix(module, [{"file": path, "line": line, "rule": f"dependency defect found by {fid}",
+                                        "evidence": evidence}], fid=dfid)
+        return True
+
+    def depfix_settled(self, dfid: str, ok: bool, reason: str = "") -> None:
+        """A dependency fix landed or failed: its waiting function builds again, or parks with the reason."""
+        for fid, rec in self.st["functions"].items():
+            if rec.get("blocked_on") == dfid:
+                self.set(fid, blocked_on=None)
+                if not ok:
+                    self.park(fid, f"dependency fix {dfid} failed: {reason}")
 
     def to_review(self, job: Job, problem: str) -> None:
         """After a build or conflict pass: review when clean, a conflict pass on a pre-review merge conflict."""
@@ -1824,6 +1870,7 @@ class Driver:
                      time.monotonic() - job.started)
             self.say(f"polish landed {job.fn}")
             self.probe_settled(job.fn, True)
+            self.depfix_settled(job.fn, True)
             return
         out, err = read_text(job.out), read_text(job.out.with_suffix(".err"))
         self.polish_failed(job.fn, "land: " + ("land.py timed out" if job.timed_out else (
@@ -1834,6 +1881,7 @@ class Driver:
         self.log(fid, self.fix_event(fid), f"failed: {reason[:REASON_MAX]}")
         self.say(f"polish {fid} failed: {reason}")
         self.probe_settled(fid, False)
+        self.depfix_settled(fid, False, reason)
 
     def reap_polish(self, job: Job) -> None:
         if job is self.land_job:
@@ -1904,7 +1952,7 @@ class Driver:
         out = self.ov / "runs" / f"{fid}-mutate.out"
         start = time.monotonic()
         self.jobs[fid] = Job(fid, "probe_mutate", spawn(cmd, wt, out), out, start, start + 2 * self.timeout_s, 0)
-        pst[module] = {"status": "mutating"}
+        pst[module] = {**pst.get(module, {}), "status": "mutating"}
         self.save()
         self.say(f"probe {module}: mutating")
 
@@ -1932,9 +1980,11 @@ class Driver:
         self.log(fid, "probe_mutation", f"{module}: score {score} floor {self.mutation_floor} mutants "
                  f"{res.get('mutants', 0)} survivors {len(survivors)} counterexamples {len(cex)}: {shown}"[:REASON_MAX],
                  secs)
-        rec = {"score": score, "survivors": len(survivors), "counterexamples": len(cex)}
-        if score >= self.mutation_floor and not cex:
-            self.probe_state()[module] = {**rec, "status": "done"}
+        fixes = int(self.probe_state().get(module, {}).get("fixes", 0))
+        rec = {"score": score, "survivors": len(survivors), "counterexamples": len(cex), "fixes": fixes}
+        if (score >= self.mutation_floor and not cex) or fixes >= PROBE_FIXES:
+            ok = score >= self.mutation_floor and not cex
+            self.probe_state()[module] = {**rec, "status": "done" if ok else "below_floor"}
             self.save()
             return
         items = [{"file": s.get("file"), "line": s.get("line"), "rule": f"surviving mutant {s.get('op')}",
@@ -1950,13 +2000,19 @@ class Driver:
 
     @staticmethod
     def fix_event(fid: str) -> str:
+        if fid.startswith(DEPFIX_PREFIX):
+            return "dep_fix"
         return "probe_fix" if fid.startswith(PROBE_PREFIX) else "polish_fix"
 
     def probe_settled(self, fid: str, ok: bool) -> None:
         """A probe fix landed or failed: the module's probe is over (one fix pass, never a second)."""
         module = self.probe_modules().get(fid) if fid.startswith(PROBE_PREFIX) else None
         if module and module in self.probe_state():
-            self.probe_state()[module]["status"] = "fixed" if ok else "fix_failed"
+            pm = self.probe_state()[module]
+            if ok:  # mutate the module again (probe_step), so the verdict reads the score after the fix
+                pm.update(status="remeasure", fixes=int(pm.get("fixes", 0)) + 1)
+            else:
+                pm["status"] = "fix_failed"
             self.save()
 
     def lint_hook(self, wt: Path) -> Path:
