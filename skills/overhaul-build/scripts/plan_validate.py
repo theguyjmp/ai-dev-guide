@@ -606,6 +606,23 @@ def check_ruff(repo, cmd, problems):
         problems.append(f"overhaul.toml: [commands].lint (ruff) misses the strict set: select {' '.join(missing)}")
 
 
+def check_lint_green(repo, cmd, problems, timeout=300):
+    """The plan commit (and every manager plan fix) must keep the lint gate green: a red main fails every
+    builder's pre-review gate and parks functions for a fault that is not theirs."""
+    try:
+        p = subprocess.run(cmd, shell=True, cwd=repo, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        problems.append(f"overhaul.toml: [commands].lint timed out after {timeout}s on the plan tree")
+        return
+    missing = "is not recognized as an internal or external command" in p.stderr or "command not found" in p.stderr
+    if p.returncode in (127, 9009) or missing:  # tool not installed here: the toolchain check owns that
+        return
+    if p.returncode != 0:
+        tail = " / ".join([ln.strip() for ln in (p.stdout + p.stderr).splitlines() if ln.strip()][-4:])
+        problems.append(f"lint is red on the plan tree (exit {p.returncode}): `{cmd}`: {tail}")
+
+
 def given_tests(path):
     """The number of `def test_*` functions decorated with Hypothesis @given (any import form) in a file."""
     import ast
@@ -692,7 +709,10 @@ def validate(repo, run=False, timeout=600, notes=None):
         check_policies(arch_file.read_text(encoding="utf-8", errors="replace"), mods, rows, problems,
                        paths["architecture"])
     if "lint" in cmd:
+        before = len(problems)
         check_ruff(repo, cmd["lint"], problems)
+        if len(problems) == before:  # a lax lint config is the problem to fix first
+            check_lint_green(repo, cmd["lint"], problems)
 
     if (repo / "tests" / "acceptance").is_dir() and not (repo / "tests" / "conftest.py").is_file():
         problems.append("tests/conftest.py: missing; scaffold the shared fixtures there, once, for every test file")

@@ -779,7 +779,7 @@ class Driver:
         taken = [self.claims(self.fns[fid]) for fid in busy if fid in self.fns]
         ready: list[Fn] = []
         for f in self.order:
-            if (recs[f.id]["status"] != "planned" or f.id in busy or recs[f.id]["attempts"] > self.retries
+            if (recs[f.id]["status"] != "planned" or f.id in busy or recs[f.id]["attempts"] > self.budget(f.id)
                     or not all(d in proven for d in f.blocking)):
                 continue
             mine = self.claims(f)
@@ -1000,9 +1000,17 @@ class Driver:
         if p.returncode != 0:
             run(["git", "merge", "--abort"], wt)
             return CONFLICT_SYNC
-        return self.gate_problem(wt)
+        return self.gate_problem(wt, fid)
 
-    def gate_problem(self, wt: Path) -> str:
+    def sh(self, cmd: str, wt: Path) -> subprocess.CompletedProcess[str] | None:
+        """One gate command in a worktree; None on timeout."""
+        try:
+            return subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=self.timeout_s, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def gate_problem(self, wt: Path, fid: str = "") -> str:
         """The whole-tree gate commands land.py runs ([harness] pre_review names them; default all of them), run
         in the worktree on the merged branch. '' when all pass."""
         names = self.cfg["harness"].get("pre_review", land_mod.WHOLE_TREE)
@@ -1016,15 +1024,32 @@ class Driver:
                     return problem
                 continue
             cmd = land_mod.fill(cmd)
-            try:
-                p = subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True, encoding="utf-8",
-                                   errors="replace", timeout=self.timeout_s, stdin=subprocess.DEVNULL)
-            except subprocess.TimeoutExpired:
+            p = self.sh(cmd, wt)
+            if p is None:
                 return f"{name} timed out in the worktree after merging {self.main}: `{cmd}`"
             if not land_mod.passes(cmd, p.returncode):
                 tail = " / ".join([ln.strip() for ln in (p.stdout + p.stderr).splitlines() if ln.strip()][-3:])
                 return (f"{name} failed (exit {p.returncode}) in the worktree after merging {self.main}, before "
                         f"review: `{cmd}`: {tail}. Merge {self.main} and rerun the gate before you hand back")
+        return self.acceptance_problem(wt, fid)
+
+    def acceptance_problem(self, wt: Path, fid: str) -> str:
+        """The function's own acceptance tests, run before review: a red one would only fail at land, after a
+        wasted review. The full output goes to a file the retry brief names. '' when green or not a function."""
+        tmpl = self.cfg["commands"].get("acceptance")
+        if fid not in self.fns or not tmpl or not self.cfg["harness"].get("pre_review_acceptance", True):
+            return ""
+        for node, cmd in land_mod.acceptance_cmds(tmpl, self.fns[fid].acceptance):
+            p = self.sh(cmd, wt)
+            if p is None:
+                return f"acceptance {node} timed out in the worktree after merging {self.main}: `{cmd}`"
+            if p.returncode != 0:
+                out = self.ov / "runs" / f"{fid}-acceptance.out"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(p.stdout + p.stderr, encoding="utf-8")
+                tail = " / ".join([ln.strip() for ln in (p.stdout + p.stderr).splitlines() if ln.strip()][-8:])
+                return (f"acceptance red in the worktree after merging {self.main}, before review: {node} "
+                        f"(exit {p.returncode}): {tail} (full output: {out.as_posix()}). Make it pass, then hand back")
         return ""
 
     def build_problem(self, job: Job, text: str) -> str:
@@ -1282,6 +1307,15 @@ class Driver:
         if not real:
             self.keep_gap(fid, gap)
             self.log(fid, "review_pass", f"0 verified of {len(findings)} blocking NOs model={job.model}", secs, tokens)
+            self.land_queue.append(fid)
+            self.set(fid, status="landing")
+            return
+        if (all(n["id"] in DEDUP_IDS for n in real)
+                and self.st["functions"][fid]["attempts"] + 1 > self.budget(fid)):
+            note = " / ".join(f"[{n['id']} {where(n)}] {n.get('evidence', '')} {n.get('fix', '')}" for n in real)
+            self.keep_gap(fid, f"{gap} / {note}" if gap else note)  # a duplicate never parks a working function
+            self.log(fid, "review_pass", f"{len(real)} verified dedup NOs ({', '.join(n['id'] for n in real)}) "
+                     f"recorded as plan gap on the last attempt model={job.model}", secs, tokens)
             self.land_queue.append(fid)
             self.set(fid, status="landing")
             return
@@ -1952,8 +1986,27 @@ class Driver:
         attempts = self.st["functions"][fid]["attempts"] + 1
         self.set(fid, status="planned", attempts=attempts, last_reason=reason[:REASON_MAX])
         self.say(f"{fid} attempt {attempts} failed: {reason}")
-        if attempts > self.retries:
+        if attempts > self.budget(fid):
             self.park(fid, reason)
+
+    def waiting_on(self, fid: str) -> set[str]:
+        """Every function whose build waits, directly or through others, on fid's real behaviour."""
+        out: set[str] = set()
+        todo = [fid]
+        while todo:
+            cur = todo.pop()
+            for f in self.fns.values():
+                if cur in f.blocking and f.id not in out:
+                    out.add(f.id)
+                    todo.append(f.id)
+        return out
+
+    def budget(self, fid: str) -> int:
+        """Retries for one function: the configured count plus one per 5 functions waiting on it (at most 2 more),
+        since parking a function others need stalls all of them behind one manager round."""
+        if fid not in self.fns:
+            return self.retries
+        return self.retries + min(2, len(self.waiting_on(fid)) // 5)
 
     def park(self, fid: str, reason: str) -> None:
         self.set(fid, status="needs-plan", last_reason=reason[:REASON_MAX])

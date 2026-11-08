@@ -418,7 +418,9 @@ class QualityPolicies(Base):
                                              'select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "C90",'
                                              ' "ARG", "A", "ANN201", "PLR0915"]\n',
                                              encoding="utf-8")
-        self.assertEqual(self.problems(root), [])
+        found = self.problems(root)  # strict config passes; the fixture's own code is lint red, and that is reported
+        self.assertEqual([p for p in found if not p.startswith("lint is red on the plan tree")], [])
+        self.assertTrue(self.has(found, "lint is red on the plan tree"), found)
 
     def test_literals_command_required(self):
         self.only(self.problems(self.make(literals=None)), "[commands].literals is missing")

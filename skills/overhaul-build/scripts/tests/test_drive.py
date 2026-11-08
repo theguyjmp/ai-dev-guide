@@ -252,7 +252,8 @@ class Toy(unittest.TestCase):
     def make_repo(self, scenario: dict | None = None, retries: int = 1, timeout_min: float = 30,
                   brief_max: int = 40000, functions: str = FUNCTIONS, max_parallel: int = 2,
                   conflict_retries: int | None = None, worker_args: str = "", harness_extra: str = "",
-                  commands_extra: str = "", pre_review: str = '["cycles"]') -> Path:
+                  commands_extra: str = "", pre_review: str = '["cycles"]',
+                  pre_review_acceptance: str = "false") -> Path:
         self.root = Path(tempfile.mkdtemp(prefix="drive-test-")).resolve()
         self.addCleanup(self.cleanup_root)
         repo, scripts = self.root / "repo", self.root / "scripts"
@@ -288,6 +289,7 @@ builder_timeout_min = {timeout_min}
 worker_cmd = ["{py}", "{worker}"{worker_args}]
 scripts_dir = "{scripts.as_posix()}"
 pre_review = {pre_review}
+pre_review_acceptance = {pre_review_acceptance}
 {harness_extra}
 """)
         git(repo, "init", "-q", "-b", "main")
@@ -404,6 +406,15 @@ class TestRetries(Toy):
         self.assertIn("changed protected files (spec/FUNCTIONS.md)", self.seen("F1-build-2.md"))
         self.assertFalse((self.root / "seen" / "F2-build-1.md").exists())  # F2 never started
 
+    def test_red_acceptance_fails_before_review_with_its_output_saved(self):  # trial 7 F02
+        repo = self.make_repo({"F1": {"review": ["PASS"]}}, retries=0, pre_review_acceptance="true")
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 3, out)
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertTrue(rec["last_reason"].startswith("acceptance red in the worktree"), rec["last_reason"])
+        self.assertTrue((repo / ".overhaul" / "runs" / "F1-acceptance.out").is_file())
+        self.assertFalse(any(e["event"].startswith("review") for e in self.events(repo)))
+
     def test_acceptance_already_green_skips_the_retry(self):
         repo = self.make_repo({"F1": {"land": ["green_before"]}}, retries=1)
         rc, out = self.drive_cli(repo)
@@ -466,6 +477,17 @@ class TestTrial3Waste(Toy):
         self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "proven")
         gaps = (repo / ".overhaul" / "plan-gaps.jsonl").read_text(encoding="utf-8")
         self.assertIn("beta must export LIMIT", gaps)
+
+    def test_verified_dedup_no_on_the_last_attempt_lands_and_records_a_gap(self):  # trial 7 F02
+        review = {"checklist": "v1",
+                  "items": [{"id": "C03", "answer": "no", "file": "src/alpha/f1.py", "line": 1,
+                             "evidence": "help text repeats the limit", "fix": "build it from LIMIT"}]}
+        repo = self.make_repo({"F1": {"review": [review]}}, retries=0)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "proven")
+        gaps = (repo / ".overhaul" / "plan-gaps.jsonl").read_text(encoding="utf-8")
+        self.assertIn("help text repeats the limit", gaps)
 
     def test_plan_gap_with_a_verified_behaviour_no_goes_to_needs_plan(self):  # F15, trial 6 F05
         review = {"checklist": "v1", "plan_gap": "C13: beta must export LIMIT; beta is outside the allowed paths",
