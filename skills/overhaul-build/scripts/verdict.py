@@ -189,7 +189,7 @@ def function_view(rows, state):
         s = sfns.get(fid) if isinstance(sfns.get(fid), dict) else {}
         st = str(s.get("status") or "").strip().lower()
         md = r.get("status") or ""
-        status = "proven" if md == "proven" else (st if st and st != "proven" else (md or "planned"))
+        status = md if md in ("proven", "deferred") else (st if st and st != "proven" else (md or "planned"))
         view.append({"id": fid, "module": r.get("module", ""), "phase": r.get("phase", ""), "status": status,
                      "attempts": as_int(s.get("attempts")), "last_reason": str(s.get("last_reason") or ""),
                      "updated": s.get("updated"), "cycle": s.get("cycle")})
@@ -205,8 +205,10 @@ def load_project(repo):
     state = load_json(state_path, {})
     state = state if isinstance(state, dict) else {}
     fpath = paths.get("functions") or "spec/FUNCTIONS.md"
-    view = function_view(read_functions(os.path.join(repo, fpath)), state)
+    every = function_view(read_functions(os.path.join(repo, fpath)), state)
+    view = [f for f in every if f["status"] != "deferred"]  # planned later: neither proven nor missing
     return {"repo": repo, "cfg": cfg, "fpath": fpath, "state": state, "view": view, "total": len(view),
+            "deferred": len(every) - len(view),
             "proven": sum(f["status"] == "proven" for f in view), "odir": odir,
             "log": os.path.join(odir, "log.jsonl"), "verdict": os.path.join(odir, "verdict.json")}
 
@@ -328,6 +330,12 @@ def judge(p, prev, t_now, checks, events):
         if score < floor:
             reds.append((2, "probe", f"mutation score {score:.0%} < floor {floor:.0%} in {mod}",
                          f"the survivors of {mod} go to one fix pass; see probe_mutation in R/.overhaul/log.jsonl"))
+    per = state.get("periodic") if isinstance(state.get("periodic"), dict) else {}
+    for gate, r in sorted((per.get("red") or {}).items()):  # [gates.periodic]: BAD while a gate is red on main
+        r = r if isinstance(r, dict) else {}
+        reds.append((1, "periodic", f"periodic gate {gate} red at {str(r.get('sha', '?'))[:12]}: "
+                     f"{short(r.get('reason', ''), 60)}" + (f" (culprit {r['culprit']})" if r.get("culprit") else ""),
+                     "drive.py bisects it and sends one depfix to the culprit's module; else fix main by hand"))
     nits = pol.get("nits") if pol else None
     trend = open_audit_trend(events)
 
@@ -382,7 +390,9 @@ def judge(p, prev, t_now, checks, events):
             "reds": [{"kind": k, "what": w, "action": a} for _, k, w, a in shown], "reds_total": len(reds),
             "checks": checks if checks is not None else "skipped", "needs_plan_since": since,
             "polish_issues": issues, "nits": nits, "trend": trend,
-            "line": f"VERDICT {verdict} proven {proven}/{total} rate {rate:.1f}/h"
+            "deferred": p.get("deferred", 0),
+            "line": f"VERDICT {verdict} proven {proven}/{total}"
+                    f"{' deferred ' + str(p['deferred']) if p.get('deferred') else ''} rate {rate:.1f}/h"
                     f"{'' if pol is None else ' issues ' + ('?' if issues is None else str(issues))}"
                     f"{'' if pol is None else ' nits ' + str(as_int(nits))}"
                     f"{'' if trend is None else ' trend ' + trend} reds: {text}"}

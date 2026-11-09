@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import land as land_mod  # noqa: E402  the lock protocol is land.py's
+import periodic  # noqa: E402  beside this script: [gates.periodic]
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 
@@ -57,7 +58,7 @@ CHECKLIST = HERE.parent / "references" / "checklist.md"
 ITEM_LINE = re.compile(r"- ([A-Z]\d+) \[(P0|P1|nit)\] ([^|]*)\|([^|]+)\|(.+)")
 BLOCKING = ("P0", "P1")
 NITS_MAX = 5  # nits per pass: logged, never dispatched
-POLISH_ROUNDS_MAX = 2  # v3: at most 2 checklist fix rounds, whatever [limits] polish_rounds says
+POLISH_ROUNDS_MAX = 3  # pass E: at most 3 checklist fix rounds (default 3), whatever [limits] polish_rounds says
 BASE_RULES = (2, 3, 8, 10, 13, 16, 17, 18, 19, 20, 21, 24, 25, 26, 27)
 RULE_TRIGGERS = (  # words in a function's row, module section or acceptance test -> the rules they bring in
     (r"http|server|web|socket|request|port|url", (33, 35)),
@@ -117,6 +118,8 @@ def parse_needs(cell: str, deps: list[str]) -> list[str] | None:
             out.append(next(d for d in deps if d.upper() == did))
     return out
 IN_FLIGHT = ("building", "review", "landing")
+ID_LISTS = ("concurrent writers", "boundaries", "multi-store writes")  # Policies lines that list function ids
+DEFERRED = "deferred"  # FUNCTIONS status of a row planned later (rolling plan): drive never starts it
 POLISH_KINDS = ("polish_audit", "polish_verify", "polish_fix", "polish_review", "polish_land")
 GREEN_BEFORE = "acceptance already green before change"
 CONFLICT = "merge conflict"  # land.py: "merge conflict merging <main> into fn/<id>"
@@ -138,7 +141,7 @@ LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py'
 DEFAULTS = {
     "limits": {"builder_max_calls": 60, "brief_max_tokens": 40000,
                "retries_per_function": 1, "conflict_retries": 2, "builder_timeout_min": 30,
-               "polish_rounds": 3},
+               "polish_rounds": 3, "fix_retries": 2},
     "paths": {"functions": "spec/FUNCTIONS.md", "architecture": "spec/ARCHITECTURE.md",
               "state": ".overhaul/state.json"},
     "harness": {"builder_model": "opus", "review_model": "sonnet"},
@@ -152,7 +155,8 @@ DEPFIX_PREFIX = "depfix-"  # a dependency fix: a builder's BLOCKED-BY defect, fi
 BLOCKED_BY = re.compile(r"^\s*BLOCKED-BY:\s*`?([^\s`:]+)(?::(\d+))?`?\s*(.*)$", re.M)
 GAPS_FID = "polish-gaps"  # the one cross-module pass over .overhaul/plan-gaps.jsonl, run alone before polish round 1
 MAIN_FLAKE_RE = re.compile(r"main flake: test=(\S+) path=(\S+) module=(\S+)")
-FIX_RETRIES = 1  # a probe or polish fix whose review has verified blocking NOs gets this many retry passes
+FIX_RETRIES = 2  # default [limits] fix_retries: retry passes of a probe or polish fix whose review has verified NOs
+DUP_IDS = ("C03", "C05")  # checklist duplication items: a cross-module one goes to the caller module (pass E)
 
 
 class DriveError(Exception):
@@ -532,6 +536,13 @@ def section_items(section: str, pattern: re.Pattern) -> list[str]:
     return []
 
 
+def module_deps(arch: str, module: str) -> list[str]:
+    """The modules a module's `Depends on:` line in ARCHITECTURE.md names (none for `-` or `none`)."""
+    m = re.search(r"^[\s>*-]*\**\s*Depends on\s*:\s*\**\s*(.*)$", module_section(arch, module), re.I | re.M)
+    deps = [x.strip().strip("`*").strip() for x in re.split(r"[,;]", m.group(1))] if m else []
+    return [d for d in dict.fromkeys(deps) if d not in ("", "-", "none", module)]
+
+
 def module_shared(section: str) -> list[str]:
     """Files from a `shared:` line in the module's section: an export list or registry every function touches."""
     return section_items(section, SHARED_LINE)
@@ -559,6 +570,29 @@ def in_paths(path: str, allowed: list[str]) -> bool:
     """Whether a repo-relative file is under one of the allowed paths (a dir ends in /, * ? [ make a glob)."""
     return any(fnmatch.fnmatchcase(path, p) if any(c in p for c in "*?[") else
                path.startswith(p) if p.endswith("/") else path == p for p in allowed)
+
+
+VIS_PREFIX = re.compile(r"^(?:pub(?:\s*\([^)]*\))?\s+|export\s+)")  # Rust pub / pub(crate) / pub(in ..), TS/JS export
+REEXPORT = re.compile(r"^(?:pub(?:\s*\([^)]*\))?\s+use\s+[^;]+;"
+                      r"|export\s*(?:\*|\{[^}]*\})\s*(?:from\s*['\"][^'\"]+['\"])?\s*;?)$")
+
+
+def visibility_only(diff: str) -> bool:
+    """Whether a `git diff -U0` of one file only changes visibility (item 8, #19): each hunk's added lines, with
+    pure re-export lines (`pub use ..;`, `export {..} from '..'`) left out, equal its removed lines once a leading
+    `pub`/`pub(..)`/`export` is stripped. A new or deleted file, or any other edit, is not visibility-only."""
+    if re.search(r"^(?:new|deleted) file mode", diff, re.M):
+        return False
+    hunks = re.split(r"^@@[^\n]*\n", diff, flags=re.M)[1:]
+    if not hunks:
+        return False
+    for hunk in hunks:
+        lines = [ln for ln in hunk.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---"))]
+        removed = [VIS_PREFIX.sub("", ln[1:].strip()) for ln in lines if ln[0] == "-"]
+        added = [ln[1:].strip() for ln in lines if ln[0] == "+"]
+        if [VIS_PREFIX.sub("", a) for a in added if not REEXPORT.match(a)] != removed:
+            return False
+    return True
 
 
 def unit_dirs(cmd: str) -> list[str]:
@@ -601,6 +635,8 @@ def load_config(repo: Path) -> dict:
     cfg["commands"] = {k: str(v) for k, v in raw_cmds.items() if not isinstance(v, dict)}
     cfg["acceptance"] = land_mod.acceptance_template(raw_cmds)
     cfg["extra"] = land_mod.extra_cmds(raw_cmds)
+    cfg["plan"] = raw.get("plan") if isinstance(raw.get("plan"), dict) else {}  # plan_validate's keys, read-only
+    cfg["periodic"] = periodic.config(raw)  # [gates.periodic]: slow gates on main in the background (X2, X13)
     return cfg
 
 
@@ -624,11 +660,14 @@ class Driver:
         self.review_model = str(har.get("review_model") or "")
         self.audit_model = str(har.get("audit_model") or "opus")  # the final judge's model: one bar
         self.polish_rounds = min(int(lim["polish_rounds"]), POLISH_ROUNDS_MAX)
+        self.fix_retries = max(0, int(lim.get("fix_retries", FIX_RETRIES)))
         self.verify_model = str(har.get("verify_model") or self.review_model)  # a cheap model is fine
         self.verify_meta: dict[str, dict] = {}  # fid -> the findings a verifier is checking, and their context
         self.polish_queue: list[tuple[str, list[dict]]] = []  # (module, issues) fix passes waiting for a slot
         self.polish_lands: list[str] = []
         self.polish_meta: dict[str, tuple[str, str]] = {}  # fix fid -> (module(s), issues text)
+        self.polish_owners: dict[str, list[str]] = {}  # caller module -> owners of its cross-module dups this round
+        self.polish_after: dict[str, list[str]] = {}  # caller module -> owners whose own fix must land first
         probe = {**DEFAULTS["probe"], **(cfg.get("probe") or {})}
         self.probe_on = bool(probe["enabled"])
         self.mutation_floor = float(probe["mutation_floor"])
@@ -645,7 +684,9 @@ class Driver:
         self.slots: dict[str, int] = {}  # fid -> k of the CARGO_TARGET_DIR .overhaul/target/slot-<k> it reuses
         self.flake_tests: set[str] = set()  # main-flake tests already sent to a fix this run (one fix per test)
         self.barrier = bool(har.get("phase_barrier", True))  # phase N+1 waits until every phase <=N is proven
+        self.phase_polish = bool(har.get("phase_polish", True))  # item 8: gaps, probes and polish per phase too
         self.fns: dict[str, Fn] = {}
+        self.deferred: set[str] = set()  # rows planned later: never built, counted apart
         self.order: list[Fn] = []
         self.arch = ""
         self.on_main: set[str] = set()
@@ -656,6 +697,7 @@ class Driver:
         self.warned: set[str] = set()
         self.dirty = False  # state.json is behind self.st (land.py held the lock)
         self.cycle_due = ""  # a heartbeat a land asked for, run once the loop has launched what it unblocked
+        self.periodic = periodic.Periodic(self, cfg.get("periodic") or {})
 
     # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
@@ -740,6 +782,10 @@ class Driver:
         ids = [f.id for f in fns]
         if len(set(ids)) != len(ids):
             raise DriveError(f"{rel} repeats ids: {sorted({i for i in ids if ids.count(i) > 1})}")
+        self.deferred = {f.id for f in fns if f.status == DEFERRED}
+        fns = [f for f in fns if f.id not in self.deferred]
+        if not fns:
+            raise DriveError(f"{rel} has only deferred rows; plan a phase first")
         self.order = sorted(fns, key=phase_key)
         self.fns = {f.id: f for f in fns}
         self.arch = self.read_main(arch) or ""
@@ -764,6 +810,9 @@ class Driver:
     def plan_problem(self, f: Fn) -> str:
         if not ID_RE.fullmatch(f.id):
             return f"id {f.id!r} cannot name a branch; use letters, digits, . _ -"
+        later = [d for d in f.deps if d in self.deferred]
+        if later:
+            return f"deps are deferred (planned later): {', '.join(later)}; defer {f.id} too, or plan them now"
         unknown = [d for d in f.deps if d not in self.fns]
         if unknown:
             return f"deps not in FUNCTIONS.md: {', '.join(unknown)}"
@@ -799,6 +848,7 @@ class Driver:
                 changed = self.launch() or changed
                 changed = self.probe_step() or changed
                 changed = self.polish_step() or changed
+                changed = self.periodic.step(idle=not self.busy()) or changed
                 if self.cycle_due:
                     why, self.cycle_due = self.cycle_due, ""
                     self.cycle(why)
@@ -819,7 +869,8 @@ class Driver:
     def busy(self) -> set[str]:
         """In flight: jobs, the land queue, lands, and functions waiting at landing on a main-flake fix."""
         waiting = {fid for fid, r in self.st["functions"].items() if r["status"] == "landing" and r.get("blocked_on")}
-        return set(self.jobs) | set(self.land_queue) | {j.fn for j in self.land_jobs()} | waiting
+        gates = {"periodic"} if self.periodic.busy() else set()
+        return set(self.jobs) | set(self.land_queue) | {j.fn for j in self.land_jobs()} | waiting | gates
 
     def land_jobs(self) -> list[Job]:
         """Lands in flight, the plain one (or a polish land) first, then the stacked ones in start order."""
@@ -844,6 +895,8 @@ class Driver:
         proven = {fid for fid, r in recs.items() if r["status"] == "proven"}
         # the phase barrier: nothing past the lowest phase that still has an unproven function starts
         open_phase = min((phase_key(f)[0] for f in self.order if f.id not in proven), default=0)
+        if self.barrier and (polishing := self.polish_phase()) is not None:
+            open_phase = min(open_phase, polishing)  # ... and phase N+1 waits for phase N's polish and probes
         busy = self.busy()
         taken = [self.claims(self.fns[fid]) for fid in busy if fid in self.fns]
         ready: list[Fn] = []
@@ -950,9 +1003,55 @@ class Driver:
         paths = f.files + module_shared(section) if f.files else module_paths(section, f.module)
         return list(dict.fromkeys(paths)), unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
 
+    def dep_paths(self, modules: list[str]) -> list[str]:
+        """The paths of the modules these modules depend on (ARCHITECTURE.md `Depends on:`), themselves excluded."""
+        deps = dict.fromkeys(d for m in modules for d in module_deps(self.arch, m) if d not in modules)
+        return list(dict.fromkeys(p for d in deps for p in module_paths(module_section(self.arch, d), d)))
+
+    @staticmethod
+    def vis_line(where: str, vis: list[str]) -> list[str]:
+        if not vis:
+            return []
+        return [f"- visibility-only edits in {where} (" + ", ".join(f"`{p}`" for p in vis) + "): make an existing "
+                "item `pub`, `pub(crate)` or `export`ed, or add a `pub use` / `export {...} from` re-export of one, so "
+                "you can import a helper instead of duplicating it (C05). Nothing else in those files: drive.py "
+                "refuses any other change there before review, and the review checks it too"]
+
     def allowed(self, f: Fn) -> str:
         paths, tests = self.allowed_lists(f)
-        return "\n".join([f"- `{p}`" for p in paths] + [f"- `{t}` (unit tests for this module only)" for t in tests])
+        own = [p for p in module_paths(module_section(self.arch, f.module), f.module) if p not in paths]
+        deps = self.dep_paths([f.module])
+        where = (f"the rest of module `{f.module}`" if own else f"module `{f.module}`") + (
+            " and in the modules it depends on" if deps else "")
+        return "\n".join([f"- `{p}`" for p in paths] + [f"- `{t}` (unit tests for this module only)" for t in tests]
+                         + self.vis_line(where, own + deps))
+
+    def vis_problem(self, changed: list[str], branch: str, allowed: list[str], vis: list[str], what: str) -> str:
+        """Why a change to a file under vis (and not under allowed) is more than a visibility edit, or ''. Files
+        outside both are left to the review, as before."""
+        bad = [p for p in changed if not in_paths(p, allowed) and in_paths(p, vis)
+               and not visibility_only(git(self.repo, "diff", "-U0", f"{self.main}...{branch}", "--", p))]
+        return (f"changed {', '.join(bad[:5])} beyond visibility: {what} may only make an existing item pub/"
+                "pub(crate)/export or re-export it there") if bad else ""
+
+    def visibility_problem(self, f: Fn, changed: list[str], branch: str) -> str:
+        """Why a change to a file of f's own module outside its files cell, or of a module f's module depends on,
+        is more than a visibility edit, or ''."""
+        paths = [p for group in self.allowed_lists(f) for p in group]
+        vis = module_paths(module_section(self.arch, f.module), f.module) + self.dep_paths([f.module])
+        return self.vis_problem(changed, branch, paths, vis, f"outside its files cell (module {f.module} and the "
+                                "modules it depends on) a function")
+
+    def polish_vis_problem(self, fid: str, module: str, branch: str) -> str:
+        """A polish fix's edits in the modules its own modules depend on must be visibility-only (pass E)."""
+        mods = module.split(", ")
+        own = [p for m in mods for p in module_paths(module_section(self.arch, m), m)]
+        own += unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
+        if fid.startswith(PROBE_PREFIX):
+            own.append("tests/property/")
+        changed = git(self.repo, "diff", "--name-only", f"{self.main}...{branch}").splitlines()
+        return self.vis_problem(changed, branch, own, self.dep_paths(mods), f"in the modules {module} depends on, "
+                                "a polish fix")
 
     def gap_nos(self, fid: str, gap: str, real: list[dict]) -> list[dict]:
         """The verified blocking NOs only the plan can fix (see PLAN_GAP): each tied to the PLAN-GAP line (its id
@@ -965,7 +1064,9 @@ class Driver:
         hits = [n for n in real if tied(n)]
         if not hits:
             return []
-        allowed = [p for group in self.allowed_lists(self.fns[fid]) for p in group]
+        f = self.fns[fid]  # its own and its deps' module files count: an edit there passed the visibility check
+        allowed = [p for group in self.allowed_lists(f) for p in group]
+        allowed += module_paths(module_section(self.arch, f.module), f.module) + self.dep_paths([f.module])
         changed = git(self.repo, "diff", "--name-only", f"{self.main}...fn/{fid}").splitlines()
         return hits if all(in_paths(p, allowed) for p in changed) else []  # else the builder strayed: ordinary FAIL
 
@@ -987,6 +1088,15 @@ class Driver:
             if isinstance(e, dict) and str(e.get("gap") or "").strip():
                 out.append(e)
         return out
+
+    def scope_gaps(self) -> list[dict]:
+        """The plan gaps of the polish in scope: those phase N's functions recorded, or for the final pass every
+        gap a phase gap pass has not already taken (a gap of a function outside the plan goes to the final pass)."""
+        phase_of, n = {f.id: phase_key(f)[0] for f in self.order}, self.polish_phase()
+        if n is not None:
+            return [e for e in self.read_gaps() if phase_of.get(str(e.get("fn"))) == n]
+        taken = {int(k) for k, v in self.st.get("phase_polish", {}).items() if v.get("gaps")}
+        return [e for e in self.read_gaps() if phase_of.get(str(e.get("fn"))) not in taken]
 
     def keep_gap(self, fid: str, gap: str) -> None:
         """A PLAN-GAP that blocks nothing: record it once for the plan-gaps pass after the build."""
@@ -1031,7 +1141,7 @@ class Driver:
             "module": f.module, "module_section": module_section(self.arch, f.module)
             or "(spec/ARCHITECTURE.md has no section naming this module)",
             "allowed_paths": self.allowed(f), "acceptance_source": self.acceptance_text(f),
-            "policies": self.policies(), "commands": self.commands_text(f), "max_calls": str(self.max_calls),
+            "policies": self.policies(f), "commands": self.commands_text(f), "max_calls": str(self.max_calls),
             "previous": previous, **self.standard_values(f)})
         tokens = len(brief) // 4
         if tokens > self.max_tokens:
@@ -1234,6 +1344,8 @@ class Driver:
         hits = [p for p in changed if p.startswith(self.protected)]
         if hits:
             return f"changed protected files ({', '.join(hits[:5])}); never edit tests/acceptance, spec or overhaul.toml"
+        if job.fn in self.fns and (vis := self.visibility_problem(self.fns[job.fn], changed, branch)):
+            return vis
         return ""  # the gate, cycles included, runs after the pre-review merge (sync_problem)
 
     def cycles_problem(self, wt: Path) -> str:
@@ -1315,10 +1427,34 @@ class Driver:
         return ""
 
     # ---- review ----
-    def policies(self) -> str:
-        """The `## Policies` section of ARCHITECTURE.md: concurrency, persistence and error owners."""
-        return (module_section(self.arch, "Policies")
-                or "(spec/ARCHITECTURE.md declares no Policies section; re-run plan_validate.py)")
+    def policies(self, f: Fn | None = None) -> str:
+        """The `## Policies` section of ARCHITECTURE.md: concurrency, persistence and error owners. With
+        [harness] trim_policies and a function, its id lists keep only that id and its domain rules only the homes in
+        its own module or a module it depends on, so a big plan's briefs stay small."""
+        text = module_section(self.arch, "Policies")
+        if not text:
+            return "(spec/ARCHITECTURE.md declares no Policies section; re-run plan_validate.py)"
+        if f is None or not self.cfg["harness"].get("trim_policies"):
+            return text
+        mods = {f.module} | set(module_deps(self.arch, f.module))
+        lists = set(ID_LISTS) | {str(k).lower() for k in (self.cfg.get("plan") or {}).get("policy_lists") or {}}
+        out = []
+        for line in text.splitlines():
+            m = re.match(r"^([\s>*-]*\**\s*)([A-Za-z][\w -]*?)(\s*\**\s*:\s*)(.*)$", line)
+            key = m.group(2).strip().lower() if m else ""
+            if key in lists:
+                if f.id in [x.strip("`") for x in re.split(r"[,;\s]+", m.group(4))]:
+                    out.append(f"{m.group(1)}{m.group(2)}{m.group(3)}{f.id}")
+            elif key == "domain rules":
+                keep = [e.strip() for e in m.group(4).split(";")
+                        if (h := re.search(r"->\s*`?([\w\-]+)\.", e)) and h.group(1) in mods]
+                if keep:
+                    out.append(f"{m.group(1)}{m.group(2)}{m.group(3)}{'; '.join(keep)}")
+            else:
+                out.append(line)
+        out.append("(Trimmed to this function: id lists show only its id, domain rules only homes in "
+                   f"{', '.join(sorted(mods))}; the full section is in spec/ARCHITECTURE.md.)")
+        return "\n".join(out)
 
     def standard_values(self, f: Fn) -> dict[str, str]:
         """The quality-standard placeholders of a build or review brief for function f."""
@@ -1362,7 +1498,7 @@ class Driver:
         brief = render("review-brief.md", {
             "id": fid, "branch": branch, "row": self.row_table(f), "allowed_paths": self.allowed(f),
             "acceptance_source": self.acceptance_text(f), "review_file": review_file.as_posix(),
-            "policies": self.policies(), **values, "checklist_path": CHECKLIST.as_posix(),
+            "policies": self.policies(f), **values, "checklist_path": CHECKLIST.as_posix(),
             "checklist_version": checklist()[0],
             "checklist": checklist_text(applicable_items(scope, bool(f.rules))),
             "round_rule": self.round_rule(fid),
@@ -1577,6 +1713,7 @@ class Driver:
             if row and row.status != "proven":
                 self.say(f"land.py exited 0 but {fid} is not proven in FUNCTIONS.md on {self.main}")
             self.set(fid, status="proven", last_reason="")
+            self.periodic.landed()
             self.say(f"landed {fid}")
             self.record_proven()
             self.cycle_due = f"landed {fid}"  # run after launch(): dependents start before verdict and dash
@@ -1612,9 +1749,42 @@ class Driver:
         return False
 
     # ---- polish: once every function is proven, a blind audit, fix passes per module, then a re-audit ----
+    # Per phase (item 8): with the phase barrier on, when every function of phase N (not the last) is proven, the
+    # same gap pass, probes and audit/fix rounds run scoped to phase N before phase N+1 starts. Its state is
+    # st["phase_polish"][N] and its files .overhaul/polish/phase-N/; the final whole-tree polish still runs at the end.
+    def polish_phase(self) -> int | None:
+        """The phase whose polish is due or running now; None for the final whole-tree polish (or none at all)."""
+        phases = sorted({phase_key(f)[0] for f in self.order})
+        fin = self.st.get("polish") or {}
+        if (not self.barrier or not self.phase_polish or len(phases) < 2 or self.polish_rounds < 1
+                or fin.get("round") or fin.get("status", "idle") != "idle"):
+            return None  # the final polish already started (a resumed run): no phase polish behind it
+        recs, ended = self.st["functions"], self.st.get("phase_polish", {})
+        for n in phases[:-1]:
+            if ended.get(str(n), {}).get("status") in ("done", "failed"):
+                continue
+            return n if all(recs[f.id]["status"] == "proven" for f in self.phase_fns(n)) else None
+        return None
+
+    def phase_fns(self, n: int | None) -> list[Fn]:
+        """The (non-deferred) functions in polish scope: phase n's, or every one for the final polish."""
+        return [f for f in self.order if n is None or phase_key(f)[0] == n]
+
+    def polish_dir(self) -> Path:
+        n = self.polish_phase()
+        return self.ov / "polish" / (f"phase-{n}" if n is not None else "")
+
+    def polish_tag(self) -> str:
+        n = self.polish_phase()
+        return f"p{n}-" if n is not None else ""
+
     def polish_state(self) -> dict:
-        """st["polish"]: round, status (idle | audit | fix | done | failed), issues and [round, issues] history."""
-        return self.st.setdefault("polish", {"round": 0, "status": "idle", "issues": None, "history": []})
+        """st["polish"] (or st["phase_polish"][N] while phase N is polished): round, status (idle | gaps | audit |
+        fix | done | failed), issues and [round, issues] history."""
+        n, fresh = self.polish_phase(), {"round": 0, "status": "idle", "issues": None, "history": []}
+        if n is not None:
+            return self.st.setdefault("phase_polish", {}).setdefault(str(n), fresh)
+        return self.st.setdefault("polish", fresh)
 
     def polish_pending(self) -> bool:
         land = self.land_job is not None and self.land_job.kind == "polish_land"
@@ -1626,10 +1796,11 @@ class Driver:
         pol = self.polish_state()
         if self.polish_rounds < 1 or pol["status"] in ("done", "failed"):
             return False
-        if any(self.st["functions"][fid]["status"] != "proven" for fid in self.fns):
+        n = self.polish_phase()  # deferred rows are out of the plan: polish never waits for them
+        if n is None and any(self.st["functions"][fid]["status"] != "proven" for fid in self.fns):
             return False
         started = self.pump_polish_land()
-        if self.probe_waiting():
+        if self.probe_waiting(n):
             return started
         if pol["status"] == "fix":
             for item in self.polish_ready():
@@ -1661,7 +1832,7 @@ class Driver:
         pol = self.polish_state()
         if pol.get("gaps") or pol["round"] or pol["status"] != "idle":
             return False
-        gaps = self.read_gaps()
+        gaps = self.scope_gaps()
         if not gaps:
             return False
         modules = self.gap_modules(gaps)
@@ -1679,7 +1850,7 @@ class Driver:
 
     def polish_claims(self, module: str) -> list[str]:
         out = []
-        for m in module.split(", "):  # the plan-gaps pass names several modules
+        for m in module.split(", ") + self.polish_owners.get(module, []):  # gaps: several; owners: visibility edits
             section = module_section(self.arch, m)
             out += module_paths(section, m) + module_shared(section)
         return out
@@ -1691,9 +1862,12 @@ class Driver:
             held.append(self.land_job.fn)
         taken = [self.polish_claims(self.polish_meta[fid][0]) for fid in held if fid in self.polish_meta]
         out, free = [], self.max_parallel - len(self.jobs)
+        queued = {m for m, _ in self.polish_queue}
         for item in self.polish_queue:
             if len(out) >= free:
                 break
+            if queued & set(self.polish_after.get(item[0], [])):
+                continue  # owner-first: an owner's own fix starts (and lands) before its caller's
             mine = self.polish_claims(item[0])
             if not any(paths_overlap(mine, other) for other in taken):
                 taken.append(mine)
@@ -1725,26 +1899,28 @@ class Driver:
         return "\n".join(lines) or "(overhaul.toml has no whole-tree [commands])"
 
     def polish_allowed(self, module: str, fid: str = "") -> str:
-        paths = [p for m in module.split(", ") for p in module_paths(module_section(self.arch, m), m)]
+        mods = module.split(", ")
+        paths = [p for m in mods for p in module_paths(module_section(self.arch, m), m)]
         tests = unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
         return "\n".join([f"- `{p}`" for p in paths] + [f"- `{t}` (unit tests for this module only)" for t in tests]
                          + (["- `tests/property/` (add property tests; never edit a planned one)"]
-                            if fid.startswith(PROBE_PREFIX) else []))
+                            if fid.startswith(PROBE_PREFIX) else [])
+                         + self.vis_line(f"the modules `{module}` depends on", self.dep_paths(mods)))
 
     def start_polish_audit(self, rnd: int) -> bool:
         """The fixed checklist over the whole tree plus the dedup role (template polish-audit.md)."""
         fid, pol = "polish-audit", self.polish_state()
-        audit = self.ov / "polish" / f"audit-{rnd}.json"
+        audit = self.polish_dir() / f"audit-{rnd}.json"
         audit.parent.mkdir(parents=True, exist_ok=True)
         audit.unlink(missing_ok=True)
-        modules = sorted({f.module for f in self.order})
+        modules = sorted({f.module for f in self.phase_fns(self.polish_phase())})
         brief = render("polish-audit.md", {
             "scope": self.polish_scope(rnd), "round": str(rnd), "main": self.main, "audit_file": audit.as_posix(), "max_calls": str(self.max_calls),
-            "scratch": (self.ov / "polish").as_posix(), "policies": self.policies(), "commands": self.polish_commands(),
+            "scratch": self.polish_dir().as_posix(), "policies": self.policies(), "commands": self.polish_commands(),
             "standard": STANDARD.as_posix(), "checklist_path": CHECKLIST.as_posix(),
             "checklist_version": checklist()[0], "checklist": checklist_text(applicable_items(None)),
             "modules": "\n".join(f"- `{m}`: " + ", ".join(module_paths(module_section(self.arch, m), m)) for m in modules)})
-        path = self.ov / "briefs" / f"polish-audit-{rnd}.md"
+        path = self.ov / "briefs" / f"polish-audit-{self.polish_tag()}{rnd}.md"
         path.write_text(brief, encoding="utf-8")
         self.start_polish_job(fid, "polish_audit", rnd, path, self.prepare_worktree(fid))
         pol.update(round=rnd, status="audit")
@@ -1755,9 +1931,18 @@ class Driver:
     def polish_scope(self, rnd: int) -> str:
         """Round 1 audits the whole tree. A later round re-checks the previous round's verified NOs and audits only
         the files its fixes changed, like a function's re-review (trial 11: a whole-tree re-audit timed out twice)."""
-        best, prev = self.polish_state().get("best"), self.ov / "polish" / f"checklist-{rnd - 1}.json"
+        best, prev = self.polish_state().get("best"), self.polish_dir() / f"checklist-{rnd - 1}.json"
         if rnd < 2 or not best or not prev.is_file():
-            return "Round 1: the whole tree."
+            n = self.polish_phase()
+            if n is None:
+                return "Round 1: the whole tree."
+            fns = self.phase_fns(n)
+            files = sorted({p for f in fns for p in f.files})
+            return (f"Round 1 of the phase {n} polish: every function of phase {n} ({', '.join(f.id for f in fns)}) is "
+                    "proven; later phases are not built yet. Answer the checklist only for the modules listed above"
+                    + (" and these files: " + ", ".join(f"`{p}`" for p in files) if files else "")
+                    + ". The dedup greps still search the whole tree. Leave every other module and anything that "
+                    "only a later phase can finish to the final whole-tree polish.")
         changed = [f for f in git(self.repo, "diff", "--name-only", f"{best[2]}..{self.main}").split() if f]
         items = self.read_audit(prev) or []
         listed = "\n".join(f"- [{n.get('id')}] `{where(n)}`: {n.get('evidence') or ''}"[:400] for n in items)
@@ -1793,7 +1978,7 @@ class Driver:
     def after_polish_audit(self, job: Job) -> None:
         rnd, secs = job.attempt, time.monotonic() - job.started
         tokens, _, _ = read_result(job.out)
-        raw = None if job.timed_out else self.read_audit(self.ov / "polish" / f"audit-{rnd}.json")
+        raw = None if job.timed_out else self.read_audit(self.polish_dir() / f"audit-{rnd}.json")
         nos = None if raw is None else checklist_nos(raw)
         if nos is None:
             why = "auditor timed out" if job.timed_out else f"audit-{rnd}.json missing or not a JSON list"
@@ -1824,7 +2009,7 @@ class Driver:
                 self.polish_failed(fid, "verifier wrote no result; the review's NOs were not checked")
             elif real:
                 if not self.retry_polish_fix(fid, real, meta.get("head", ""), job.attempt):
-                    self.polish_failed(fid, f"review: {len(real)} verified blocking NOs: {format_nos(real)}")
+                    self.polish_failed(fid, f"review: {len(real)} verified blocking NOs: {format_nos(real)}", real)
             else:
                 self.polish_lands.append(fid)
             return
@@ -1838,7 +2023,7 @@ class Driver:
     def polish_checked(self, meta: dict, real: list[dict], dropped: list[dict]) -> None:
         """A polish checklist run is judged: verified blocking NOs become the round's issues."""
         rnd, pol = meta["rnd"], self.polish_state()
-        (self.ov / "polish" / f"checklist-{rnd}.json").write_text(json.dumps(real, indent=1), encoding="utf-8")
+        (self.polish_dir() / f"checklist-{rnd}.json").write_text(json.dumps(real, indent=1), encoding="utf-8")
         if dropped:
             self.log(None, "review_unverified", f"polish round {rnd}: {len(dropped)} NOs not reproduced, "
                      "not blocking: " + " / ".join(f"{n['id']} {where(n)}" for n in dropped))
@@ -1855,12 +2040,42 @@ class Driver:
             self.log(None, "polish_done", f"{n} issues after {rnd - 1} fix rounds")
             self.say(f"polish done: {n} issues after {rnd - 1} fix rounds")
             return
-        groups: dict[str, list[dict]] = {}
-        for item in issues:
-            groups.setdefault(str(item.get("module") or "unknown").strip(), []).append(item)
+        groups = self.route_polish(issues)
         self.polish_queue = sorted(groups.items())
         pol["status"] = "fix"
         self.save()
+
+    def named_modules(self, item: dict) -> list[str]:
+        """The plan's modules an issue's text names, by a path of theirs or by name."""
+        text = " ".join(str(item.get(k) or "") for k in ("evidence", "how", "fix", "issue"))
+        out = []
+        for m in sorted({f.module for f in self.order}):
+            paths = [p.rstrip("/") for p in module_paths(module_section(self.arch, m), m)]
+            if any(p and p in text for p in paths) or re.search(rf"(?<![\w/.-]){re.escape(m)}(?![\w-])", text):
+                out.append(m)
+        return out
+
+    def route_polish(self, issues: list[dict]) -> dict[str, list[dict]]:
+        """Group a round's issues by module (pass E). A duplication issue (C03/C05) that names another module goes,
+        as one fix, to the module that depends on every other one involved (the caller): it may make the owner's item
+        visible (visibility-only edits in its deps) and import it. An owner with issues of its own this round must
+        change more than visibility, so its fix lands first (polish_after)."""
+        groups: dict[str, list[dict]] = {}
+        for item in issues:
+            home = str(item.get("module") or "unknown").strip()
+            if str(item.get("id") or item.get("rule") or "") in DUP_IDS:
+                involved = [home] + [m for m in self.named_modules(item) if m != home]
+                callers = [m for m in involved if all(o == m or o in module_deps(self.arch, m) for o in involved)]
+                if len(involved) > 1 and callers:
+                    home = callers[0]
+                    item = {**item, "module": home, "owners": [m for m in involved if m != home]}
+            groups.setdefault(home, []).append(item)
+        self.polish_owners = {m: sorted({o for i in items for o in i.get("owners", [])}) for m, items in groups.items()}
+        self.polish_after = {m: [o for o in owners if o in groups] for m, owners in self.polish_owners.items()}
+        for m, after in self.polish_after.items():
+            if after:
+                self.log(None, "polish_order", f"{m} waits for {', '.join(after)}: cross-module duplication")
+        return groups
 
     def keep_best_polish(self, pol: dict, rnd: int, issues: list[dict]) -> tuple[list[dict], int]:
         """A fix round that raised the verified NO count is reverted: main goes back to the best checked tree.
@@ -1871,7 +2086,7 @@ class Driver:
         if not best or len(issues) <= best[1]:
             pol["best"] = [rnd, len(issues), sha]
             return issues, len(issues)
-        kept = self.read_audit(self.ov / "polish" / f"checklist-{best[0]}.json")
+        kept = self.read_audit(self.polish_dir() / f"checklist-{best[0]}.json")
         if kept is None or not self.revert_main(best[2], sha, f"polish: revert round {rnd - 1} fixes "
                                                 f"({len(issues)} issues > {best[1]} after round {best[0]})"):
             pol["best"] = [rnd, len(issues), sha]
@@ -1898,16 +2113,30 @@ class Driver:
             release_lock(self.repo)
 
     def start_polish_fix(self, module: str, items: list[dict], fid: str = "") -> None:
-        rnd = 0 if fid else self.polish_state()["round"]
+        pol = self.polish_state()
+        rnd = 0 if fid else pol["round"]
+        carry = None if fid else (pol.get("failed_nos") or {}).pop(module, None)
         fid = fid or f"polish-r{rnd}-" + (re.sub(r"[^A-Za-z0-9._-]+", "-", module).strip("-.") or "misc")
         issues = "\n".join(i["text"] if "text" in i else f"- `{i.get('file', '?')}:{i.get('line', '?')}` "
-                           f"[{i.get('rule', '?')}] {i.get('evidence') or i.get('issue') or ''}" for i in items)
+                           f"[{i.get('rule') or i.get('id') or '?'}] {i.get('evidence') or i.get('issue') or ''}"
+                           + self.owners_note(module, i.get("owners")) for i in items)
+        if carry and carry.get("round") == rnd - 1:
+            issues += (f"\n\nThe round {carry['round']} fix of this module failed its review on these verified "
+                       f"blocking NOs. Do not repeat them:\n{carry['nos']}")
         self.polish_meta[fid] = (module, issues)
         self.polish_tries.pop(fid, None)
         path = self.polish_fix_brief(fid, rnd, module, issues)
         self.start_polish_job(fid, "polish_fix", rnd, path, self.prepare_worktree(fid))
         self.log(fid, self.fix_event(fid), f"start {module}: {len(items)} issues model={self.jobs[fid].model}")
         self.say(f"polish fix {fid}")
+
+    @staticmethod
+    def owners_note(caller: str, owners: list[str] | None) -> str:
+        if not owners:
+            return ""
+        names = ", ".join(f"`{o}`" for o in owners)
+        return (f" (cross-module duplication: `{caller}` depends on {names}. Keep the owner's copy, make it `pub` or "
+                f"re-export it there with a visibility-only edit, import it in `{caller}` and delete the copy here)")
 
     def polish_fix_brief(self, fid: str, rnd: int, module: str, issues: str) -> Path:
         brief = render("polish-fix-brief.md", {
@@ -1919,11 +2148,11 @@ class Driver:
         return path
 
     def retry_polish_fix(self, fid: str, real: list[dict], head: str, rnd: int) -> bool:
-        """Like a build retry: a fix whose review has verified blocking NOs gets FIX_RETRIES more passes on its own
+        """Like a build retry: a fix whose review has verified blocking NOs gets fix_retries more passes on its own
         branch, carrying the NO list; the round rule then applies to its review. False once they are spent."""
         prev = self.polish_tries.get(fid) or {}
         n = prev.get("round", 0) + 1
-        if n > FIX_RETRIES or fid not in self.polish_meta or not head:
+        if n > self.fix_retries or fid not in self.polish_meta or not head:
             return False
         module, issues = self.polish_meta[fid]
         self.polish_tries[fid] = {"round": n, "head": head, "ids": sorted({x["id"] for x in real})}
@@ -1934,7 +2163,7 @@ class Driver:
             f"\n\nRetry {n}: the branch keeps your last attempt, whose review found {len(real)} verified blocking "
             f"NOs on lines it changed. Fix every one, and keep the fixes above:\n{listing}"))
         self.start_polish_job(fid, "polish_fix", rnd, path, self.ov / "wt" / fid)
-        self.log(fid, self.fix_event(fid), f"retry {n}/{FIX_RETRIES}: {len(real)} verified blocking NOs model="
+        self.log(fid, self.fix_event(fid), f"retry {n}/{self.fix_retries}: {len(real)} verified blocking NOs model="
                  f"{self.jobs[fid].model}: " + " / ".join(f"{x['id']} {where(x)}" for x in real))
         self.say(f"polish fix {fid}: retry {n}")
         return True
@@ -1943,11 +2172,11 @@ class Driver:
         tokens, turns, text = read_result(job.out)
         self.log(job.fn, self.fix_event(job.fn), f"built rc={job.proc.returncode} turns={turns}/{self.max_calls}",
                  time.monotonic() - job.started, tokens)
-        problem = self.build_problem(job, text)
+        module, issues = self.polish_meta[job.fn]
+        problem = self.build_problem(job, text) or self.polish_vis_problem(job.fn, module, f"fn/{job.fn}")
         if problem:
             self.polish_failed(job.fn, problem)
             return
-        module, issues = self.polish_meta[job.fn]
         branch, review_file = f"fn/{job.fn}", self.ov / "reviews" / f"{job.fn}.json"
         review_file.parent.mkdir(parents=True, exist_ok=True)
         review_file.unlink(missing_ok=True)
@@ -2028,6 +2257,8 @@ class Driver:
 
     def after_polish_land(self, job: Job) -> None:
         if job.proc.returncode == 0 and not job.timed_out:
+            self.periodic.landed()  # a fix on main: the gates run again
+        if job.proc.returncode == 0 and not job.timed_out:
             self.log(job.fn, self.fix_event(job.fn), f"landed {self.polish_meta[job.fn][0]}",
                      time.monotonic() - job.started)
             self.say(f"polish landed {job.fn}")
@@ -2038,9 +2269,15 @@ class Driver:
         self.polish_failed(job.fn, "land: " + ("land.py timed out" if job.timed_out else (
             last_line(out) or last_line(err) or f"land.py exit {job.proc.returncode}")))
 
-    def polish_failed(self, fid: str, reason: str) -> None:
-        """A fix pass that cannot land is dropped; the re-audit finds its issues again."""
+    def polish_failed(self, fid: str, reason: str, nos: list[dict] | None = None) -> None:
+        """A fix pass that cannot land is dropped; the re-audit finds its issues again. A round fix's verified review
+        NOs go into the next round's fix brief for its module (pass E)."""
         self.log(fid, self.fix_event(fid), f"failed: {reason[:REASON_MAX]}")
+        if nos and fid in self.polish_meta and re.match(r"polish-r\d+-", fid):
+            pol = self.polish_state()
+            pol.setdefault("failed_nos", {})[self.polish_meta[fid][0]] = {"round": pol["round"],
+                                                                         "nos": format_nos(nos)}
+            self.save()
         self.say(f"polish {fid} failed: {reason}")
         self.probe_settled(fid, False)
         self.depfix_settled(fid, False, reason)
@@ -2064,11 +2301,14 @@ class Driver:
         """st["probe"][module]: status (mutating | fixing | one of PROBE_DONE), score, survivors."""
         return self.st.setdefault("probe", {})
 
-    def probe_waiting(self) -> bool:
-        """True while a module still owes its probe (polish waits for every probe)."""
-        pst = self.probe_state()
-        return self.probe_on and any(pst.get(m, {}).get("status") not in PROBE_DONE
-                                     for m in self.probe_modules().values())
+    def probe_waiting(self, upto: int | None = None) -> bool:
+        """True while a module still owes its probe (polish waits for every probe). A module is probed once, when its
+        functions are all proven; the phase upto polish waits only for the modules whose functions all sit in
+        phases <= upto, i.e. the modules that phase finished."""
+        pst, mods = self.probe_state(), set(self.probe_modules().values())
+        if upto is not None:
+            mods = {m for m in mods if all(phase_key(f)[0] <= upto for f in self.order if f.module == m)}
+        return self.probe_on and any(pst.get(m, {}).get("status") not in PROBE_DONE for m in mods)
 
     def probe_step(self) -> bool:
         """Start mutate.py for each module whose functions are all proven; True if anything started."""
@@ -2245,7 +2485,8 @@ class Driver:
     def summary(self) -> str:
         n = Counter(self.st["functions"][fid]["status"] for fid in self.fns)
         rest = " ".join(f"{s} {n[s]}" for s in (*IN_FLIGHT, "needs-plan") if n[s])
-        return f"proven {n['proven']}/{len(self.fns)}" + (f" {rest}" if rest else "")
+        later = f" deferred {len(self.deferred)}" if self.deferred else ""
+        return f"proven {n['proven']}/{len(self.fns)}{later}" + (f" {rest}" if rest else "")
 
     def script(self, name: str) -> str:
         """Run verdict.py or dash.py; return its last output line ('' if absent)."""
@@ -2290,11 +2531,15 @@ class Driver:
             self.say(f"needs-plan {fid}: {recs[fid]['last_reason']}")
         if blocked:
             self.say(f"blocked on unproven deps: {', '.join(blocked)}")
+        if self.deferred and not code:
+            self.say(f"{len(self.deferred)} deferred rows wait for the next plan commit; "
+                     "polish, probes and the verdict leave them out")
         print(f"DRIVE EXIT {code} {self.summary()}", flush=True)
         return code
 
     def abort(self) -> None:
         """Kill every worker tree this run started; their functions go back to planned."""
+        self.periodic.stop()
         jobs = [*self.jobs.values(), *self.land_jobs()]
         for job in jobs:
             kill_tree(job.proc)

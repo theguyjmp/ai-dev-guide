@@ -55,9 +55,15 @@ Problems (each is one line):
     [paths] patterns, a `ui:` row or a row whose entry names a [plan] interactive_verbs word that cites no pattern id,
     or a cited pattern id missing from its acceptance test's name and comments. [commands.acceptance_by] templates
     need {test}; [commands.extra] is name = command; [tiers] is name = [globs].
+  - X16 reuse before new: a module name or `Capability:` matching another module's `Forbidden types:` stems (globs,
+    word by word), a stem on two modules, a new module (a `Why new:` line, or absent at git ref [plan] owners_since)
+    with no reason; spec/ROADMAP.md ([paths] roadmap, optional) `| phase | behaviour | owner | why new |` rows: a bad
+    phase, an empty behaviour or owner, an owner not in ARCHITECTURE (new) with no why-new on any row or matching
+    another owner's stems, a phase over max_phase_size rows.
 Python standard library only.
 """
 import argparse
+import fnmatch
 import os
 import re
 import signal
@@ -79,7 +85,11 @@ COMMANDS = ["test", "acceptance", "lint", "dup", "literals", "shape", "cycles", 
 POLICIES = ("concurrency", "persistence", "errors", "untrusted input", "retries")
 ID_LISTS = ("concurrent writers", "boundaries", "multi-store writes")
 POLICY_LINE = re.compile(r"^[\s>*-]*\**\s*(concurrency|persistence|errors|untrusted input|retries|concurrent writers|multi-store writes"
-                         r"|boundaries|domain rules)\s*\**\s*:\s*(.*)$", re.I)
+                         r"|boundaries|domain rules|fault hook)\s*\**\s*:\s*(.*)$", re.I)
+ANY_POLICY_LINE = re.compile(r"^[\s>*-]*\**\s*([A-Za-z][\w -]*?)\s*\**\s*:\s*(.*)$")  # [plan] policy_lists names
+PLAN_CHECKS = ("ui_verb", "float_roundtrip")  # [plan] checks: opt-in plan checks
+VERB_ENTRY = re.compile(r"^(cli|http)\s*:", re.I)
+DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 RULE_HOME = re.compile(r"^(\S.*?)\s*->\s*`?([\w\-]+)\.([A-Za-z_]\w*)`?$")
 NEGATIVE = re.compile(r"invalid|malformed|bad|reject|corrupt|oversize|too_large|missing|negative|empty|injection", re.I)
 BODY_ROUTE = re.compile(r"\b(POST|PUT|PATCH)\b")
@@ -89,6 +99,7 @@ SERIAL = re.compile(r"single[- ]threaded|serial", re.I)
 RUFF_STRICT = ("E", "W", "F", "I", "B", "UP", "SIM", "RUF", "ARG", "A", "ANN201", "PLR0915")
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ACCEPT = re.compile(r"^tests/acceptance/[\w./-]+\.(py|rs)(::[A-Za-z_]\w*)+$")
+OWNER_LINE = re.compile(r"^[\s>*-]*\**\s*(forbidden[ _-]types|why[ _-]new|capability)\s*\**\s*:\s*(.*)$", re.I)
 NO_ENTRY = {"", "-", "--", "none", "n/a", "na", "tbd", "todo", "?"}
 SEPARATOR = re.compile(r"^:?-+:?$")
 STUB_COLUMNS = ("files", "needs")  # required beside COLUMNS, in any order after them
@@ -221,7 +232,8 @@ def parse_architecture(text):
         m = re.match(r"^##\s+Module\s*:?\s+(\S+)", line, re.I)
         if m:
             cur = mods.setdefault(m.group(1).strip("`:*"), {"paths": None, "deps": None, "line": n,
-                                                          "public": None, "api": []})
+                                                          "public": None, "api": [], "stems": [], "why": None,
+                                                          "capability": ""})
             continue
         if re.match(r"^#{1,2}\s", line):
             cur = None
@@ -229,6 +241,16 @@ def parse_architecture(text):
             continue
         if re.match(r"^\s*[-*]\s+`", line):
             cur["api"].append((n, line.strip()))
+        m = OWNER_LINE.match(line)
+        if m:  # X16: the type stems only this owner may define, why no existing owner fits, what it does
+            key, rest = m.group(1).lower(), re.sub(r"^\*\*\s*", "", m.group(2).strip())  # `**X:** a`: drop the bold close
+            if key.startswith("forbidden"):
+                cur["stems"] += [x.strip("`\"' ") for x in re.split(r"[,;\s]+", rest.strip("[]")) if x.strip("`\"' ")]
+            elif key.startswith("why"):
+                cur["why"] = "" if rest.lower() in NO_ENTRY else rest
+            else:
+                cur["capability"] = rest
+            continue
         m = re.match(r"^[\s>*-]*\**\s*(Paths|Depends on|Public)\s*:\s*\**\s*(.*)$", line, re.I)
         if m:
             items = [x.strip().strip("`").strip() for x in re.split(r"[,;]", m.group(2).strip().strip("*")) if x.strip().strip("`").strip()]
@@ -620,19 +642,24 @@ def check_architecture(mods, problems, alabel):
         problems.append(f"{alabel}: module cycle {' -> '.join(cyc)}")
 
 
-def parse_policies(text):
+def parse_policies(text, extra=()):
     """({policy: (owner or None, text, line)}, {id list: (line, [ids])}, (line, [rule entries]) or None) from the
-    `## Policies` section."""
+    `## Policies` section; `extra` names more id lists ([plan] policy_lists)."""
     pol, lists, rules, inside = {}, {}, None, False
     for n, line in enumerate(text.splitlines(), 1):
         if re.match(r"^#{1,2}\s", line):
             inside = bool(re.match(r"^#{1,2}\s+Policies\b", line, re.I))
             continue
         m = POLICY_LINE.match(line) if inside else None
+        if inside and not m and extra:
+            m = ANY_POLICY_LINE.match(line)
+            m = m if m and m.group(1).strip().lower() in extra else None
         if not m:
             continue
-        key, rest = m.group(1).lower(), m.group(2).strip()
-        if key in ID_LISTS:
+        key, rest = m.group(1).strip().lower(), m.group(2).strip()
+        if key == "fault hook":
+            pol[key] = (None, rest.strip("`* "), n)
+        elif key in ID_LISTS or key in extra:
             ids = [x.strip("`") for x in re.split(r"[,;\s]+", rest)]
             lists[key] = (n, [x for x in ids if x and x.lower() not in ("-", "none")])
         elif key == "domain rules":
@@ -656,11 +683,13 @@ def check_owners(pol, mods, problems, alabel):
             problems.append(f"{alabel}:{n} policy {key}: owner {owner} is no module")
 
 
-def check_writers(pol, writers, rows, problems, alabel):
+def check_writers(pol, writers, rows, problems, alabel, deferred=frozenset()):
     """A concurrent acceptance test for every concurrent writer, and every threaded HTTP write listed."""
     by_id = {r.get("rid"): r for r in rows}
     for fid in writers[1]:
         r = by_id.get(fid)
+        if fid in deferred:
+            continue  # planned later: its tests come with its plan commit
         if r is None:
             problems.append(f"{alabel}:{writers[0]} Concurrent writers: unknown function {fid}")
         elif not any("concurrent" in name.lower() for _, name in r.get("tests", [])):
@@ -675,25 +704,35 @@ def check_writers(pol, writers, rows, problems, alabel):
                             "Concurrent writers; list it, or declare the Concurrency policy single-threaded")
 
 
-def check_crash_safe(multi, rows, problems, alabel):
+def check_crash_safe(multi, rows, problems, alabel, deferred=frozenset(), hook="", repo=None):
     """Every operation that saves more than once has a crash test: fail between the saves, then the stored state is
-    consistent and a retry applies the change once (trial 11: pay crashed between saves took the stock twice)."""
+    consistent and a retry applies the change once (trial 11: pay crashed between saves took the stock twice). With
+    a `Fault hook: NAME` policy line, each crash test's body names NAME (the env var or hook that injects the fault)."""
     by_id = {r.get("rid"): r for r in rows}
     for fid in multi[1]:
         r = by_id.get(fid)
+        crash = [(item, name) for item, name in (r or {}).get("tests", []) if "crash" in name.lower()]
+        if fid in deferred:
+            continue
         if r is None:
             problems.append(f"{alabel}:{multi[0]} Multi-store writes: unknown function {fid}")
-        elif not any("crash" in name.lower() for _, name in r.get("tests", [])):
+        elif not crash:
             problems.append(f"{alabel}:{multi[0]} {fid} saves more than once per operation but has no acceptance "
                             "test whose name holds `crash` (make the second save fail, then check the stored state "
                             "is consistent and a retry applies the change exactly once)")
+        for item, name in crash if hook and repo is not None else ():
+            src = Path(repo) / item.split("::")[0]
+            body = test_block(src.read_text(encoding="utf-8", errors="replace"), name) if src.is_file() else ""
+            if hook not in body:
+                problems.append(f"{alabel}:{multi[0]} {fid} crash test {item} does not name the fault hook {hook} "
+                                "(inject the fault through it, so the crash is the product's, not the test's)")
 
 
-def check_boundaries(bounds, rows, problems, alabel):
+def check_boundaries(bounds, rows, problems, alabel, deferred=frozenset()):
     """Every function that reads untrusted input, and every HTTP route with a body, has a negative acceptance test."""
     by_id = {r.get("rid"): r for r in rows}
     for fid in bounds[1]:
-        if fid not in by_id:
+        if fid not in by_id and fid not in deferred:
             problems.append(f"{alabel}:{bounds[0]} Boundaries: unknown function {fid}")
     for r in rows:
         fid = r.get("rid")
@@ -757,20 +796,227 @@ def check_reuse(mods, rules, problems, alabel):
                                 f"is not on the Public line; add it there")
 
 
-def check_policies(text, mods, rows, problems, alabel):
-    """One owner per cross-cutting policy, tests for concurrent writers and boundaries, one home per domain rule."""
-    pol, lists, rules = parse_policies(text)
+WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+ROADMAP_COLUMNS = ("phase", "behaviour", "owner", "why new")
+
+
+def words(text):
+    """Lower-case words of a name or sentence: snake_case, kebab-case, CamelCase and a::b all split."""
+    return [w.lower() for w in WORD.findall(text or "")]
+
+
+def stem_hits(stems, text, whole=False):
+    """The stems that `text` matches, case and punctuation ignored, word by word: `*CommandStack*` matches the words
+    `command stack`, `*Compar*` (trailing *) also `compare`, `Instance` only the word `instance`. With `whole` (an
+    owner name) only its last `::`, `.` or `/` segment counts: `app-kernel::mesh` is a mesh owner."""
+    ws = words(re.split(r"::|[./]", text or "")[-1] if whole else text)
+    out = []
+    for stem in stems:
+        core, prefix = words(re.sub(r"[*?]", " ", stem)), stem.rstrip().endswith(("*", "?"))
+        k = len(core)
+        for i in range(len(ws) - k + 1) if core else ():
+            run = ws[i:i + k]
+            if run[:-1] == core[:-1] and (run[-1].startswith(core[-1]) if prefix else run[-1] == core[-1]):
+                out.append(stem)
+                break
+    return out
+
+
+def stem_problems(owners, name, texts, where):
+    """X16: `name` and each capability text against every OTHER owner's forbidden type stems."""
+    out = []
+    for other, stems in owners.items():
+        if other == name or not stems:
+            continue
+        hits = stem_hits(stems, name, whole=True)
+        for t in texts:
+            hits += [s for s in stem_hits(stems, t) if s not in hits]
+        if hits:
+            out.append(f"{where}: matches module {other}'s forbidden types {', '.join(hits)}; extend {other} "
+                       "instead of a new owner (X16 reuse before new)")
+    return out
+
+
+def check_stems(mods, problems, alabel):
+    """Forbidden types stems across all owners: each stem has one owner, and no module's name or Capability matches
+    another owner's stems (a second home for the same thing)."""
+    if not mods:
+        return
+    first = {}
+    for name, m in mods.items():
+        for stem in m.get("stems", []):
+            key = stem.lower()
+            if key in first and first[key] != name:
+                problems.append(f"{alabel}:{m['line']} module {name}: forbidden type {stem} is also module "
+                                f"{first[key]}'s; give each stem one owner")
+            first.setdefault(key, name)
+    owners = {k: v.get("stems", []) for k, v in mods.items()}
+    for name, m in mods.items():
+        problems += stem_problems(owners, name, [m.get("capability", "")], f"{alabel}:{m['line']} module {name}")
+
+
+def baseline_modules(repo, ref, apath, problems):
+    """The ARCHITECTURE modules at git `ref` ([plan] owners_since), or None when it cannot be read."""
+    try:
+        p = subprocess.run(["git", "show", f"{ref}:{apath}"], cwd=str(repo), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        problems.append(f"overhaul.toml: [plan] owners_since {ref!r}: git failed ({e})")
+        return None
+    if p.returncode:
+        problems.append(f"overhaul.toml: [plan] owners_since {ref!r}: cannot read {apath} there "
+                        f"({(p.stderr or '').strip()[:100]})")
+        return None
+    return parse_architecture(p.stdout)
+
+
+def check_new_owners(repo, cfg, mods, problems, alabel):
+    """X16: a new owner needs a one-line `Why new:` reason. A module is new when it has a `Why new:` line, or when
+    [plan] owners_since names a git ref whose ARCHITECTURE lacks it."""
+    if not mods:
+        return
+    ref = (cfg.get("plan") or {}).get("owners_since")
+    old = baseline_modules(repo, str(ref), alabel, problems) if ref else None
+    for name, m in mods.items():
+        new = m.get("why") is not None or (old is not None and name not in old)
+        if new and not m.get("why"):
+            problems.append(f"{alabel}:{m['line']} module {name}: a new owner needs a `Why new: <one line>` reason no "
+                            "existing owner fits (X16)")
+
+
+def roadmap_header(line):
+    """The ROADMAP column names when `line` is its table header, else None."""
+    if not line.lstrip().startswith("|"):
+        return None
+    head = [re.sub(r"[_-]", " ", bare(c).lower().strip("*")).replace("behavior", "behaviour") for c in cells(line)]
+    return head if all(c in head for c in ROADMAP_COLUMNS) else None
+
+
+def owner_name(cell):
+    """The owner module of a ROADMAP owner cell (`undo (C02)` -> undo)."""
+    m = re.match(r"[\w.:\-]+", bare(cell))
+    return m.group(0) if m else ""
+
+
+def roadmap_rows(lines, rel, problems):
+    """[(line, {column: cell})] of every ROADMAP table."""
+    rows = []
+    for i, line in enumerate(lines):
+        head = roadmap_header(line)
+        if not head:
+            continue
+        for n in range(i + 1, len(lines)):
+            if not lines[n].lstrip().startswith("|"):
+                break
+            c = cells(lines[n])
+            if all(SEPARATOR.match(x) for x in c):
+                continue
+            if len(c) != len(head):
+                problems.append(f"{rel}:{n + 1}: row has {len(c)} cells, want {len(head)}")
+                continue
+            rows.append((n + 1, dict(zip(head, c))))
+    return rows
+
+
+def check_roadmap(repo, cfg, paths, mods, problems):
+    """spec/ROADMAP.md (optional): the later-phase rows of a rolling plan, `| phase | behaviour | owner | why new |`.
+    Each row names an owner; an owner not in ARCHITECTURE is new and needs a why-new reason on one of its rows, and
+    its name and behaviours must not match another owner's forbidden type stems; each phase holds at most
+    [plan] max_phase_size rows."""
+    rel = paths.get("roadmap") or "spec/ROADMAP.md"
+    f = Path(repo) / rel
+    if not f.is_file():
+        return
+    rows = roadmap_rows(f.read_text(encoding="utf-8", errors="replace").splitlines(), rel, problems)
+    if not rows:
+        problems.append(f"{rel}: no table with the header | {' | '.join(ROADMAP_COLUMNS)} |")
+        return
+    mods = mods or {}
+    owners = {k: v.get("stems", []) for k, v in mods.items()}
+    new, sizes = {}, {}
+    for n, r in rows:
+        ph, owner = bare(r["phase"]), owner_name(r["owner"])
+        if not re.fullmatch(r"[1-9]\d*", ph):
+            problems.append(f"{rel}:{n}: malformed phase {r['phase']!r} (want an integer from 1)")
+        else:
+            sizes[int(ph)] = sizes.get(int(ph), 0) + 1
+        if bare(r["behaviour"]).lower() in NO_ENTRY:
+            problems.append(f"{rel}:{n}: empty behaviour")
+        if not owner:
+            problems.append(f"{rel}:{n}: empty owner; name the ARCHITECTURE owner it extends (X16)")
+        elif owner not in mods:
+            d = new.setdefault(owner, {"line": n, "why": False, "texts": []})
+            d["why"] |= bare(r["why new"]).lower() not in NO_ENTRY
+            d["texts"].append(bare(r["behaviour"]))
+    for owner, d in new.items():
+        where = f"{rel}:{d['line']} owner {owner}"
+        if not d["why"]:
+            problems.append(f"{where}: is not in ARCHITECTURE, so it is a new owner and needs a why-new reason no "
+                            "existing owner fits (X16)")
+        problems += stem_problems(owners, owner, d["texts"], where)
+    limit = int((cfg.get("plan") or {}).get("max_phase_size") or MAX_PHASE_SIZE)
+    for ph, k in sorted(sizes.items()):
+        if k > limit:
+            problems.append(f"{rel}: phase {ph} has {k} rows > max_phase_size {limit}; split it into more phases")
+
+
+def policy_lists(cfg, problems):
+    """[plan] policy_lists = {name = test-name regex}: more Policies id lists (`Cancellable:` -> `cancel`)."""
+    raw = (cfg.get("plan") or {}).get("policy_lists")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        problems.append("overhaul.toml: [plan] policy_lists must be a table of name = test-name regex")
+        return {}
+    out = {}
+    for name, rx in raw.items():
+        try:
+            out[str(name).strip().lower()] = re.compile(str(rx), re.I)
+        except re.error as e:
+            problems.append(f"overhaul.toml: [plan] policy_lists {name!r}: bad regex ({e})")
+    return out
+
+
+def check_policy_lists(extra, lists, rows, problems, alabel, deferred=frozenset()):
+    """Each [plan] policy_lists line exists; each id on it is a function with an acceptance test the regex names."""
+    by_id = {r.get("rid"): r for r in rows}
+    for name, rx in extra.items():
+        if name not in lists:
+            problems.append(f"{alabel}: ## Policies has no `{name.capitalize()}:` line ([plan] policy_lists; "
+                            "write - for none)")
+            continue
+        n, ids = lists[name]
+        for fid in ids:
+            r = by_id.get(fid)
+            if fid in deferred:
+                continue
+            if r is None:
+                problems.append(f"{alabel}:{n} {name.capitalize()}: unknown function {fid}")
+            elif not any(rx.search(t) for _, t in r.get("tests", [])):
+                problems.append(f"{alabel}:{n} {fid} is listed in {name.capitalize()} but has no acceptance test "
+                                f"whose name matches `{rx.pattern}`")
+
+
+def check_policies(text, mods, rows, problems, alabel, deferred=frozenset(), cfg=None, repo=None):
+    """One owner per cross-cutting policy, tests for concurrent writers and boundaries, one home per domain rule.
+    Ids of deferred rows on a list are skipped: their tests come with a later plan commit."""
+    extra = policy_lists(cfg or {}, problems)
+    pol, lists, rules = parse_policies(text, tuple(extra))
     check_owners(pol, mods, problems, alabel)
     if "concurrent writers" in lists:
-        check_writers(pol, lists["concurrent writers"], rows, problems, alabel)
+        check_writers(pol, lists["concurrent writers"], rows, problems, alabel, deferred)
     else:
         problems.append(f"{alabel}: ## Policies has no `Concurrent writers:` line (write - for none)")
+    hook = pol.get("fault hook", (None, "", 0))[1]
+    if hook.lower() in ("-", "none"):
+        hook = ""
     if "multi-store writes" in lists:
-        check_crash_safe(lists["multi-store writes"], rows, problems, alabel)
+        check_crash_safe(lists["multi-store writes"], rows, problems, alabel, deferred, hook, repo)
     else:
         problems.append(f"{alabel}: ## Policies has no `Multi-store writes:` line (write - for none)")
+    check_policy_lists(extra, lists, rows, problems, alabel, deferred)
     if "boundaries" in lists:
-        check_boundaries(lists["boundaries"], rows, problems, alabel)
+        check_boundaries(lists["boundaries"], rows, problems, alabel, deferred)
     else:
         problems.append(f"{alabel}: ## Policies has no `Boundaries:` line (write - for none)")
     if rules is None:
@@ -779,6 +1025,100 @@ def check_policies(text, mods, rows, problems, alabel):
     else:
         check_rules(rules, mods, problems, alabel)
     check_reuse(mods, rules, problems, alabel)
+
+
+def plan_checks(cfg, problems):
+    """The [plan] checks list (opt-in plan checks), unknown names reported."""
+    raw = (cfg.get("plan") or {}).get("checks") or []
+    if not isinstance(raw, list):
+        problems.append(f"overhaul.toml: [plan] checks must be a list of {', '.join(PLAN_CHECKS)}")
+        return set()
+    for c in raw:
+        if c not in PLAN_CHECKS:
+            problems.append(f"overhaul.toml: [plan] checks {c!r} is unknown; known: {', '.join(PLAN_CHECKS)}")
+    return {c for c in raw if c in PLAN_CHECKS}
+
+
+def check_ui_verb(rows, problems, flabel):
+    """Every `ui:` row depends on a `cli:` or `http:` row: each GUI action is a verb the harness tests apart (D5)."""
+    by_id = {r.get("rid"): r for r in rows}
+    for r in rows:
+        if not bare(r["entry"]).lower().startswith("ui:"):
+            continue
+        if not any(VERB_ENTRY.match(bare(by_id[d]["entry"])) for d in row_deps(r) if d in by_id):
+            problems.append(f"{flabel}:{r['line']} {r['rid']}: ui row depends on no cli: or http: row; add the "
+                            "verb row it presents to its deps (behaviour in the verb, presentation in the ui row)")
+
+
+def cargo_manifests(repo):
+    """Every Cargo.toml of the repo outside target dirs and .overhaul."""
+    skip = {"target", ".overhaul", ".git", "node_modules"}
+    return sorted(p for p in Path(repo).rglob("Cargo.toml") if not skip & set(p.relative_to(repo).parts[:-1]))
+
+
+def check_float_roundtrip(repo, problems):
+    """A Rust project whose documents store floats parses them back exactly: every serde_json dependency (unless it
+    only inherits the workspace's) enables `float_roundtrip` (slice F12: 0.059000000000000004 read back as 0.059)."""
+    for path in cargo_manifests(repo):
+        try:
+            data = load_toml(path)
+        except Exception:  # an unreadable manifest is cargo's error to report
+            continue
+        tables = [data.get(t) for t in DEP_TABLES] + [(data.get("workspace") or {}).get("dependencies")]
+        tables += [(t or {}).get(k) for t in (data.get("target") or {}).values() if isinstance(t, dict) for k in DEP_TABLES]
+        for deps in tables:
+            spec = deps.get("serde_json") if isinstance(deps, dict) else None
+            if spec is None or (isinstance(spec, dict) and spec.get("workspace") is True):
+                continue
+            feats = spec.get("features") or [] if isinstance(spec, dict) else []
+            if "float_roundtrip" not in feats:
+                problems.append(f"{path.relative_to(repo).as_posix()}: serde_json without the float_roundtrip "
+                                "feature; documents that store floats must read them back exactly")
+
+
+def check_traces(cfg, mods, every, repo, problems):
+    """[plan] traces = [files]: each table row with a module and a test column (PERFORMANCE.md: technique, owner,
+    test) names a module of ARCHITECTURE and a test node that a FUNCTIONS acceptance cell names."""
+    traces = (cfg.get("plan") or {}).get("traces")
+    if traces is None:
+        return
+    if not isinstance(traces, list) or not all(isinstance(t, str) for t in traces):
+        problems.append("overhaul.toml: [plan] traces must be a list of file paths")
+        return
+    nodes = {bare(x) for r in every for x in r.get("acceptance", "").split(";") if bare(x)}
+    for rel in traces:
+        f = Path(repo) / rel
+        if not f.is_file():
+            problems.append(f"{rel}: missing ([plan] traces)")
+            continue
+        found, cols = False, None
+        for n, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            if not line.strip().startswith("|"):
+                cols = None
+                continue
+            c = [bare(x).lower() for x in cells(line)]
+            if cols is None:
+                mod = next((i for i, x in enumerate(c) if x in ("module", "owner")), None)
+                test = next((i for i, x in enumerate(c) if x in ("test", "tests", "acceptance")), None)
+                cols = (mod, test) if mod is not None and test is not None else ("skip",)
+                found = found or cols != ("skip",)
+                continue
+            if cols == ("skip",) or all(SEPARATOR.match(x) for x in c if x):
+                continue
+            raw = cells(line)
+            if max(cols) >= len(raw):
+                problems.append(f"{rel}:{n}: row has fewer cells than its header")
+                continue
+            module, tests = bare(raw[cols[0]]), [bare(x) for x in re.split(r"[;,]", raw[cols[1]]) if bare(x).lower() not in NO_ENTRY]
+            if mods is not None and module not in mods:
+                problems.append(f"{rel}:{n}: module {module!r} is no module of ARCHITECTURE")
+            if not tests:
+                problems.append(f"{rel}:{n}: names no test")
+            for t in tests:
+                if t not in nodes:
+                    problems.append(f"{rel}:{n}: test {t} is in no FUNCTIONS acceptance cell")
+        if not found:
+            problems.append(f"{rel}: no table with a module (or owner) and a test column ([plan] traces)")
 
 
 def ruff_selected(repo, cmd):
@@ -980,8 +1320,12 @@ def validate(repo, run=False, timeout=600, notes=None):
         if not mods:
             problems.append(f"{paths['architecture']}: no `## Module <name>` sections")
         check_architecture(mods, problems, paths["architecture"])
+        check_stems(mods, problems, paths["architecture"])
+        check_new_owners(repo, cfg, mods, problems, paths["architecture"])
+    check_roadmap(repo, cfg, paths, mods, problems)
 
-    fun_file, rows = repo / paths["functions"], []
+    fun_file, rows, every = repo / paths["functions"], [], []
+    checks = plan_checks(cfg, problems)
     if not fun_file.is_file():
         problems.append(f"{paths['functions']}: missing")
     else:
@@ -998,13 +1342,18 @@ def validate(repo, run=False, timeout=600, notes=None):
         problems += entry_match.cross_problems(repo, rows, paths["functions"], waits_on_fn(rows))
         check_stubs(rows, repo, problems, paths["functions"])
         check_property(rows, cfg, repo, problems, paths["functions"])
+        if "ui_verb" in checks:
+            check_ui_verb(rows, problems, paths["functions"])
         depth, width, _ = check_depth(rows, cfg, problems, paths["functions"])
         if notes is not None:
             notes.append(f"{paths['functions']}: critical path {depth} functions, widest level {width}"
                          + (f", {len(every) - len(rows)} deferred" if len(every) > len(rows) else ""))
     if arch_file.is_file():
         check_policies(arch_file.read_text(encoding="utf-8", errors="replace"), mods, rows, problems,
-                       paths["architecture"])
+                       paths["architecture"], {r.get("rid") for r in every if r.get("st") == DEFERRED}, cfg, repo)
+    if "float_roundtrip" in checks:
+        check_float_roundtrip(repo, problems)
+    check_traces(cfg, mods, every, repo, problems)
     if "lint" in cmd:
         before = len(problems)
         check_ruff(repo, cmd["lint"], problems)

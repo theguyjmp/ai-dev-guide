@@ -1,5 +1,30 @@
 # overhaul-build changelog
 
+## Pass E: polish converges, 2026-11-08
+- drive.py: visibility-only edits (pub / pub(crate) / export / a re-export of an existing item) are also allowed in
+  the modules the fixing module depends on (ARCHITECTURE.md `Depends on:`), for builders and polish fixes alike;
+  drive.py refuses any other change there before review.
+- drive.py: a cross-module duplication issue (C03/C05) goes, as one fix, to the module that depends on every other
+  one it names (the caller), with a note to export the owner's copy and import it; when the owner has its own fix
+  that round, the owner's fix starts and lands first (`polish_order` log line).
+- drive.py: a round fix that fails its review carries its verified NOs into the next round's fix brief for that
+  module (state `failed_nos`).
+- drive.py: polish fix rounds default and cap 3 (was 2); `[limits] fix_retries` (default 2, was a fixed 1).
+
+## Pass C4: per-phase polish and visibility edits, 2026-11-08
+- drive.py: deferred rows are out of the current plan; polish, probes and the verdict no longer wait for them (C3
+  made polish wait, so a rolling plan would never polish).
+- drive.py: per-phase polish (`[harness] phase_polish`, default true, with the barrier): once every function of
+  phase N (not the last) is proven, phase N's plan gaps, the probes of the modules it finished and up to
+  polish_rounds audit/fix rounds scoped to its modules run before phase N+1 starts; state `phase_polish.N`, files
+  `.overhaul/polish/phase-N/`, briefs `polish-audit-pN-<round>.md`. The final whole-tree polish still runs and takes
+  only the gaps no phase pass took.
+- drive.py: a builder may make visibility-only edits (pub / pub(crate) / export / a re-export of an existing item)
+  in other files of its own module; the briefs say so, drive.py refuses any other change there before review
+  (visibility_only on the `git diff -U0`) and the review checks it.
+- tests: test_harness_c4.py; the TestBudgets timeout test has an 18 s timeout and 30 s kill waits under load.
+
+
 ## Rust plan and land path, 2026-11-08
 - rust_src.py (new): a stdlib Rust lexer (comments dropped, literals as one token) with fn spans, #[test] flags,
   calls, `#[cfg(test)]` and `proptest!` spans.
