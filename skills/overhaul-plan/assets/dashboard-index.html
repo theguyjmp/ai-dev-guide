@@ -112,7 +112,6 @@
       <span class="label">Current gate</span>
       <span class="sub" data-draw="g-name" data-source="gate">—</span>
     </div>
-    <span class="sub">What must be true before the build moves to the next phase, checked from the fleet's own records.</span>
     <div data-draw="g-list" data-source="gate"></div>
   </section>
 
@@ -121,12 +120,8 @@
       <span class="label">Pipeline</span>
       <span class="sub" data-draw="p-ago" data-source="pipeline">—</span>
     </div>
-    <div class="ptitle">Product functions <span data-draw="p-total" data-bar="functions" data-source="pipeline">—</span></div>
-    <span class="sub">Counts the product's functions in spec/FUNCTIONS.md. A function is proven only when its acceptance test passes on the deployed build. Green is on main; grey is done work not on main yet.</span>
+    <div class="ptitle">Functions <span data-draw="p-total" data-bar="functions" data-source="pipeline">—</span></div>
     <div data-draw="p-bar" data-bar="functions" data-source="pipeline"></div>
-    <div class="ptitle">Work packets <span data-draw="p-total" data-bar="packets" data-source="pipeline">—</span></div>
-    <span class="sub">Counts every PR and queue row, tooling, lints and gate work included. Work that names no function moves only this bar.</span>
-    <div data-draw="p-bar" data-bar="packets" data-source="pipeline"></div>
   </section>
 
   <section class="tiles">
