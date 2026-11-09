@@ -2,9 +2,11 @@
 
     py -3 anchors.py --repo R --base <main sha> --head <branch sha> [--functions spec/FUNCTIONS.md] [--plan <sha>]
 
-A test file (under tests/, named test_*.py or *_test.py, or any .rs file there) that exists in the plan commit may not be modified, renamed or
-deleted by a builder branch; new test files are fine. The plan commit is overhaul.toml [probe] plan_commit at --base,
-else the first commit that added the FUNCTIONS file. Prints each touched anchor and exits 1, or exits 0.
+A test file (under tests/, named test_*.py or *_test.py, or any .rs file there) is an anchor, which a builder branch
+may not modify, rename or delete, when it exists in the plan commit, when it is on --base and an acceptance cell of the
+FUNCTIONS file at --base names it, or when a `plan:` commit before --base touched it (rolling plans add phases in later
+plan commits). New test files are fine. The plan commit is overhaul.toml [probe] plan_commit at --base, else the first
+commit that added the FUNCTIONS file. Prints each touched anchor and exits 1, or exits 0.
 land.py calls touched_anchors() for every land, polish and probe fix included.
 """
 import argparse
@@ -46,12 +48,25 @@ def plan_commit(repo, base, functions="spec/FUNCTIONS.md"):
     return added[0] if added else ""
 
 
+NAMED = re.compile(r"(tests/[\w./-]+\.(?:py|rs))::")
+
+
+def planned_tests(repo, base, functions="spec/FUNCTIONS.md", plan=""):
+    """Every anchor at base: the plan commit's test files, the test files on base that FUNCTIONS at base names in an
+    acceptance cell, and the test files any `plan:` commit up to base touched."""
+    plan = plan or plan_commit(repo, base, functions)
+    planned = set(git(repo, "ls-tree", "-r", "--name-only", plan, "--", "tests").splitlines()) if plan else set()
+    on_base = set(git(repo, "ls-tree", "-r", "--name-only", base, "--", "tests").splitlines())
+    planned |= on_base & set(NAMED.findall(git(repo, "show", f"{base}:{functions}")))
+    planned |= set(git(repo, "log", "--format=", "--name-only", "-E", "--grep=^plan:", base, "--", "tests").split())
+    return {p for p in planned if is_test(p)}
+
+
 def touched_anchors(repo, base, head, functions="spec/FUNCTIONS.md", plan=""):
     """Planned test files the branch head modifies, renames or deletes relative to base."""
-    plan = plan or plan_commit(repo, base, functions)
-    if not plan:
+    planned = planned_tests(repo, base, functions, plan)
+    if not planned:
         return []
-    planned = {p for p in git(repo, "ls-tree", "-r", "--name-only", plan, "--", "tests").splitlines() if is_test(p)}
     out = []
     for line in git(repo, "diff", "--name-status", "-M", f"{base}...{head}").splitlines():
         parts = line.split("\t")

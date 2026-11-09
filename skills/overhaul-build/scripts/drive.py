@@ -117,6 +117,8 @@ def parse_needs(cell: str, deps: list[str]) -> list[str] | None:
             out.append(next(d for d in deps if d.upper() == did))
     return out
 IN_FLIGHT = ("building", "review", "landing")
+ID_LISTS = ("concurrent writers", "boundaries", "multi-store writes")  # Policies lines that list function ids
+DEFERRED = "deferred"  # FUNCTIONS status of a row planned later (rolling plan): drive never starts it
 POLISH_KINDS = ("polish_audit", "polish_verify", "polish_fix", "polish_review", "polish_land")
 GREEN_BEFORE = "acceptance already green before change"
 CONFLICT = "merge conflict"  # land.py: "merge conflict merging <main> into fn/<id>"
@@ -601,6 +603,7 @@ def load_config(repo: Path) -> dict:
     cfg["commands"] = {k: str(v) for k, v in raw_cmds.items() if not isinstance(v, dict)}
     cfg["acceptance"] = land_mod.acceptance_template(raw_cmds)
     cfg["extra"] = land_mod.extra_cmds(raw_cmds)
+    cfg["plan"] = raw.get("plan") if isinstance(raw.get("plan"), dict) else {}  # plan_validate's keys, read-only
     return cfg
 
 
@@ -646,6 +649,7 @@ class Driver:
         self.flake_tests: set[str] = set()  # main-flake tests already sent to a fix this run (one fix per test)
         self.barrier = bool(har.get("phase_barrier", True))  # phase N+1 waits until every phase <=N is proven
         self.fns: dict[str, Fn] = {}
+        self.deferred: set[str] = set()  # rows planned later: never built, counted apart
         self.order: list[Fn] = []
         self.arch = ""
         self.on_main: set[str] = set()
@@ -740,6 +744,10 @@ class Driver:
         ids = [f.id for f in fns]
         if len(set(ids)) != len(ids):
             raise DriveError(f"{rel} repeats ids: {sorted({i for i in ids if ids.count(i) > 1})}")
+        self.deferred = {f.id for f in fns if f.status == DEFERRED}
+        fns = [f for f in fns if f.id not in self.deferred]
+        if not fns:
+            raise DriveError(f"{rel} has only deferred rows; plan a phase first")
         self.order = sorted(fns, key=phase_key)
         self.fns = {f.id: f for f in fns}
         self.arch = self.read_main(arch) or ""
@@ -764,6 +772,9 @@ class Driver:
     def plan_problem(self, f: Fn) -> str:
         if not ID_RE.fullmatch(f.id):
             return f"id {f.id!r} cannot name a branch; use letters, digits, . _ -"
+        later = [d for d in f.deps if d in self.deferred]
+        if later:
+            return f"deps are deferred (planned later): {', '.join(later)}; defer {f.id} too, or plan them now"
         unknown = [d for d in f.deps if d not in self.fns]
         if unknown:
             return f"deps not in FUNCTIONS.md: {', '.join(unknown)}"
@@ -1031,7 +1042,7 @@ class Driver:
             "module": f.module, "module_section": module_section(self.arch, f.module)
             or "(spec/ARCHITECTURE.md has no section naming this module)",
             "allowed_paths": self.allowed(f), "acceptance_source": self.acceptance_text(f),
-            "policies": self.policies(), "commands": self.commands_text(f), "max_calls": str(self.max_calls),
+            "policies": self.policies(f), "commands": self.commands_text(f), "max_calls": str(self.max_calls),
             "previous": previous, **self.standard_values(f)})
         tokens = len(brief) // 4
         if tokens > self.max_tokens:
@@ -1315,10 +1326,37 @@ class Driver:
         return ""
 
     # ---- review ----
-    def policies(self) -> str:
-        """The `## Policies` section of ARCHITECTURE.md: concurrency, persistence and error owners."""
-        return (module_section(self.arch, "Policies")
-                or "(spec/ARCHITECTURE.md declares no Policies section; re-run plan_validate.py)")
+    def policies(self, f: Fn | None = None) -> str:
+        """The `## Policies` section of ARCHITECTURE.md: concurrency, persistence and error owners. With
+        [harness] trim_policies and a function, its id lists keep only that id and its domain rules only the homes in
+        its own module or a module it depends on, so a big plan's briefs stay small."""
+        text = module_section(self.arch, "Policies")
+        if not text:
+            return "(spec/ARCHITECTURE.md declares no Policies section; re-run plan_validate.py)"
+        if f is None or not self.cfg["harness"].get("trim_policies"):
+            return text
+        dep_line = re.search(r"^[\s>*-]*\**\s*Depends on\s*:\s*\**\s*(.*)$", module_section(self.arch, f.module),
+                             re.I | re.M)
+        deps = re.split(r"[,;]", dep_line.group(1)) if dep_line else []
+        mods = {f.module} | {x.strip().strip("`*") for x in deps if x.strip().strip("`*") not in ("", "-", "none")}
+        lists = set(ID_LISTS) | {str(k).lower() for k in (self.cfg.get("plan") or {}).get("policy_lists") or {}}
+        out = []
+        for line in text.splitlines():
+            m = re.match(r"^([\s>*-]*\**\s*)([A-Za-z][\w -]*?)(\s*\**\s*:\s*)(.*)$", line)
+            key = m.group(2).strip().lower() if m else ""
+            if key in lists:
+                if f.id in [x.strip("`") for x in re.split(r"[,;\s]+", m.group(4))]:
+                    out.append(f"{m.group(1)}{m.group(2)}{m.group(3)}{f.id}")
+            elif key == "domain rules":
+                keep = [e.strip() for e in m.group(4).split(";")
+                        if (h := re.search(r"->\s*`?([\w\-]+)\.", e)) and h.group(1) in mods]
+                if keep:
+                    out.append(f"{m.group(1)}{m.group(2)}{m.group(3)}{'; '.join(keep)}")
+            else:
+                out.append(line)
+        out.append("(Trimmed to this function: id lists show only its id, domain rules only homes in "
+                   f"{', '.join(sorted(mods))}; the full section is in spec/ARCHITECTURE.md.)")
+        return "\n".join(out)
 
     def standard_values(self, f: Fn) -> dict[str, str]:
         """The quality-standard placeholders of a build or review brief for function f."""
@@ -1362,7 +1400,7 @@ class Driver:
         brief = render("review-brief.md", {
             "id": fid, "branch": branch, "row": self.row_table(f), "allowed_paths": self.allowed(f),
             "acceptance_source": self.acceptance_text(f), "review_file": review_file.as_posix(),
-            "policies": self.policies(), **values, "checklist_path": CHECKLIST.as_posix(),
+            "policies": self.policies(f), **values, "checklist_path": CHECKLIST.as_posix(),
             "checklist_version": checklist()[0],
             "checklist": checklist_text(applicable_items(scope, bool(f.rules))),
             "round_rule": self.round_rule(fid),
@@ -1626,8 +1664,8 @@ class Driver:
         pol = self.polish_state()
         if self.polish_rounds < 1 or pol["status"] in ("done", "failed"):
             return False
-        if any(self.st["functions"][fid]["status"] != "proven" for fid in self.fns):
-            return False
+        if self.deferred or any(self.st["functions"][fid]["status"] != "proven" for fid in self.fns):
+            return False  # polish audits the whole plan: it waits for the deferred rows too
         started = self.pump_polish_land()
         if self.probe_waiting():
             return started
@@ -2245,7 +2283,8 @@ class Driver:
     def summary(self) -> str:
         n = Counter(self.st["functions"][fid]["status"] for fid in self.fns)
         rest = " ".join(f"{s} {n[s]}" for s in (*IN_FLIGHT, "needs-plan") if n[s])
-        return f"proven {n['proven']}/{len(self.fns)}" + (f" {rest}" if rest else "")
+        later = f" deferred {len(self.deferred)}" if self.deferred else ""
+        return f"proven {n['proven']}/{len(self.fns)}{later}" + (f" {rest}" if rest else "")
 
     def script(self, name: str) -> str:
         """Run verdict.py or dash.py; return its last output line ('' if absent)."""
@@ -2290,6 +2329,8 @@ class Driver:
             self.say(f"needs-plan {fid}: {recs[fid]['last_reason']}")
         if blocked:
             self.say(f"blocked on unproven deps: {', '.join(blocked)}")
+        if self.deferred and not code:
+            self.say(f"{len(self.deferred)} deferred rows wait for the next plan commit; polish runs after them")
         print(f"DRIVE EXIT {code} {self.summary()}", flush=True)
         return code
 

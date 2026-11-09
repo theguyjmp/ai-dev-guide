@@ -42,6 +42,11 @@ Project rules: a row's `rules` column ids are quoted from `[paths] patterns`/`st
 briefs ("Project rules this row cites"), and only such a row gets checklist item C30 (each cited rule holds, the
 acceptance proves each pattern id). `[commands.extra]` runs after the whole-tree gate, at pre-review and land;
 `[commands.acceptance_by]` picks a test file's template; a proven `[tiers]` test reruns at land only by footprint.
+Rolling plans: a `deferred` row is never started and counts apart (`proven N/T deferred D`); polish waits until
+no row is deferred. Tests a later `plan:` commit adds, or FUNCTIONS names on main, are anchors too. `drive.py --repolish`
+reruns the polish audit (at most polish_rounds times); checklist `W` items are asked only by the whole-tree audit.
+`[harness] trim_policies = true` gives each brief only the policy-list lines naming its id and the domain rules homed in
+its module or a module it depends on.
 
 ## Exit 3: needs-plan functions
 drive.py exits 3 when nothing is READY and some function is needs-plan: its retries are used up, its brief is over budget, or it cannot land. drive.py has stopped, so nothing races your edits. For each such function read only its row, its review reason (`.overhaul/reviews/<id>.txt`) and its last events (`grep <id> .overhaul/log.jsonl | tail -n 3`), never its diff, and make one plan fix by overhaul-plan's rules:

@@ -146,6 +146,12 @@ scale = [globs]` reruns those proven tests at land only when the footprint touch
 (name = command) adds project lints land and pre-review run. A FUNCTIONS `rules` column (`P07, S18`) with `[paths]
 patterns` / `standards` cites project rule ids: plan_validate checks each id exists, each `ui:` row (or entry naming a
 `[plan] interactive_verbs` word) cites a pattern id, and each cited pattern id is named in its acceptance test.
+Rolling plan: status `deferred` marks a row planned later (id, phase, module, deps and entry checked; no files or
+tests yet; no planned row may depend on it); FUNCTIONS may hold one table per phase. `[plan] checks = ["ui_verb",
+"float_roundtrip"]` opts in to: each `ui:` row deps on a `cli:`/`http:` row; every serde_json dependency enables
+float_roundtrip. Policies `Fault hook: NAME`: every crash test body names NAME. `[plan] policy_lists = {cancellable =
+"cancel"}`: a `Cancellable:` Policies line whose ids each need a test matching the regex. `[plan] traces =
+["spec/PERFORMANCE.md"]`: each table row names an ARCHITECTURE module (owner) and a test node in a FUNCTIONS cell.
 Rust (plan_validate checks it): when documents store floats, serde_json gets `features = ["float_roundtrip"]` (else 0.059000000000000004 reads back as 0.059 and byte-equal undo/redo breaks); acceptance in `tests/acceptance/<f>.rs`, each a root Cargo.toml `[[test]]` named by its stem, through `mod entry;`;
 stubs `todo!()`; unit tests in-crate `#[cfg(test)] mod tests`; property `tests/property/test_<id>.rs` with `proptest!`; no conftest.py. Commands: test `cargo test -q --workspace --lib --bins`,
 acceptance `cargo test -q --test {stem} -- --exact {test}`, property `cargo test -q --test {stem}`, lint `cargo clippy -q --workspace --all-targets -- -D warnings`, the scripts on `crates src`. JS: `npx eslint .`, `npx jscpd src`, `node --test`.
