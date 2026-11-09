@@ -49,6 +49,18 @@ acceptance proves each pattern id). `[commands.extra]` runs after the whole-tree
 Priority (Windows): builders, reviewers, fix agents and probes run BELOW_NORMAL, the pre-review gate, land and periodic
 gates NORMAL, land's acceptance ABOVE_NORMAL; a failed `[tiers]` test reruns alone 2 more times before it is a
 regression (`tier rerun passed` in land.out).
+Land throughput: up to `[harness] land_parallel` (default 3; older key max_lands) lands run at once (`land.py
+--parallel`) when their footprints (changed and claimed files, the owning module and every module whose Paths they
+change) do not overlap. Each gates on main outside the lock in its own worktree and `land-<k>` target dir; the commit
+and fast-forward stay serialized under `.overhaul/lock`. A land whose base moved re-merges main and reruns the
+whole-tree commands, its own acceptance, the rows newly proven since its gate and the proven rows of the modules the
+newly landed files touch or that depend on them (`Depends on:`); a newly landed file outside every module's Paths
+(other than spec/*.md) reruns every row. `[harness] heavy_tests` (globs) with `heavy_runner` (a template with {sha}
+{stem} {test} {file} {node} {slot}; exit 0 = pass) run those tests on another machine, beside the local batch; a host
+it cannot reach (exit 255, ssh/git connection errors) is retried once, then the test runs locally. `[harness]
+land_timeout_min` (default 20, 0 = off; lock waits excluded) stops a land and logs `land_timeout` with the slowest
+test (`slowest`, `slowest_s`): the first is requeued without charging an attempt, the next fails as usual; split that
+test or move it to heavy_tests.
 `[gates.periodic]` (scripts/periodic.py): slow gates (CI parity matrix via `periodic.py ci`, full scale tier, GPU over ssh)
 run on main in the background every N lands or M minutes and once at the end; `BENCH` lines are judged against
 spec/BUDGETS.toml (CI at ci_factor 2x, macOS record-only); each gate keeps its own green, so a red gate bisects to

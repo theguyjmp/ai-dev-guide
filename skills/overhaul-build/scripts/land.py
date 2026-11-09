@@ -1,10 +1,16 @@
 """Land one function's branch on main (overhaul v2). Deterministic, no LLM, Python stdlib only.
 
-    py -3 land.py --repo R --fn ID [--main main] [--wait 30] [--timeout 1800] [--polish] [--target-dir D]
+    py -3 land.py --repo R --fn ID [--main main] [--wait 30] [--timeout 1800] [--polish] [--parallel] [--target-dir D]
 
 Sequential under the lock file R/.overhaul/lock (created with O_EXCL, removed on exit; drive.py takes the same lock to
 write state.json and can import acquire_lock/release_lock from here). All work happens in the worktree
-R/.overhaul/wt/land, never in R's own working tree.
+R/.overhaul/wt/land, never in R's own working tree. --parallel (what drive.py runs) gates steps 1-5 on main outside
+the lock in R/.overhaul/wt/land-<ID> and takes the lock only for step 6; if main moved meanwhile it re-merges main
+and reruns the whole-tree commands, its own acceptance and only the proven rows the newly landed work can affect
+(regate_rows: newly proven rows, rows of touched modules and their `Depends on:` dependents; every row when a newly
+landed file lies outside every module's Paths). [harness] heavy_tests (globs) run through [harness] heavy_runner
+(placeholders {sha} {stem} {test} {file} {node} {slot}; exit 0 = pass; an unreachable host retries once, then runs
+locally). [harness] land_timeout_min (default 20, 0 = off) stops the land: event land_timeout names the slowest test.
 
   1. The branch fn/<ID> must not edit plan files (spec/, tests/acceptance/, overhaul.toml): those change only in a plan
      commit on main. Planned tests are anchors (anchors.py): a test file that was in the plan commit may not be
@@ -51,6 +57,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from pathlib import PurePosixPath
@@ -70,6 +77,44 @@ GREEN_BEFORE = "acceptance already green before change"
 
 class LandFail(Exception):
     """One reason line; the land stops and main stays untouched."""
+
+
+class LandTimeout(LandFail):
+    """The land ran past [harness] land_timeout_min: logged as land_timeout, naming the slowest test."""
+
+
+LAND_TIMEOUT = "land timeout:"
+LAND_TIMEOUT_MIN = 20.0  # [harness] land_timeout_min default; 0 = no budget
+# The land's time budget: `end` (time.monotonic) or None, and (seconds, label) of every acceptance run so far.
+BUDGET = {"end": None, "minutes": 0.0, "times": []}
+
+
+def start_budget(minutes):
+    BUDGET.update(end=time.monotonic() + minutes * 60 if minutes > 0 else None, minutes=minutes, times=[])
+
+
+def pause_budget(seconds):
+    """Time spent waiting (for the lock, for stacked lands) is not the land's own: push the deadline back."""
+    if BUDGET["end"] is not None:
+        BUDGET["end"] += max(0.0, seconds)
+
+
+def slowest():
+    """(label, seconds) of the slowest acceptance run so far, or ("", 0)."""
+    return max(((lbl, s) for s, lbl in BUDGET["times"]), key=lambda x: x[1], default=("", 0.0))
+
+
+def timeout_reason():
+    lbl, secs = slowest()
+    return (f"{LAND_TIMEOUT} over {BUDGET['minutes']:g} min ([harness] land_timeout_min); slowest test "
+            f"{lbl or '?'} ({secs:.0f}s): split it or move it to [harness] heavy_tests")
+
+
+def land_timeout_min(conf):
+    try:
+        return float((conf.get("harness") or {}).get("land_timeout_min", LAND_TIMEOUT_MIN) or 0)
+    except (TypeError, ValueError):
+        return LAND_TIMEOUT_MIN
 
 
 def check_anchors(repo, base, head, branch, fpath):
@@ -259,19 +304,44 @@ def fill(template, **values):
     return out
 
 
-def run(cmd, cwd, out_path, timeout, level=priority.NORMAL):
+def kill_tree(proc):
+    """Kill a shell command and its children (cargo under cmd.exe), by PID."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc.kill()
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def run(cmd, cwd, out_path, timeout, level=priority.NORMAL, label=""):
     """Run one shell command in cwd at priority `level` (Windows); output goes to out_path. Returns (exit code,
-    last output line)."""
+    last output line). Inside the land's time budget (BUDGET) a command still running at its end is killed and
+    LandTimeout raised. `label` (a test id) records the run's seconds for the land_timeout event."""
+    end = BUDGET["end"]
+    left = None if end is None else end - time.monotonic()
+    if left is not None and left <= 0:
+        raise LandTimeout(timeout_reason())
+    wait = timeout if left is None else min(timeout, left)
+    t0 = time.monotonic()
     with open(out_path, "wb") as out:
         out.write(f"$ {cmd}\n".encode())
         out.flush()
         proc = subprocess.Popen(cmd, cwd=cwd, shell=True, stdout=out, stderr=subprocess.STDOUT,
                                 **priority.popen_kwargs(level))
         try:
-            code = proc.wait(timeout=timeout)
+            code = proc.wait(timeout=wait)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            kill_tree(proc)
+            if label:
+                BUDGET["times"].append((time.monotonic() - t0, label))
+            if wait < timeout:
+                raise LandTimeout(timeout_reason())
             return -1, f"timeout after {timeout}s"
+    if label:
+        BUDGET["times"].append((time.monotonic() - t0, label))
     with open(out_path, "rb") as f:
         text = f.read().decode("utf-8", "replace")
     lines = [x.strip() for x in text.splitlines() if x.strip()]
@@ -280,12 +350,72 @@ def run(cmd, cwd, out_path, timeout, level=priority.NORMAL):
 
 
 def acceptance_template(commands):
-    """The acceptance template of a [commands] table: the plain string, or with [commands.acceptance_by] a dict
-    {"default": str, "by": [(glob, str)]} that tmpl_for resolves per test file."""
+    """The acceptance template of a [commands] table: the plain string, or with [commands.acceptance_by] or a
+    heavy runner (load_commands) a dict {"default": str, "by": [(glob, str)], "heavy": {...} or None} that
+    tmpl_for resolves per test file."""
     by = commands.get("acceptance_by")
     by = [(str(g), str(t)) for g, t in by.items() if str(t).strip()] if isinstance(by, dict) else []
     default = str(commands.get("acceptance") or "")
-    return {"default": default, "by": by} if by else default
+    heavy = commands.get(HEAVY_KEY)
+    return {"default": default, "by": by, "heavy": heavy} if by or heavy else default
+
+
+# ---- heavy tests: [harness] heavy_tests run through [harness] heavy_runner on another machine ----------------------
+
+HEAVY_KEY = "_heavy"  # load_commands puts {"globs", "runner"} under this key of the commands table
+# A runner that could not reach its host: ssh's own exit code, or git/ssh connection errors in its output.
+UNREACHABLE = re.compile(r"Could not resolve hostname|ssh: connect to host|Connection (?:timed out|refused|reset|"
+                         r"closed)|No route to host|Network is unreachable|Could not read from remote repository|"
+                         r"kex_exchange_identification|Host key verification failed", re.I)
+
+
+def load_commands(conf):
+    """[commands] of overhaul.toml, plus the heavy runner from [harness] heavy_tests (globs on test files) and
+    heavy_runner (a command template) when both are set."""
+    commands = dict(conf.get("commands", {}))
+    har = conf.get("harness") or {}
+    globs = har.get("heavy_tests") or []
+    globs = [str(g) for g in ([globs] if isinstance(globs, str) else globs) if str(g).strip()]
+    runner = str(har.get("heavy_runner") or "").strip()
+    if globs and runner:
+        commands[HEAVY_KEY] = {"globs": globs, "runner": runner}
+    return commands
+
+
+def heavy_of(template, node):
+    """The heavy runner config when node's test file matches [harness] heavy_tests, else None."""
+    heavy = template.get("heavy") if isinstance(template, dict) else None
+    return heavy if heavy and under(node.partition("::")[0].replace("\\", "/"), heavy["globs"]) else None
+
+
+def heavy_run(template, node, wt, out_path, timeout):
+    """Run one heavy test through the heavy runner: {sha} (wt's HEAD, the tree under test), {test}, {file},
+    {stem}, {node} and {slot} (this land's target dir name, so concurrent lands use separate remote checkouts).
+    Exit 0 passes, like a local run. A runner that cannot reach its host retries once, then the test runs
+    locally. Returns (code, tail)."""
+    heavy = heavy_of(template, node)
+    file, _, name = node.partition("::")
+    sha = git(wt, "rev-parse", "HEAD").stdout.strip()
+    slot = os.path.basename(os.environ.get("CARGO_TARGET_DIR", "") or "land") or "land"
+    cmd = fill(heavy["runner"], sha=sha, test=name or file, file=file, stem=PurePosixPath(file).stem, node=node,
+               slot=slot)
+    for k in (1, 2):
+        code, tail = run(cmd, wt, out_path, timeout, ACCEPTANCE_PRIORITY, label=node)
+        if not (code == 255 or (code not in (0, -1) and UNREACHABLE.search(read_out(out_path)))):
+            return code, tail
+        note = f"heavy runner unreachable (exit {code}, try {k}/2): {tail}"
+        print(note, flush=True)
+    code, tail = run(acceptance_cmds(template, [node])[0][1], wt, out_path, timeout, ACCEPTANCE_PRIORITY,
+                     label=node)
+    print(f"heavy test {node} ran locally (exit {code})", flush=True)
+    return code, tail
+
+
+def run_node(template, node, wt, out_path, timeout):
+    """One test id alone: through the heavy runner when it is a heavy test, else its own local command."""
+    if heavy_of(template, node):
+        return heavy_run(template, node, wt, out_path, timeout)
+    return run(acceptance_cmds(template, [node])[0][1], wt, out_path, timeout, ACCEPTANCE_PRIORITY, label=node)
 
 
 def tmpl_for(template, node):
@@ -347,6 +477,61 @@ def under(path, pats):
 def touched_modules(arch, touched):
     """The modules whose Paths hold at least one touched file."""
     return {m for m, pats in module_paths(arch).items() if any(under(t, pats) for t in touched)}
+
+
+def module_deps(arch):
+    """{module: {modules it depends on}} from the `Depends on:` lines of ARCHITECTURE.md's module sections."""
+    deps, cur = {}, None
+    for line in arch.splitlines():
+        m = re.match(r"^##\s+Module\s*:?\s+(\S+)", line, re.I)
+        if m:
+            cur = m.group(1).strip("`:*")
+            deps.setdefault(cur, set())
+            continue
+        if re.match(r"^#{1,2}\s", line):
+            cur = None
+        m = re.match(r"^[\s>*-]*\**\s*Depends on\s*:\s*\**\s*(.*)$", line, re.I) if cur else None
+        if m:
+            deps[cur] = {x.strip().strip("`*").strip() for x in re.split(r"[,;]", m.group(1))
+                         if x.strip().strip("`*").strip() not in ("", "-", "none", "None")}
+    return deps
+
+
+def dependents(arch, mods):
+    """mods plus every module that depends on one of them, directly or through others."""
+    deps, out = module_deps(arch), set(mods)
+    grew = True
+    while grew:
+        grew = False
+        for m, ds in deps.items():
+            if m not in out and ds & out:
+                out.add(m)
+                grew = True
+    return out
+
+
+def regate_rows(repo, old, new, fpath, apath, rows_now, fid):
+    """What a land whose base moved from `old` to `new` must rerun on the re-merged tree: (row ids, newly proven
+    row ids, modules) or None for every proven row. The rows are those newly proven between old and new, every
+    proven row of a module the newly landed changes touch or of a module depending on one (ARCHITECTURE.md
+    `Depends on:`), and every row whose module ARCHITECTURE.md does not list. A newly landed file outside every
+    module's Paths (a lock file, a test, overhaul.toml), other than spec/*.md, means every row."""
+    files = [f for f in git(repo, "diff", "--name-only", old, new).stdout.splitlines() if f and f != fpath]
+    old_rows = parse_functions(git(repo, "show", f"{old}:{fpath}", check=False).stdout)
+    proven = {r for r, row in rows_now.items() if row["status"] == "proven" and r != fid}
+    newly = {r for r in proven if old_rows.get(r, {}).get("status") != "proven"}
+    arch = git(repo, "show", f"{new}:{apath}", check=False).stdout
+    paths = module_paths(arch)
+    hit = set()
+    for f in files:
+        mods = {m for m, pats in paths.items() if under(f, pats)}
+        if not mods and not (f.startswith("spec/") and f.endswith(".md")):
+            return None
+        hit |= mods
+    affected = dependents(arch, hit)
+    keep = {r for r in proven if r in newly or rows_now[r].get("module", "") in affected
+            or rows_now[r].get("module", "") not in paths}
+    return keep, newly, hit
 
 
 def acceptance_cmds(template, nodes):
@@ -472,14 +657,45 @@ def read_out(path):
 
 def red_nodes(template, nodes, wt, out_path, timeout, alone=True):
     """[(node, code, tail)] of the nodes that fail in wt, in order, batched by test target. With `alone`, the first
-    one found in a batch reruns by itself so out_path holds its own output (the batch verdict stands)."""
+    one found in a batch reruns by itself so out_path holds its own output (the batch verdict stands). Heavy tests
+    ([harness] heavy_tests) run one by one through the heavy runner in a thread beside the local batches; their
+    output goes to <out_path>-heavy.out and is copied to out_path when one is the first failure."""
+    nodes = list(dict.fromkeys(nodes))
+    heavy = [n for n in nodes if heavy_of(template, n)]
+    local = [n for n in nodes if n not in heavy]
+    labels = {c: (g[0] if len(g) == 1 else f"{g[0].partition('::')[0]} ({len(g)} tests)")
+              for g, c in batch_cmds(template, local)} if local else {}
+    labels.update({c: n for n, c in acceptance_cmds(template, local)})
+
     def runner(cmd):
-        code, tail = run(cmd, wt, out_path, timeout, ACCEPTANCE_PRIORITY)
+        code, tail = run(cmd, wt, out_path, timeout, ACCEPTANCE_PRIORITY, label=labels.get(cmd, ""))
         return code, tail, read_out(out_path)
-    res = batch_results(template, nodes, runner)
-    bad = [(n, res[n][0], res[n][1]) for n in dict.fromkeys(nodes) if res[n][0] != 0]
-    if bad and alone and not res[bad[0][0]][2]:
-        code, tail = run(acceptance_cmds(template, [bad[0][0]])[0][1], wt, out_path, timeout, ACCEPTANCE_PRIORITY)
+    res, errors, heavy_out = {}, [], os.path.splitext(out_path)[0] + "-heavy.out"
+
+    def remote():
+        try:
+            for n in heavy:
+                code, tail = heavy_run(template, n, wt, heavy_out, timeout)
+                res[n] = (code, tail, True)
+        except BaseException as e:  # noqa: BLE001 - re-raised on the calling thread
+            errors.append(e)
+    thread = None
+    if heavy:
+        thread = threading.Thread(target=remote, daemon=True)
+        thread.start()
+    try:
+        if local:
+            res.update(batch_results(template, local, runner))
+    finally:
+        if thread:
+            thread.join()
+    if errors:
+        raise errors[0]
+    bad = [(n, res[n][0], res[n][1]) for n in nodes if res[n][0] != 0]
+    if bad and bad[0][0] in heavy:
+        shutil.copyfile(heavy_out, out_path)
+    elif bad and alone and not res[bad[0][0]][2]:
+        code, tail = run_node(template, bad[0][0], wt, out_path, timeout)
         if code != 0:
             bad[0] = (bad[0][0], code, tail)
     return bad
@@ -540,13 +756,15 @@ def land(repo, fid, main, timeout):
     return commit_land(repo, gate_branch(repo, fid, main, timeout), main, timeout)
 
 
-def gate_branch(repo, fid, main, timeout, stack=()):
+def gate_branch(repo, fid, main, timeout, stack=(), own=False):
     """Steps 1 to 5 on main as it is now; returns the context commit_land needs. With `stack` (functions whose lands
     are in flight, footprints disjoint from this one) the gate runs on main + their branches + this branch, so this
-    land can commit right after theirs without a second gate. Runs without the lock when stacked."""
+    land can commit right after theirs without a second gate. Runs without the lock when stacked or `own` (a
+    parallel land: its own worktree and output file, gated on main alone)."""
     ovh = os.path.join(repo, ".overhaul")
-    out_path = os.path.join(ovh, f"land-{fid}.out" if stack else "land.out")
-    wt = os.path.join(ovh, "wt", f"land-{fid}" if stack else "land")
+    own = own or bool(stack)
+    out_path = os.path.join(ovh, f"land-{fid}.out" if own else "land.out")
+    wt = os.path.join(ovh, "wt", f"land-{fid}" if own else "land")
     branch = f"fn/{fid}"
 
     main_sha = git(repo, "rev-parse", "--verify", f"refs/heads/{main}^{{commit}}").stdout.strip()
@@ -562,7 +780,7 @@ def gate_branch(repo, fid, main, timeout, stack=()):
         conf = tomllib.loads(toml_src.stdout)
     except tomllib.TOMLDecodeError as e:
         raise LandFail(f"overhaul.toml unreadable: {e}")
-    commands = conf.get("commands", {})
+    commands = load_commands(conf)
     fpath = conf.get("paths", {}).get("functions", "spec/FUNCTIONS.md")
     if not commands.get("acceptance"):
         raise LandFail("overhaul.toml has no [commands] acceptance")
@@ -617,9 +835,10 @@ def gate_branch(repo, fid, main, timeout, stack=()):
     return ctx
 
 
-def gate_tree(ctx, rows, extra, timeout):
+def gate_tree(ctx, rows, extra, timeout, only=None, near_add=()):
     """Steps 4 and 5 on the tree checked out in ctx's worktree: whole-tree commands, this function's acceptance,
-    then every proven row (and every stacked row in `extra`) still passes."""
+    then every proven row (and every stacked row in `extra`) still passes. With `only` (a re-gate after main
+    moved) just those proven rows rerun, with `near_add` modules added to the [tiers] footprint."""
     wt, out_path, commands, fid = ctx["wt"], ctx["out_path"], ctx["commands"], ctx["fid"]
     for name, cmd in gate_cmds(commands):
         cmd = fill(cmd)
@@ -638,15 +857,17 @@ def gate_tree(ctx, rows, extra, timeout):
     if bad:
         node, code, tail = bad[0]
         raise LandFail(f"acceptance still red after merge: {node} (exit {code}): {tail}")
-    keep = [rid for rid, row in rows.items() if (row["status"] == "proven" or rid in extra) and rid != fid]
-    near = set(ctx.get("near", ())) | {rows[fid].get("module", "")} | {rows[r].get("module", "") for r in extra}
+    keep = [rid for rid, row in rows.items() if (row["status"] == "proven" or rid in extra) and rid != fid
+            and (only is None or rid in only or rid in extra)]
+    near = (set(ctx.get("near", ())) | {rows[fid].get("module", "")} | {rows[r].get("module", "") for r in extra}
+            | set(near_add))
     hit = regression(rows, keep, commands, wt, out_path, timeout, ctx.get("tiers", ()), near, extra)
     if hit:
         rid, node, reason = hit
         row = rows[rid]
         if row.get("module") != rows[fid].get("module"):
             flake = flake_on_main(ctx, node, node.partition("::")[0], row.get("module", ""),
-                                  acceptance_cmds(acc, [node])[0][1], timeout)
+                                  acceptance_cmds(acc, [node])[0][1], timeout, acc)
             if flake:
                 raise LandFail(f"{flake}; on the merged tree: {reason}")
         raise LandFail(reason)
@@ -697,9 +918,8 @@ def tier_recovered(bad, template, tiers, owner, wt, out_path, timeout):
         if not under(node.partition("::")[0], tiers):
             keep.append((node, code, tail))
             continue
-        cmd = acceptance_cmds(template, [node])[0][1]
         for k in range(1, TIER_RERUNS + 1):
-            c, t = run(cmd, wt, rerun_out, timeout, ACCEPTANCE_PRIORITY)
+            c, t = run_node(template, node, wt, rerun_out, timeout)
             if c == 0:
                 note = (f"tier rerun passed: proven {owner.get(node, '?')} {node} failed (exit {code}) in the "
                         f"batch, passed alone on rerun {k}/{TIER_RERUNS} (output {rerun_out})")
@@ -720,7 +940,7 @@ FLAKE_RUNS = 3
 RUNNING = re.compile(r"^\s*Running (?:unittests )?(\S+) \((?:.*[\\/])?([A-Za-z0-9_]+)-[0-9a-f]+(?:\.exe)?\)", re.M)
 
 
-def flake_on_main(ctx, test, path, module, cmd, timeout):
+def flake_on_main(ctx, test, path, module, cmd, timeout, template=None):
     """A test that failed on the merged tree, outside the function's footprint (its file not among the branch's
     changes), reruns alone on clean main up to FLAKE_RUNS times. If it fails there too the branch did not cause
     it: returns the `main flake:` reason drive.py routes to a fix in the owning module; else ''."""
@@ -731,7 +951,10 @@ def flake_on_main(ctx, test, path, module, cmd, timeout):
     if git(wt, "checkout", "-q", "--detach", main, check=False).returncode != 0:
         return ""
     for k in range(1, FLAKE_RUNS + 1):
-        code, _ = run(cmd, wt, out, timeout, ACCEPTANCE_PRIORITY)
+        if template is not None and heavy_of(template, test):
+            code, _ = heavy_run(template, test, wt, out, timeout)
+        else:
+            code, _ = run(cmd, wt, out, timeout, ACCEPTANCE_PRIORITY)
         if code != 0:
             return (f"{MAIN_FLAKE} test={test} path={path or '?'} module={module or '?'} fails on clean main "
                     f"{main[:12]} too (run {k}/{FLAKE_RUNS}, output {out})")
@@ -817,7 +1040,7 @@ def commit_land(repo, ctx, main, timeout):
         ctx["regated"] = not same
         if not same:  # main moved by something the gate did not see: gate the real tree, under the lock
             ctx["main_now"] = cur
-            gate_tree(ctx, now, (), timeout)
+            regate(repo, ctx, cur, now, timeout)
         ctx["main_sha"] = cur
 
     # The land commit: status proven, then main and the branch fast-forward to it
@@ -837,6 +1060,31 @@ def commit_land(repo, ctx, main, timeout):
     except LandFail:
         pass  # main has landed; a busy builder worktree keeps its branch where it is
     return new, sum(1 for r in parse_functions(text).values() if r["status"] == "proven")
+
+
+def regate(repo, ctx, cur, now, timeout):
+    """The re-merged tree's gate after main moved from the gated base to `cur`: the whole-tree commands and this
+    function's acceptance as always, then only the proven rows the newly landed footprints can affect
+    (regate_rows); every proven row when that cannot be bounded. ctx["regate"] says which."""
+    gated_base = ctx["main_sha"]
+    conf_src = git(repo, "show", f"{cur}:overhaul.toml", check=False).stdout
+    try:
+        conf = tomllib.loads(conf_src)
+    except tomllib.TOMLDecodeError:
+        conf = {}
+    if conf.get("commands", {}).get("acceptance"):
+        ctx["commands"] = load_commands(conf)
+    apath = conf.get("paths", {}).get("architecture", "spec/ARCHITECTURE.md")
+    sel = regate_rows(repo, gated_base, cur, ctx["fpath"], apath, now, ctx["fid"])
+    total = sum(1 for r, row in now.items() if row["status"] == "proven" and r != ctx["fid"])
+    if sel is None:
+        ctx["regate"] = f"full regate: {total} proven rows"
+        gate_tree(ctx, now, (), timeout)
+        return
+    keep, newly, mods = sel
+    ctx["regate"] = (f"partial regate: {len(keep)} of {total} proven rows (landed modules: "
+                     f"{', '.join(sorted(mods)) or 'none'})")
+    gate_tree(ctx, now, sorted(newly), timeout, only=keep, near_add=mods)
 
 
 def gate_merged(wt, rows, commands, out_path, timeout):
@@ -861,7 +1109,7 @@ def land_polish(repo, fid, main, timeout):
     if fn.returncode != 0:
         raise LandFail(f"no branch {branch}")
     conf = tomllib.loads(git(repo, "show", f"{main_sha}:overhaul.toml").stdout)
-    commands = conf.get("commands", {})
+    commands = load_commands(conf)
     fpath = conf.get("paths", {}).get("functions", "spec/FUNCTIONS.md")
     if not commands.get("acceptance"):
         raise LandFail("overhaul.toml has no [commands] acceptance")
@@ -951,7 +1199,7 @@ def wait_stack(repo, main, fpath, stack, log_at, timeout):
                         rec = json.loads(line)
                     except ValueError:
                         continue
-                    if isinstance(rec, dict) and rec.get("event") == "land_fail":
+                    if isinstance(rec, dict) and rec.get("event") in ("land_fail", "land_timeout"):
                         failed.add(rec.get("fn"))
         except OSError:
             pass
@@ -992,14 +1240,19 @@ def main(argv=None):
                     "the gate runs without the lock, which is taken only to commit")
     ap.add_argument("--target-dir", default="", help="CARGO_TARGET_DIR for every command (default "
                     ".overhaul/target/land, or land-<ID> when stacked); drive.py passes one per concurrent land")
+    ap.add_argument("--parallel", action="store_true", help="gate on main outside the lock in its own worktree, "
+                    "take the lock only to commit; if main moved meanwhile, re-merge and rerun only the tests the "
+                    "newly landed footprints affect (drive.py runs up to [harness] land_parallel of these)")
     a = ap.parse_args(argv)
     repo = os.path.abspath(a.repo)
     stack = [x.strip() for x in a.stack.split(",") if x.strip()]
     priority.set_self(priority.NORMAL)  # a land outranks the BELOW_NORMAL builders even if started from one
-    os.environ["CARGO_TARGET_DIR"] = target_dir(repo, a.target_dir, a.fid if stack and not a.polish else "")
+    own = (bool(stack) or a.parallel) and not a.polish
+    os.environ["CARGO_TARGET_DIR"] = target_dir(repo, a.target_dir, a.fid if own else "")
     if not os.environ.get(memcap.ENV):  # run by hand, not under drive.py: take the same [limits] proc_mem_gb cap
         memcap.cap_self(proc_mem_gb(repo))
-    if stack and not a.polish:
+    start_budget(0 if a.polish else land_timeout_min(main_conf(repo, a.main)))
+    if own:
         return main_stacked(repo, a, stack)
 
     if not acquire_lock(repo, a.wait):
@@ -1018,36 +1271,54 @@ def main(argv=None):
     return finish(repo, a, time.monotonic(), lambda: land(repo, a.fid, a.main, a.timeout))
 
 
-def functions_path(repo, main):
+def main_conf(repo, main):
+    """overhaul.toml on main, parsed ({} when missing or unreadable)."""
     src = git(repo, "show", f"{main}:overhaul.toml", check=False).stdout
     try:
-        return tomllib.loads(src).get("paths", {}).get("functions", "spec/FUNCTIONS.md")
+        return tomllib.loads(src) if src else {}
     except tomllib.TOMLDecodeError:
-        return "spec/FUNCTIONS.md"
+        return {}
+
+
+def functions_path(repo, main):
+    return main_conf(repo, main).get("paths", {}).get("functions", "spec/FUNCTIONS.md")
 
 
 def main_stacked(repo, a, stack):
-    """--stack: gate outside the lock on main + the stacked branches, wait for their lands, then commit under it.
-    If that gate fails, a stacked branch may be the cause: once the stack is done it lands alone, gated under the
-    lock on main as it is then (a plain land)."""
+    """--stack or --parallel: gate outside the lock (on main + the stacked branches, or on main alone), wait for
+    the stacked lands, then commit under the lock; a base that moved meanwhile is re-merged and re-gated
+    (commit_land, regate). If a stacked gate fails, a stacked branch may be the cause: once the stack is done it
+    lands alone, gated under the lock on main as it is then (a plain land). A parallel gate's failure is the
+    land's failure."""
     start, log = time.monotonic(), os.path.join(repo, ".overhaul", "log.jsonl")
     log_at = os.path.getsize(log) if os.path.exists(log) else 0
+    failed = None
     try:
-        ctx = gate_branch(repo, a.fid, a.main, a.timeout, stack)
-    except Exception:  # noqa: BLE001 - LandFail or a crash: retried once as a plain land below
-        ctx = None
+        ctx = gate_branch(repo, a.fid, a.main, a.timeout, stack, own=True)
+    except LandTimeout as e:
+        ctx, failed = None, e
+    except LandFail as e:  # stacked: retried once as a plain land below
+        ctx, failed = None, (None if stack else e)
+    except Exception as e:  # noqa: BLE001 - a crash: retried once as a plain land when stacked
+        ctx, failed = None, (None if stack else LandFail(f"land error: {type(e).__name__}: {e}"))
+    t0 = time.monotonic()
     wait_stack(repo, a.main, functions_path(repo, a.main), stack if ctx is None else ctx["stacked"], log_at,
                a.timeout)
     if not acquire_lock(repo, a.timeout):
         print("lock held: .overhaul/lock")
         return 1
+    pause_budget(time.monotonic() - t0)
 
     def step():
+        if failed is not None:
+            raise failed
         if ctx is None:
             sha, proven = land(repo, a.fid, a.main, a.timeout)
             return sha, proven, " (stacked gate failed; gated alone on the new main)"
         sha, proven = commit_land(repo, ctx, a.main, a.timeout)
-        how = "regated on the new main" if ctx.get("regated") else "no second gate"
+        how = (f"regated on the new main, {ctx.get('regate', '')}" if ctx.get("regated") else "no second gate")
+        if not stack:
+            return sha, proven, f" (parallel, {how})"
         return sha, proven, f" (stacked on {', '.join(ctx['stacked']) or 'nothing'}, {how})"
     return finish(repo, a, start, step)
 
@@ -1061,9 +1332,12 @@ def finish(repo, a, start, step):
         except (OSError, ValueError) as e:
             print(f"state.json unreadable: {e}")
             return 1
+        event = "land_fail"
         try:
             sha, proven, *note = step()
             ok, detail = True, f"{a.main} -> {sha[:12]}" + "".join(note)
+        except LandTimeout as e:
+            ok, detail, event = False, str(e), "land_timeout"
         except LandFail as e:
             ok, detail = False, str(e)
         except Exception as e:  # noqa: BLE001 - any crash is one reason line, main untouched
@@ -1075,10 +1349,13 @@ def finish(repo, a, start, step):
             entry["status"] = "proven"
             state["proven_history"].append([now_iso(), proven])
         write_state(spath, state)
+        line = {"t": now_iso(), "fn": a.fid, "event": "land_ok" if ok else event, "detail": detail,
+                "seconds": round(time.monotonic() - start, 1), "tokens": None}
+        if event == "land_timeout":
+            line["slowest"], secs = slowest()
+            line["slowest_s"] = round(secs, 1)
         with open(os.path.join(repo, ".overhaul", "log.jsonl"), "a", encoding="utf-8") as f:
-            f.write(json.dumps({"t": now_iso(), "fn": a.fid, "event": "land_ok" if ok else "land_fail",
-                                "detail": detail, "seconds": round(time.monotonic() - start, 1), "tokens": None})
-                    + "\n")
+            f.write(json.dumps(line) + "\n")
         print(f"landed {a.fid}: {detail}" if ok else detail)
         return 0 if ok else 1
     finally:
