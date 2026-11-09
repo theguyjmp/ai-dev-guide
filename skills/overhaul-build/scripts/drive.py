@@ -21,6 +21,12 @@ Exit 0 = every function proven (or a command done), 3 = manager needed, 1 = erro
 state.json is shared with land.py under the lock file .overhaul/lock (land.py's acquire_lock and
 release_lock, imported). land.py holds it for a whole land, so drive.py holds it only around its own state.json write, never
 while land.py runs, and defers a write (retried every loop pass) while land.py has it.
+
+Live re-plan (owner 2026-11-09): supervise.py lands plan fixes on main while drive runs, then writes
+.overhaul/requests/reset-<id>. At the next cycle boundary (looked for every REQUEST_POLL_S) drive re-reads the plan on
+main (new and changed rows, no restart; refused with event reload_refused if plan_validate static fails) and applies
+each request exactly like --reset (event reset_applied; a third reset is refused, event reset_refused), then removes it.
+A reload-<round> request (every fixed row was replaced by new ones) only reloads.
 """
 from __future__ import annotations
 
@@ -142,6 +148,8 @@ REASON_MAX = 1500
 POLL_S = 0.25
 DASH_EVERY_S = 15
 GATE_PRIORITY = priority.popen_kwargs(priority.NORMAL)  # the pre-review gate: above the builders
+REQUEST_POLL_S = 30.0  # how often the loop looks for .overhaul/requests/reset-<id> (live re-plan)
+REQUESTS_DIR = "requests"
 LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py's lock
 DEFAULTS = {
     "limits": {"builder_max_calls": 60, "brief_max_tokens": 40000,
@@ -724,6 +732,8 @@ class Driver(mainred.MainRed):
         self.cycle_due = ""  # a heartbeat a land asked for, run once the loop has launched what it unblocked
         self.periodic = periodic.Periodic(self, cfg.get("periodic") or {})
         self.red_init(har)
+        self.last_request_check = 0.0  # live re-plan: .overhaul/requests/ is looked at every REQUEST_POLL_S
+        self.refused_plan = ""  # the main sha whose plan failed plan_validate: not reloaded again
 
     # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
@@ -871,7 +881,8 @@ class Driver(mainred.MainRed):
         try:
             self.cycle("start")
             while True:
-                changed = self.reap()
+                changed = self.replan_step()
+                changed = self.reap() or changed
                 changed = self.pump_land() or changed
                 changed = self.launch() or changed
                 changed = self.probe_step() or changed
@@ -2800,16 +2811,118 @@ class Driver(mainred.MainRed):
     def reset(self, fid: str) -> None:
         """A manager's plan fix sends fid back to planned. At most PLAN_FIXES per function, so a function that
         keeps failing stops the build with a report instead of looping through manager rounds."""
+        if problem := self.reset_problem(fid):
+            raise DriveError(problem)
         resets = int(self.st["functions"][fid].get("resets", 0))
-        if resets >= PLAN_FIXES:
-            raise DriveError(f"{fid} already had {resets} plan fixes and failed again: stop and report it "
-                             f"to the owner as the deciding item (last reason: "
-                             f"{self.st['functions'][fid].get('last_reason', '')[:300]})")
         self.set(fid, status="planned", attempts=0, conflicts=0, last_reason="", resets=resets + 1)
         if self.dirty:
             self.flush()
         self.log(fid, "cycle", "reset to planned, attempts 0")
         self.say(f"reset {fid}")
+
+    def reset_problem(self, fid: str) -> str:
+        """Why fid cannot be reset now ('' if it can): not a row, or already PLAN_FIXES plan fixes."""
+        if fid not in self.fns:
+            return f"{fid} is not an active row of {self.cfg['paths']['functions']}"
+        resets = int(self.st["functions"][fid].get("resets", 0))
+        if resets >= PLAN_FIXES:
+            return (f"{fid} already had {resets} plan fixes and failed again: stop and report it to the owner as "
+                    f"the deciding item (last reason: {self.st['functions'][fid].get('last_reason', '')[:300]})")
+        return ""
+
+    # ---- live re-plan: reset requests written by supervise.py after a plan commit is on main ----
+    def requests(self) -> list[Path]:
+        d = self.ov / REQUESTS_DIR
+        return sorted(p for p in d.glob("re*-*") if p.is_file() and p.name.startswith(("reset-", "reload-")))             if d.is_dir() else []
+
+    def replan_step(self) -> bool:
+        """At a cycle boundary (every REQUEST_POLL_S): reload the plan on main and apply the reset requests."""
+        if time.monotonic() - self.last_request_check < REQUEST_POLL_S:
+            return False
+        self.last_request_check = time.monotonic()
+        reqs = self.requests()
+        if not reqs:
+            return False
+        head = git(self.repo, "rev-parse", self.main).strip()
+        if head == self.refused_plan:
+            return False  # this plan already failed validation: wait for the next plan commit
+        problem = self.reload()
+        if problem:
+            self.refused_plan = head
+            self.log(None, "reload_refused", f"{head[:12]}: {problem}")
+            self.say(f"plan reload refused ({head[:12]}): {problem}")
+            return False
+        for path in reqs:
+            fid = path.name[len("reset-"):]
+            if path.name.startswith("reload-"):
+                pass  # a split replaced every fixed row: the reload above was the request
+            elif fid in self.fns and self.st["functions"][fid]["status"] == "proven":
+                self.log(fid, "reset_refused", "already proven")
+            elif why := self.reset_problem(fid):
+                self.log(fid, "reset_refused", why)
+                self.say(f"reset {fid} refused: {why}")
+            else:
+                n = int(self.st["functions"][fid].get("resets", 0)) + 1
+                self.set(fid, status="planned", attempts=0, conflicts=0, last_reason="", resets=n)
+                self.log(fid, "reset_applied", f"plan {head[:12]}; reset {n} of {PLAN_FIXES}")
+                self.say(f"reset {fid} (plan {head[:12]})")
+            path.unlink(missing_ok=True)
+        self.cycle("replan")
+        return True
+
+    def reload(self) -> str:
+        """Re-read the plan on main without a restart: new rows join as planned, changed rows replace their Fn,
+        rows now deferred or gone leave unless in flight. '' when done, else why it was refused (nothing changed)."""
+        rel, arch = self.cfg["paths"]["functions"], self.cfg["paths"]["architecture"]
+        fns = parse_functions(self.read_main(rel) or "")
+        ids = [f.id for f in fns]
+        if not fns:
+            return f"{rel} on {self.main} has no function rows"
+        if len(set(ids)) != len(ids):
+            return f"{rel} repeats ids: {sorted({i for i in ids if ids.count(i) > 1})}"
+        if problem := self.validate_static():
+            return problem
+        busy = self.busy()
+        active = {f.id: f for f in fns if f.status != DEFERRED}
+        keep = {fid: f for fid, f in self.fns.items() if fid not in active and fid in busy}  # in flight: finish
+        self.fns = {**active, **keep}
+        self.order = sorted(self.fns.values(), key=phase_key)
+        self.deferred = {f.id for f in fns if f.status == DEFERRED} - set(keep)
+        self.arch = self.read_main(arch) or ""
+        self.on_main = set(git(self.repo, "ls-tree", "-r", "--name-only", self.main).splitlines())
+        prot = {"tests/acceptance/", "overhaul.toml", rel, arch}
+        prot |= {f"{Path(p).parent.as_posix()}/" for p in [rel, arch] + [acc_file(a) for f in self.order
+                                                                         for a in f.acceptance]}
+        self.protected = tuple(sorted(p for p in prot if p != "./"))
+        recs, new = self.st["functions"], []
+        for fid in [k for k in recs if k not in self.fns]:
+            del recs[fid]
+        for f in self.order:
+            if f.id not in recs:
+                new.append(f.id)
+                recs[f.id] = {"status": "proven" if f.status == "proven" else "planned", "attempts": 0,
+                              "conflicts": 0, "last_reason": "", "branch": f"fn/{f.id}", "updated": now_iso()}
+        self.flush()
+        for fid in new:
+            if recs[fid]["status"] == "planned" and (problem := self.plan_problem(self.fns[fid])):
+                self.park(fid, problem)
+        self.log(None, "plan_reload", f"{len(self.fns)} rows, deferred {len(self.deferred)}"
+                 + (f", new {' '.join(new)}" if new else ""))
+        return ""
+
+    def validate_static(self) -> str:
+        """plan_validate (static, no --run) on the checkout holding main: '' if PLAN OK, else its line."""
+        pv = self.scripts / "plan_validate.py"
+        pv = pv if pv.is_file() else HERE / "plan_validate.py"
+        where = land_mod.checked_out_at(str(self.repo), self.main) or str(self.repo)
+        try:
+            r = run([sys.executable, str(pv), "--repo", where], self.repo, timeout=300)
+        except subprocess.TimeoutExpired:
+            return "plan_validate timed out after 300s"
+        line = next((ln.strip() for ln in r.stdout.splitlines() if ln.startswith("PLAN ")), "")
+        if r.returncode or not line.startswith("PLAN OK"):
+            return f"plan_validate: {line or last_line(r.stdout + r.stderr) or f'exit {r.returncode}'}"
+        return ""
 
     def repolish(self) -> None:
         """--repolish: the next run audits again with the current checklist (a new item, a bumped version), as a
