@@ -185,7 +185,14 @@ class Supervisor:
         rows, recs = self.rows(), self.state()
         fixing = self.needs_plan()
         if not fixing:
-            raise Stop("drive exit 3 with no needs-plan function (blocked on unproven deps; see drive.out)")
+            try:
+                said = [ln.strip() for ln in (self.ov / "drive.out").read_text(encoding="utf-8", errors="replace")
+                        .splitlines() if "needs-plan:" in ln]
+            except OSError:
+                said = []
+            # main red / systemic stops (mainred.py) name no function: hand the manager drive's own line
+            raise Stop(f"drive exit 3 with no needs-plan function: {said[-1]}" if said else
+                       "drive exit 3 with no needs-plan function (blocked on unproven deps; see drive.out)")
         if self.git("status", "--porcelain", "--untracked-files=no").strip():
             raise Stop(f"{self.repo} has uncommitted changes to tracked files; main cannot fast-forward")
         if (head := self.git("rev-parse", "--abbrev-ref", "HEAD").strip()) != self.main:
