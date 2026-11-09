@@ -268,7 +268,8 @@ class Toy(unittest.TestCase):
                   brief_max: int = 40000, functions: str = FUNCTIONS, max_parallel: int = 2,
                   conflict_retries: int | None = None, worker_args: str = "", harness_extra: str = "",
                   commands_extra: str = "", pre_review: str = '["cycles"]',
-                  pre_review_acceptance: str = "false", phase_polish: bool = False) -> Path:
+                  pre_review_acceptance: str = "false", phase_polish: bool = False,
+                  phase_audit: bool = False) -> Path:
         self.root = Path(tempfile.mkdtemp(prefix="drive-test-")).resolve()
         self.addCleanup(self.cleanup_root)
         repo, scripts = self.root / "repo", self.root / "scripts"
@@ -306,6 +307,7 @@ scripts_dir = "{scripts.as_posix()}"
 pre_review = {pre_review}
 pre_review_acceptance = {pre_review_acceptance}
 phase_polish = {str(phase_polish).lower()}
+phase_audit = {str(phase_audit).lower()}
 {harness_extra}
 """)
         git(repo, "init", "-q", "-b", "main")
