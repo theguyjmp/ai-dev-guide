@@ -29,6 +29,8 @@ while read -r old new ref; do
     bad=$(git diff --numstat "$c^1" "$c" 2>/dev/null | while IFS='	' read -r a d p; do
       echo "$p" | grep -q -E "$plan_paths" && continue
       if [ "$plan" = 1 ] && [ "$d" = "0" ]; then continue; fi
+      # the root workspace manifest (members, test targets) is plan data for a plan commit
+      if [ "$plan" = 1 ] && [ "$p" = "Cargo.toml" ]; then continue; fi
       # a plan commit may reshape a file that only plan commits ever touched (a pure plan stub, never landed code)
       if [ "$plan" = 1 ] && [ -z "$(git log --format=%s "$c^1" -- "$p" 2>/dev/null | grep -v -E '^(plan|m0)')" ]; then continue; fi
       echo "$p (+$a -$d)"
