@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import land as land_mod  # noqa: E402  the lock protocol is land.py's
+import periodic  # noqa: E402  beside this script: [gates.periodic]
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 
@@ -627,6 +628,7 @@ def load_config(repo: Path) -> dict:
     cfg["acceptance"] = land_mod.acceptance_template(raw_cmds)
     cfg["extra"] = land_mod.extra_cmds(raw_cmds)
     cfg["plan"] = raw.get("plan") if isinstance(raw.get("plan"), dict) else {}  # plan_validate's keys, read-only
+    cfg["periodic"] = periodic.config(raw)  # [gates.periodic]: slow gates on main in the background (X2, X13)
     return cfg
 
 
@@ -684,6 +686,7 @@ class Driver:
         self.warned: set[str] = set()
         self.dirty = False  # state.json is behind self.st (land.py held the lock)
         self.cycle_due = ""  # a heartbeat a land asked for, run once the loop has launched what it unblocked
+        self.periodic = periodic.Periodic(self, cfg.get("periodic") or {})
 
     # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
@@ -834,6 +837,7 @@ class Driver:
                 changed = self.launch() or changed
                 changed = self.probe_step() or changed
                 changed = self.polish_step() or changed
+                changed = self.periodic.step(idle=not self.busy()) or changed
                 if self.cycle_due:
                     why, self.cycle_due = self.cycle_due, ""
                     self.cycle(why)
@@ -854,7 +858,8 @@ class Driver:
     def busy(self) -> set[str]:
         """In flight: jobs, the land queue, lands, and functions waiting at landing on a main-flake fix."""
         waiting = {fid for fid, r in self.st["functions"].items() if r["status"] == "landing" and r.get("blocked_on")}
-        return set(self.jobs) | set(self.land_queue) | {j.fn for j in self.land_jobs()} | waiting
+        gates = {"periodic"} if self.periodic.busy() else set()
+        return set(self.jobs) | set(self.land_queue) | {j.fn for j in self.land_jobs()} | waiting | gates
 
     def land_jobs(self) -> list[Job]:
         """Lands in flight, the plain one (or a polish land) first, then the stacked ones in start order."""
@@ -1671,6 +1676,7 @@ class Driver:
             if row and row.status != "proven":
                 self.say(f"land.py exited 0 but {fid} is not proven in FUNCTIONS.md on {self.main}")
             self.set(fid, status="proven", last_reason="")
+            self.periodic.landed()
             self.say(f"landed {fid}")
             self.record_proven()
             self.cycle_due = f"landed {fid}"  # run after launch(): dependents start before verdict and dash
@@ -2165,6 +2171,8 @@ class Driver:
 
     def after_polish_land(self, job: Job) -> None:
         if job.proc.returncode == 0 and not job.timed_out:
+            self.periodic.landed()  # a fix on main: the gates run again
+        if job.proc.returncode == 0 and not job.timed_out:
             self.log(job.fn, self.fix_event(job.fn), f"landed {self.polish_meta[job.fn][0]}",
                      time.monotonic() - job.started)
             self.say(f"polish landed {job.fn}")
@@ -2439,6 +2447,7 @@ class Driver:
 
     def abort(self) -> None:
         """Kill every worker tree this run started; their functions go back to planned."""
+        self.periodic.stop()
         jobs = [*self.jobs.values(), *self.land_jobs()]
         for job in jobs:
             kill_tree(job.proc)

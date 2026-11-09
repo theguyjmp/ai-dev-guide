@@ -42,6 +42,9 @@ Project rules: a row's `rules` column ids are quoted from `[paths] patterns`/`st
 briefs ("Project rules this row cites"), and only such a row gets checklist item C30 (each cited rule holds, the
 acceptance proves each pattern id). `[commands.extra]` runs after the whole-tree gate, at pre-review and land;
 `[commands.acceptance_by]` picks a test file's template; a proven `[tiers]` test reruns at land only by footprint.
+`[gates.periodic]` (scripts/periodic.py): slow gates (CI parity matrix via `periodic.py ci`, full scale tier, GPU over ssh)
+run on main in the background every N lands or M minutes and once at the end; `BENCH` lines are judged against
+spec/BUDGETS.toml (CI at ci_factor 2x, macOS record-only); red bisects to the culprit land, one depfix; verdict BAD while red.
 Rolling plans: a `deferred` row is never started and counts apart (`proven N/T deferred D`); polish waits until
 no row is deferred. Tests a later `plan:` commit adds, or FUNCTIONS names on main, are anchors too. `drive.py --repolish`
 reruns the polish audit (at most polish_rounds times); checklist `W` items are asked only by the whole-tree audit.

@@ -330,6 +330,12 @@ def judge(p, prev, t_now, checks, events):
         if score < floor:
             reds.append((2, "probe", f"mutation score {score:.0%} < floor {floor:.0%} in {mod}",
                          f"the survivors of {mod} go to one fix pass; see probe_mutation in R/.overhaul/log.jsonl"))
+    per = state.get("periodic") if isinstance(state.get("periodic"), dict) else {}
+    for gate, r in sorted((per.get("red") or {}).items()):  # [gates.periodic]: BAD while a gate is red on main
+        r = r if isinstance(r, dict) else {}
+        reds.append((1, "periodic", f"periodic gate {gate} red at {str(r.get('sha', '?'))[:12]}: "
+                     f"{short(r.get('reason', ''), 60)}" + (f" (culprit {r['culprit']})" if r.get("culprit") else ""),
+                     "drive.py bisects it and sends one depfix to the culprit's module; else fix main by hand"))
     nits = pol.get("nits") if pol else None
     trend = open_audit_trend(events)
 
