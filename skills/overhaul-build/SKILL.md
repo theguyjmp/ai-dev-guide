@@ -47,7 +47,9 @@ run on main in the background every N lands or M minutes and once at the end; `B
 spec/BUDGETS.toml (CI at ci_factor 2x, macOS record-only); red bisects to the culprit land, one depfix; verdict BAD while red.
 Rolling plans: a `deferred` row is never started and counts apart (`proven N/T deferred D`); polish waits until
 no row is deferred. Tests a later `plan:` commit adds, or FUNCTIONS names on main, are anchors too. `drive.py --repolish`
-reruns the polish audit (at most polish_rounds times); checklist `W` items are asked only by the whole-tree audit.
+reruns the polish audit (at most polish_rounds times, default 3; each fix gets `[limits] fix_retries`, default 2);
+checklist `W` items are asked only by the whole-tree audit. Builders and fixers may make visibility-only edits in
+the modules theirs depends on; a cross-module duplication goes to the caller module, owner fix first.
 `[harness] trim_policies = true` gives each brief only the policy-list lines naming its id and the domain rules homed in
 its module or a module it depends on.
 

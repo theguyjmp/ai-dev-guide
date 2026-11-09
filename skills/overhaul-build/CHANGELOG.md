@@ -1,5 +1,16 @@
 # overhaul-build changelog
 
+## Pass E: polish converges, 2026-11-08
+- drive.py: visibility-only edits (pub / pub(crate) / export / a re-export of an existing item) are also allowed in
+  the modules the fixing module depends on (ARCHITECTURE.md `Depends on:`), for builders and polish fixes alike;
+  drive.py refuses any other change there before review.
+- drive.py: a cross-module duplication issue (C03/C05) goes, as one fix, to the module that depends on every other
+  one it names (the caller), with a note to export the owner's copy and import it; when the owner has its own fix
+  that round, the owner's fix starts and lands first (`polish_order` log line).
+- drive.py: a round fix that fails its review carries its verified NOs into the next round's fix brief for that
+  module (state `failed_nos`).
+- drive.py: polish fix rounds default and cap 3 (was 2); `[limits] fix_retries` (default 2, was a fixed 1).
+
 ## Pass C4: per-phase polish and visibility edits, 2026-11-08
 - drive.py: deferred rows are out of the current plan; polish, probes and the verdict no longer wait for them (C3
   made polish wait, so a rolling plan would never polish).

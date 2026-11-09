@@ -90,11 +90,12 @@ class Repolish(Toy):
         self.assertEqual(self.polish_audits(repo), ["round 1: 0 issues", "round 1: 0 issues"])
         self.assertEqual(self.state(repo)["polish"]["repolishes"], 1)
         self.assertFalse([e for e in self.events(repo) if e["event"] == "plan_gaps"])  # gaps never rerun
-        rc, out = self.drive_cli(repo, "--repolish")  # polish_rounds defaults to 2: a second repolish is allowed
-        self.assertEqual(rc, 0, out)
+        for _ in range(2):  # polish_rounds defaults to 3: a second and third repolish are allowed
+            rc, out = self.drive_cli(repo, "--repolish")
+            self.assertEqual(rc, 0, out)
         rc, out = self.drive_cli(repo, "--repolish")
         self.assertEqual(rc, 1, out)
-        self.assertIn("already repolished 2 times", out)
+        self.assertIn("already repolished 3 times", out)
 
     def driver(self, repo: Path) -> drive.Driver:
         drv = drive.Driver(repo, drive.load_config(repo))

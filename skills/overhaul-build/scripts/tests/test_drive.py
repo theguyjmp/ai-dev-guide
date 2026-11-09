@@ -1044,9 +1044,9 @@ class TestPolish(Toy):
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 0, out)
         ev = self.polish_events(repo)
-        self.assertEqual(len([1 for e, _ in ev if e == "polish_audit"]), 3)  # polish rounds capped at 2, then the re-audit
-        self.assertEqual(len([1 for e, d in ev if e == "polish_fix" and d.startswith("landed")]), 4)
-        self.assertEqual(ev[-1], ("polish_done", "2 issues after 2 fix rounds"))
+        self.assertEqual(len([1 for e, _ in ev if e == "polish_audit"]), 4)  # 3 polish fix rounds, then the re-audit
+        self.assertEqual(len([1 for e, d in ev if e == "polish_fix" and d.startswith("landed")]), 6)
+        self.assertEqual(ev[-1], ("polish_done", "2 issues after 3 fix rounds"))
         line = self.verdict(repo)
         self.assertTrue(line.startswith("VERDICT BAD proven 2/2"), line)
         self.assertIn(" issues 2 ", line)
@@ -1059,8 +1059,8 @@ class TestPolish(Toy):
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 0, out)
         ev = self.polish_events(repo)
-        self.assertEqual(len([1 for e, _ in ev if e == "polish_revert"]), 2, ev)
-        self.assertEqual(ev[-1], ("polish_done", "2 issues after 2 fix rounds"))
+        self.assertEqual(len([1 for e, _ in ev if e == "polish_revert"]), 3, ev)
+        self.assertEqual(ev[-1], ("polish_done", "2 issues after 3 fix rounds"))
         files = git(repo, "ls-tree", "-r", "--name-only", "main")
         self.assertNotIn("src/alpha/tidy.py", files)  # every round made it worse: main keeps the round 1 tree
         self.assertNotIn("src/beta/tidy.py", files)
@@ -1078,7 +1078,7 @@ class TestPolish(Toy):
     def test_polish_audit_defaults_to_the_judge_model(self):
         repo = self.make_repo()
         drv = drive.Driver(repo, drive.load_config(repo))
-        self.assertEqual((drv.audit_model, drv.polish_rounds), ("opus", 2))
+        self.assertEqual((drv.audit_model, drv.polish_rounds), ("opus", 3))
 
     def test_polish_rounds_zero_skips_the_phase(self):
         repo = self.make_repo({"audit": [[finding("alpha", 3)]]})
@@ -1161,7 +1161,7 @@ class TestJudge(Toy):
         rec = self.state(repo)["functions"]["F1"]
         self.assertEqual((rec["status"], rec["attempts"]), ("proven", 0))  # attempts counts failed attempts
 
-    def test_polish_runs_the_checklist_and_dedup_verifies_and_stops_after_2_rounds(self):
+    def test_polish_runs_the_checklist_and_dedup_verifies_and_stops_after_3_rounds(self):
         repo = self.make_repo({"audit": [[finding("alpha", 3), finding("beta", 7)]]})
         toml = repo / "overhaul.toml"
         toml.write_text(toml.read_text(encoding="utf-8").replace("[limits]\n", "[limits]\npolish_rounds = 9\n"),
@@ -1174,7 +1174,7 @@ class TestJudge(Toy):
         self.assertIn("dedup", audit.lower())
         self.assertIn("`src/alpha/x.py:3`", self.seen("polish-verify-verify-1.md"))
         ev = self.polish_events(repo)
-        self.assertEqual(ev[-1], ("polish_done", "2 issues after 2 fix rounds"))
+        self.assertEqual(ev[-1], ("polish_done", "2 issues after 3 fix rounds"))
         self.assertTrue(any(e == "polish_checklist" for e, _ in ev))
 
 
@@ -1206,7 +1206,7 @@ class TestPlanGaps(Toy):
 
 
 class TestFixRetry(Toy):
-    """Trial 6: probe-core's fix (31 survivors) was dropped over one verified P1; a fix now gets one retry."""
+    """Trial 6: probe-core's fix (31 survivors) was dropped over one verified P1; a fix now gets retries ([limits] fix_retries, 2 since pass E)."""
     NO = {"checklist": "v1", "items": [{"id": "C10", "answer": "no", "file": "src/alpha/tidy.py", "line": 1,
                                         "evidence": "unused import", "fix": "remove it"}]}
 
@@ -1222,7 +1222,7 @@ class TestFixRetry(Toy):
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 0, out)
         ev = self.fix_events(repo)
-        self.assertEqual(len([1 for _, d in ev if d.startswith("retry 1/1")]), 1, ev)
+        self.assertEqual(len([1 for _, d in ev if d.startswith("retry 1/2")]), 1, ev)
         self.assertIn(("probe_fix", "landed alpha"), ev)
         self.assertIn("Retry 1", self.seen("probe-alpha-fix-2.md"))
         self.assertIn("unused import", self.seen("probe-alpha-fix-2.md"))
@@ -1242,14 +1242,14 @@ class TestFixRetry(Toy):
         put(self.root / "scenario.json", json.dumps({"probe-alpha": {"review": [self.NO]}}))
         self.drive_cli(repo)
         tries = self.state(repo).get("polish_tries", {})
-        self.assertEqual(tries.get("probe-alpha", {}).get("round"), 1, tries)
+        self.assertEqual(tries.get("probe-alpha", {}).get("round"), 2, tries)  # fix_retries 2
 
-    def test_probe_fix_fails_after_its_one_retry(self):
+    def test_probe_fix_fails_after_its_two_retries(self):
         repo = self.probe_repo(0.5)
         put(self.root / "scenario.json", json.dumps({"probe-alpha": {"review": [self.NO]}}))
         self.drive_cli(repo)
         ev = self.fix_events(repo)
-        self.assertEqual(len([1 for _, d in ev if d.startswith("retry")]), 1, ev)
+        self.assertEqual(len([1 for _, d in ev if d.startswith("retry")]), 2, ev)
         self.assertTrue(any(d.startswith("failed: review: 1 verified") for _, d in ev), ev)
         self.assertEqual(self.state(repo)["probe"]["alpha"]["status"], "fix_failed")
 
