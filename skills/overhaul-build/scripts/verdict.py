@@ -8,6 +8,8 @@ GOOD only when all of these hold:
   4 no log event since the previous verdict shows a builder over its call budget;
   5 once every function is proven and state.json has a polish phase, its checklist run left 0 verified P0 or P1
     NOs, i.e. every blocking checklist item is YES (references/checklist.md);
+  5b each phase whose audit ended (state.json phase_polish: the phase polish plus the arch audit, owner 2026-11-09)
+    left 0 verified P0 or P1 NOs; a phase is not GOOD-complete before that;
   6 when the log has probe_mutation events, each module's latest mutation score is at or above its floor
     (the event's floor, else [limits] mutation_floor, default 0.9);
   7 main is not red for the harness (state.json main_red, set by drive.py when a whole-tree check fails on clean
@@ -24,7 +26,7 @@ Otherwise BAD, with at most 5 reds ranked by harm, each naming its automatic act
 Reads spec/FUNCTIONS.md (the committed truth for proven, R-a), .overhaul/state.json and .overhaul/log.jsonl; the
 paths follow overhaul.toml [paths]. Writes .overhaul/verdict.json, appends a "verdict" event to .overhaul/log.jsonl
 and prints one line:
-  VERDICT GOOD|BAD proven N/T rate X/h [issues K nits J] [trend S] reds: ...
+  VERDICT GOOD|BAD proven N/T rate X/h [issues K nits J] [trend S] [phase N audit: V open, ...] reds: ...
 (issues K is the polish phase's verified blocking NO count and J its nits, shown once it has started; S is the
 latest open-audit trend, shown once one ran.)
 The rate is proven per hour over the last 3 h of state.json proven_history, measured up to now.
@@ -386,6 +388,18 @@ def open_audit_trend(events):
     return None
 
 
+def phase_audits(state):
+    """{phase: {status, open, arch_failed}} from state.json phase_polish; open is the verified P0/P1 count left."""
+    raw = state.get("phase_polish") if isinstance(state.get("phase_polish"), dict) else {}
+    out = {}
+    for n in sorted(raw, key=as_int):
+        ph = raw[n] if isinstance(raw[n], dict) else {}
+        issues = ph.get("issues")
+        out[str(n)] = {"status": str(ph.get("status") or "idle"), "open": issues if isinstance(issues, int) else None,
+                       "arch_failed": str(ph.get("arch_failed") or "")}
+    return out
+
+
 def judge(p, prev, t_now, checks, events):
     """The verdict document from measurements; checks is None when skipped."""
     view, proven, total, state = p["view"], p["proven"], p["total"], p["state"]
@@ -412,6 +426,16 @@ def judge(p, prev, t_now, checks, events):
                      f"(verified P0/P1 checklist NOs) after round {pol.get('round')}",
                      "drive.py --repo R runs the polish audit and fix passes; issues left after [limits] "
                      "polish_rounds are in R/.overhaul/polish/: fix them or raise polish_rounds"))
+
+    audits = phase_audits(state)
+    for n, ph in audits.items():
+        if ph["status"] in ("done", "failed") and (ph["open"] != 0 or ph["arch_failed"]):
+            left = "?" if ph["open"] is None else ph["open"]
+            reds.append((2, "phase-audit", f"phase {n} audit {ph['status']}: {left} verified P0/P1 open" + (f", arch audit failed: {short(ph['arch_failed'], 60)}"
+                                                  if ph["arch_failed"] else ""),
+                         f"the findings are in R/.overhaul/polish/phase-{n}/: fix them by hand or raise polish_rounds"))
+    audit_text = ", ".join(f"phase {n} audit: {'?' if ph['open'] is None else ph['open']} open"
+                           for n, ph in audits.items())
 
     limits = p["cfg"].get("limits") if isinstance(p["cfg"].get("limits"), dict) else {}
     for mod, score, floor in probe_floors(events, limits):
@@ -504,14 +528,15 @@ def judge(p, prev, t_now, checks, events):
             "prev_proven": prev_proven, "rate_per_h": round(rate, 2), "counts": counts,
             "reds": [{"kind": k, "what": w, "action": a} for _, k, w, a in shown], "reds_total": len(reds),
             "checks": checks if checks is not None else "skipped", "needs_plan_since": since,
-            "polish_issues": issues, "nits": nits, "trend": trend,
+            "polish_issues": issues, "nits": nits, "trend": trend, "phase_audits": audits,
             "deferred": p.get("deferred", 0), "throughput": tp,
             "line": f"VERDICT {verdict} proven {proven}/{total}"
                     f"{' deferred ' + str(p['deferred']) if p.get('deferred') else ''} rate {rate:.1f}/h"
                     f"{expected_text(tp)}"
                     f"{'' if pol is None else ' issues ' + ('?' if issues is None else str(issues))}"
                     f"{'' if pol is None else ' nits ' + str(as_int(nits))}"
-                    f"{'' if trend is None else ' trend ' + trend} reds: {text}"}
+                    f"{'' if trend is None else ' trend ' + trend}"
+                    f"{' ' + audit_text if audit_text else ''} reds: {text}"}
 
 
 RATE_FIX = {

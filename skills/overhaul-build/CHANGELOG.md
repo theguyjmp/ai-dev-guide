@@ -52,6 +52,28 @@ plan-fix + integrator flow done by hand that day fixed 9 functions in ~6 min.
   ...` to land.out and prints it (rerun output in land-tier.out). Non-tier proven tests keep the old rule.
   Tests: scripts/tests/test_priority.py (fake Popen creationflags, a fake flaky tier test, an end-to-end land).
 
+## Phase audit, 2026-11-09
+- Owner requirement 2026-11-09: after each phase, a reality check that the whole platform still follows best coding
+  practice and the architecture stays clean, organized, with no slop and no duplicate functionality in different
+  areas. the pilot project ran with `phase_barrier = false` for throughput, which also turned off phase_polish, so no per-phase
+  audit ran.
+- `[harness] phase_audit` (default true, independent of phase_barrier): when every row of phase N is proven, drive.py
+  runs phase N's polish (plan gaps, probes of the modules it finished, checklist rounds scoped to its modules, fixes
+  landed by land.py --polish) beside the later builds. The modules it covers (state `phase_polish[N].locked`) and every
+  module a queued or running polish or arch fix edits start no new build until that work lands; a fix waits for builds
+  in flight in its modules; a re-check round audits only the changed files of its modules; a raised count is not
+  reverted beside builds (a revert would drop their lands). With the barrier and phase_polish on, nothing changes.
+- templates/arch-audit.md: one blind Opus reviewer (audit_model) beside polish round 1 (phase and final) reads
+  ARCHITECTURE.md, every module's public API and the code in scope and answers A01 same capability in two modules (by
+  behaviour), A02 reaching around the owner's API, A03 [P0] layer violation, A04 shape limits and god files, A05 slop,
+  each NO with both locations. Its blocking NOs join round 1's checklist NOs (state `arch`), are verified the same way
+  and go to one fix per module; A01/A02 route like C03/C05: the caller gets the dedup, the owner's own fix first.
+- Every `[harness] arch_audit_every_lands` (default 25, 0 = off) proven functions, the arch audit runs over the whole
+  tree mid-phase (state `arch_sweep`, files `.overhaul/polish/arch-sweep-<n>*.json`, fixes `arch-r<n>-<module>`), never
+  beside a phase or final polish.
+- verdict.py: `phase N audit: V open` on the line (dashboard); an ended phase audit with verified P0/P1 left, or a failed
+  arch audit, is a `phase-audit` red. Tests: tests/test_phase_audit.py.
+
 ## Main guard, 2026-11-09
 - Per commit, not per range: a commit whose subject starts with `plan` or `m0` may also add code (new files,
   added lines: the stubs and module skeletons overhaul-plan writes), never change or delete an existing line.

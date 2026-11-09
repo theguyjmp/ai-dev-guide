@@ -124,7 +124,7 @@ def parse_needs(cell: str, deps: list[str]) -> list[str] | None:
 IN_FLIGHT = ("building", "review", "landing")
 ID_LISTS = ("concurrent writers", "boundaries", "multi-store writes")  # Policies lines that list function ids
 DEFERRED = "deferred"  # FUNCTIONS status of a row planned later (rolling plan): drive never starts it
-POLISH_KINDS = ("polish_audit", "polish_verify", "polish_fix", "polish_review", "polish_land")
+POLISH_KINDS = ("polish_audit", "polish_verify", "polish_fix", "polish_review", "polish_land", "arch_audit")
 GREEN_BEFORE = "acceptance already green before change"
 CONFLICT = "merge conflict"  # land.py: "merge conflict merging <main> into fn/<id>"
 # A review fix the builder cannot make: a verified blocking NO tied to the reviewer's PLAN-GAP line, or one saying
@@ -162,6 +162,12 @@ GAPS_FID = "polish-gaps"  # the one cross-module pass over .overhaul/plan-gaps.j
 MAIN_FLAKE_RE = re.compile(r"main flake: test=(\S+) path=(\S+) module=(\S+)")
 FIX_RETRIES = 2  # default [limits] fix_retries: retry passes of a probe or polish fix whose review has verified NOs
 DUP_IDS = ("C03", "C05")  # checklist duplication items: a cross-module one goes to the caller module (pass E)
+# Phase audit (owner 2026-11-09): the items of templates/arch-audit.md and their severity. A01 (one capability
+# in two modules) and A02 (a module reaching around its owner's API) route like DUP_IDS: the caller gets the fix.
+ARCH_ITEMS = {"A01": "P1", "A02": "P1", "A03": "P0", "A04": "P1", "A05": "P1"}
+ARCH_DUP_IDS = ("A01", "A02")
+ARCH_EVERY_LANDS = 25  # default [harness] arch_audit_every_lands: a whole-tree arch audit (the sweep) per N lands
+ARCH_FID, SWEEP_FID, SWEEP_VERIFY = "arch-audit", "arch-sweep", "arch-verify"
 
 
 class DriveError(Exception):
@@ -351,8 +357,13 @@ def checklist_nos(raw: object) -> list[dict] | None:
         cid = str(e.get("id") or e.get("rule") or "?").strip()
         if str(e.get("answer", "no")).strip().lower() != "no" or cid == "NEW-RULE":
             continue
-        nos.append({**e, "id": cid, "severity": known[cid].severity if cid in known else "P1"})
+        nos.append({**e, "id": cid, "severity": known[cid].severity if cid in known else ARCH_ITEMS.get(cid, "P1")})
     return nos
+
+
+def slug(module: str) -> str:
+    """A module name as a fix pass fid suffix."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", module).strip("-.") or "misc"
 
 
 def where(n: dict) -> str:
@@ -696,6 +707,9 @@ class Driver(mainred.MainRed):
         self.flake_tests: set[str] = set()  # main-flake tests already sent to a fix this run (one fix per test)
         self.barrier = bool(har.get("phase_barrier", True))  # phase N+1 waits until every phase <=N is proven
         self.phase_polish = bool(har.get("phase_polish", True))  # item 8: gaps, probes and polish per phase too
+        self.phase_audit = bool(har.get("phase_audit", True))  # the same per-phase polish beside builds, no barrier
+        self.arch_every = max(0, int(har.get("arch_audit_every_lands", ARCH_EVERY_LANDS)))
+        self.arch_meta: dict[str, dict] = {}  # arch audit fid -> {"phase": n, "file": path}
         self.fns: dict[str, Fn] = {}
         self.deferred: set[str] = set()  # rows planned later: never built, counted apart
         self.order: list[Fn] = []
@@ -862,6 +876,7 @@ class Driver(mainred.MainRed):
                 changed = self.launch() or changed
                 changed = self.probe_step() or changed
                 changed = self.polish_step() or changed
+                changed = self.arch_step() or changed
                 changed = self.periodic.step(idle=not self.busy()) or changed
                 changed = self.red_step() or changed
                 if self.cycle_due:
@@ -911,13 +926,14 @@ class Driver(mainred.MainRed):
         proven = {fid for fid, r in recs.items() if r["status"] == "proven"}
         # the phase barrier: nothing past the lowest phase that still has an unproven function starts
         open_phase = min((phase_key(f)[0] for f in self.order if f.id not in proven), default=0)
-        if self.barrier and (polishing := self.polish_phase()) is not None:
+        if self.barrier and self.phase_polish and (polishing := self.polish_phase()) is not None:
             open_phase = min(open_phase, polishing)  # ... and phase N+1 waits for phase N's polish and probes
-        busy = self.busy()
+        busy, locked = self.busy(), self.audit_locked()
         taken = [self.claims(self.fns[fid]) for fid in busy if fid in self.fns]
         ready: list[Fn] = []
         for f in self.order:
-            if (recs[f.id]["status"] != "planned" or f.id in busy or recs[f.id]["attempts"] > self.budget(f.id)
+            if (recs[f.id]["status"] != "planned" or f.id in busy or f.module in locked
+                    or recs[f.id]["attempts"] > self.budget(f.id)
                     or recs[f.id].get("blocked_on") or (self.barrier and phase_key(f)[0] > open_phase)
                     or not all(d in proven for d in f.blocking)):
                 continue
@@ -1782,7 +1798,7 @@ class Driver(mainred.MainRed):
         """The phase whose polish is due or running now; None for the final whole-tree polish (or none at all)."""
         phases = sorted({phase_key(f)[0] for f in self.order})
         fin = self.st.get("polish") or {}
-        if (not self.barrier or not self.phase_polish or len(phases) < 2 or self.polish_rounds < 1
+        if (not self.phase_audit_on() or len(phases) < 2 or self.polish_rounds < 1
                 or fin.get("round") or fin.get("status", "idle") != "idle"):
             return None  # the final polish already started (a resumed run): no phase polish behind it
         recs, ended = self.st["functions"], self.st.get("phase_polish", {})
@@ -1825,8 +1841,10 @@ class Driver(mainred.MainRed):
         n = self.polish_phase()  # deferred rows are out of the plan: polish never waits for them
         if n is None and any(self.st["functions"][fid]["status"] != "proven" for fid in self.fns):
             return False
+        if n is not None and "locked" not in pol:  # what audit_locked holds from now until this polish ends
+            pol["locked"] = sorted({f.module for f in self.phase_fns(n)} | set(self.gap_modules(self.scope_gaps())))
         started = self.pump_polish_land()
-        if self.probe_waiting(n):
+        if self.probe_waiting(n) or self.sweep_state()["status"] != "idle":
             return started
         if pol["status"] == "fix":
             for item in self.polish_ready():
@@ -1836,9 +1854,9 @@ class Driver(mainred.MainRed):
             if not self.polish_pending():
                 return self.start_polish_audit(pol["round"] + 1)
         elif pol["status"] == "gaps":  # the plan-gaps pass runs alone; polish round 1 waits for it
-            if not self.polish_pending() and not self.busy():
+            if not self.polish_pending() and not self.polish_busy():
                 return self.start_polish_audit(max(1, pol["round"]))
-        elif not self.busy() and not self.polish_pending():  # idle, or an audit a previous drive left unfinished
+        elif not self.polish_busy() and not self.polish_pending():  # idle, or an audit left unfinished
             return self.start_gap_pass() or self.start_polish_audit(max(1, pol["round"]))
         return started
 
@@ -1894,6 +1912,8 @@ class Driver(mainred.MainRed):
                 break
             if queued & set(self.polish_after.get(item[0], [])):
                 continue  # owner-first: an owner's own fix starts (and lands) before its caller's
+            if self.builds_in(item[0].split(", ") + self.polish_owners.get(item[0], [])):
+                continue  # phase audit beside builds: a build in flight there lands first (no races)
             mine = self.polish_claims(item[0])
             if not any(paths_overlap(mine, other) for other in taken):
                 taken.append(mine)
@@ -1902,11 +1922,12 @@ class Driver(mainred.MainRed):
 
     def polish_cmd(self, kind: str) -> tuple[list[str], str]:
         """The worker command for a polish kind, and its model label."""
-        custom = self.custom_cmd("review" if kind in ("polish_audit", "polish_review", "polish_verify") else "build")
+        custom = self.custom_cmd("review" if kind in ("polish_audit", "arch_audit", "polish_review", "polish_verify")
+                                 else "build")
         if custom:
             return custom, "custom"
         base = self.worker_cmd({"polish_review": "review", "polish_verify": "verify"}.get(kind, "build"))
-        if kind == "polish_audit" and self.audit_model:
+        if kind in ("polish_audit", "arch_audit") and self.audit_model:
             base = (base[:base.index("--model")] if "--model" in base else base) + ["--model", self.audit_model]
         return base, base[base.index("--model") + 1] if "--model" in base[:-1] else "default"
 
@@ -1949,6 +1970,9 @@ class Driver(mainred.MainRed):
         path = self.ov / "briefs" / f"polish-audit-{self.polish_tag()}{rnd}.md"
         path.write_text(brief, encoding="utf-8")
         self.start_polish_job(fid, "polish_audit", rnd, path, self.prepare_worktree(fid))
+        pol.pop("checklist_wait", None)
+        if rnd == 1 and self.phase_audit and "arch" not in pol and ARCH_FID not in self.jobs:
+            self.start_arch_audit(ARCH_FID, self.polish_phase(), self.polish_dir() / "arch-1.json")
         pol.update(round=rnd, status="audit")
         self.save()
         self.say(f"polish checklist round {rnd}")
@@ -1965,11 +1989,16 @@ class Driver(mainred.MainRed):
             fns = self.phase_fns(n)
             files = sorted({p for f in fns for p in f.files})
             return (f"Round 1 of the phase {n} polish: every function of phase {n} ({', '.join(f.id for f in fns)}) is "
-                    "proven; later phases are not built yet. Answer the checklist only for the modules listed above"
+                    f"proven; {'later phases are not built yet' if self.barrier else 'later phases build meanwhile'}. "
+                    "Answer the checklist only for the modules listed above"
                     + (" and these files: " + ", ".join(f"`{p}`" for p in files) if files else "")
                     + ". The dedup greps still search the whole tree. Leave every other module and anything that "
                     "only a later phase can finish to the final whole-tree polish.")
         changed = [f for f in git(self.repo, "diff", "--name-only", f"{best[2]}..{self.main}").split() if f]
+        if self.beside_builds() and self.polish_phase() is not None:  # builds landed meanwhile: not this round's
+            mine = [p for m in self.polish_state().get("locked") or []
+                    for p in module_paths(module_section(self.arch, m), m)]
+            changed = [f for f in changed if in_paths(f, mine)]
         items = self.read_audit(prev) or []
         listed = "\n".join(f"- [{n.get('id')}] `{where(n)}`: {n.get('evidence') or ''}"[:400] for n in items)
         files = "\n".join(f"- `{f}`" for f in changed) or "- (none)"
@@ -2018,6 +2047,18 @@ class Driver(mainred.MainRed):
         self.log_nits(None, nits, f"polish round {rnd}")
         self.polish_state()["nits"] = min(len(nits), NITS_MAX)
         meta = {"rnd": rnd, "model": job.model, "secs": secs, "tokens": tokens, "nos": len(nos)}
+        if rnd == 1 and self.phase_audit:
+            pol = self.polish_state()
+            if "arch" not in pol:  # the arch audit still runs: it joins this round when it ends
+                pol["checklist_wait"] = {"meta": meta, "blocking": blocking}
+                self.save()
+                return
+            blocking += pol["arch"]
+        self.polish_audited(meta, blocking)
+
+    def polish_audited(self, meta: dict, blocking: list[dict]) -> None:
+        """The round's blocking NOs (checklist, plus round 1's arch audit) go to one verifier."""
+        rnd = meta["rnd"]
         if not blocking:
             self.polish_checked(meta, [], [])
             return
@@ -2030,6 +2071,9 @@ class Driver(mainred.MainRed):
         meta = self.verify_meta.pop(fid, {})
         findings = meta.get("findings") or []
         real = self.verified(fid, job.attempt, findings, job.timed_out)
+        if fid == SWEEP_VERIFY:
+            self.sweep_checked(meta, real)
+            return
         if fid != "polish-verify":  # a polish fix's review NOs
             if real is None:
                 self.polish_failed(fid, "verifier wrote no result; the review's NOs were not checked")
@@ -2073,7 +2117,7 @@ class Driver(mainred.MainRed):
 
     def named_modules(self, item: dict) -> list[str]:
         """The plan's modules an issue's text names, by a path of theirs or by name."""
-        text = " ".join(str(item.get(k) or "") for k in ("evidence", "how", "fix", "issue"))
+        text = " ".join(str(item.get(k) or "") for k in ("evidence", "how", "fix", "issue", "other"))
         out = []
         for m in sorted({f.module for f in self.order}):
             paths = [p.rstrip("/") for p in module_paths(module_section(self.arch, m), m)]
@@ -2089,7 +2133,7 @@ class Driver(mainred.MainRed):
         groups: dict[str, list[dict]] = {}
         for item in issues:
             home = str(item.get("module") or "unknown").strip()
-            if str(item.get("id") or item.get("rule") or "") in DUP_IDS:
+            if str(item.get("id") or item.get("rule") or "") in DUP_IDS + ARCH_DUP_IDS:
                 involved = [home] + [m for m in self.named_modules(item) if m != home]
                 callers = [m for m in involved if all(o == m or o in module_deps(self.arch, m) for o in involved)]
                 if len(involved) > 1 and callers:
@@ -2113,7 +2157,8 @@ class Driver(mainred.MainRed):
             pol["best"] = [rnd, len(issues), sha]
             return issues, len(issues)
         kept = self.read_audit(self.polish_dir() / f"checklist-{best[0]}.json")
-        if kept is None or not self.revert_main(best[2], sha, f"polish: revert round {rnd - 1} fixes "
+        beside = self.beside_builds() and self.polish_phase() is not None  # a revert would drop builds' lands too
+        if kept is None or beside or not self.revert_main(best[2], sha, f"polish: revert round {rnd - 1} fixes "
                                                 f"({len(issues)} issues > {best[1]} after round {best[0]})"):
             pol["best"] = [rnd, len(issues), sha]
             return issues, len(issues)
@@ -2142,7 +2187,7 @@ class Driver(mainred.MainRed):
         pol = self.polish_state()
         rnd = 0 if fid else pol["round"]
         carry = None if fid else (pol.get("failed_nos") or {}).pop(module, None)
-        fid = fid or f"polish-r{rnd}-" + (re.sub(r"[^A-Za-z0-9._-]+", "-", module).strip("-.") or "misc")
+        fid = fid or f"polish-r{rnd}-" + slug(module)
         issues = "\n".join(i["text"] if "text" in i else f"- `{i.get('file', '?')}:{i.get('line', '?')}` "
                            f"[{i.get('rule') or i.get('id') or '?'}] {i.get('evidence') or i.get('issue') or ''}"
                            + self.owners_note(module, i.get("owners")) for i in items)
@@ -2316,12 +2361,174 @@ class Driver(mainred.MainRed):
             del self.jobs[job.fn]
         {"polish_audit": self.after_polish_audit, "polish_verify": self.after_polish_verify,
          "polish_fix": self.after_polish_fix,
-         "polish_review": self.after_polish_review, "polish_land": self.after_polish_land}[job.kind](job)
+         "polish_review": self.after_polish_review, "polish_land": self.after_polish_land,
+         "arch_audit": self.after_arch_audit}[job.kind](job)
+
+    # ---- phase audit (owner 2026-11-09): phase polish beside the builds, the arch audit, and the sweep ----
+    # [harness] phase_audit runs each phase's polish (above) whatever phase_barrier says. Without the barrier holding
+    # later phases it runs beside their builds: the modules it covers start no new build until it ends, and a fix
+    # waits for builds in flight in its modules. Round 1 also runs the arch audit (templates/arch-audit.md); its
+    # blocking NOs join the checklist's, verified and fixed the same way. Every arch_audit_every_lands lands the arch
+    # audit runs over the whole tree on its own (the sweep, state arch_sweep), never beside a phase polish.
+    def phase_audit_on(self) -> bool:
+        return (self.barrier and self.phase_polish) or self.phase_audit
+
+    def beside_builds(self) -> bool:
+        """True when the phase audit runs beside the builds (the barrier does not hold the next phase for it)."""
+        return self.phase_audit and not (self.barrier and self.phase_polish)
+
+    def builds_in(self, modules: list[str] | set[str]) -> bool:
+        """True if a function (or the probe) of one of these modules is in flight."""
+        mods, probes = set(modules), self.probe_modules()
+        return any((self.fns[fid].module if fid in self.fns else probes.get(fid)) in mods for fid in self.busy())
+
+    def polish_busy(self) -> bool:
+        """What a polish step waits for before it starts: all work in flight, or, beside the builds, only other
+        fix passes and the builds in the modules it locks."""
+        if self.polish_phase() is None or not self.beside_builds():
+            return bool(self.busy())
+        probes = self.probe_modules()
+        fixes = {fid for fid in self.busy() - {"periodic"} if fid not in self.fns and fid not in probes}
+        return bool(fixes) or self.builds_in(self.audit_locked())
+
+    def fix_open(self, fid: str) -> bool:
+        return fid in self.jobs or fid in self.polish_lands or bool(self.land_job and self.land_job.fn == fid)
+
+    def audit_locked(self) -> set[str]:
+        """Modules that start no new build beside a phase audit: those of the phase polish due now (its phase's and
+        its plan gaps'), and every module a queued or running polish or arch fix edits, until that fix lands."""
+        if not self.beside_builds():
+            return set()
+        n, out = self.polish_phase(), set()
+        if n is not None:  # due: its phase's modules at once, then what polish_step records (plus its plan gaps)
+            out = set(self.polish_state().get("locked") or {f.module for f in self.phase_fns(n)})
+        fixes = [m for m, _ in self.polish_queue] + [m for fid, (m, _) in self.polish_meta.items()
+                                                    if fid.startswith(("polish-", "arch-")) and self.fix_open(fid)]
+        for m in fixes:
+            out |= set(m.split(", ")) | set(self.polish_owners.get(m, []))
+        return out
+
+    def start_arch_audit(self, fid: str, n: int | None, out: Path) -> None:
+        """One blind reviewer (audit_model) reads ARCHITECTURE.md, every module's public API and the code in scope:
+        phase n's modules for a phase polish, else the whole tree."""
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.unlink(missing_ok=True)
+        scoped = fid == ARCH_FID and n is not None
+        mine = {f.module for f in self.phase_fns(n)} if scoped else {f.module for f in self.order}
+        mods = sorted({f.module for f in self.order})
+        listing = "\n".join(f"- `{m}`{' (in scope)' if m in mine else ''}: "
+                            + ", ".join(module_paths(module_section(self.arch, m), m)) for m in mods)
+        scope = (f"phase {n}: the code of the modules marked (in scope); later phases may still be building"
+                 if scoped else "the whole tree: every module")
+        brief = render("arch-audit.md", {
+            "title": f"{fid} {out.stem}", "scope": scope, "main": self.main, "audit_file": out.as_posix(),
+            "max_calls": str(self.max_calls), "scratch": (out.parent / "scratch").as_posix(), "modules": listing,
+            "architecture": self.cfg["paths"]["architecture"], "commands": self.polish_commands(),
+            "policies": self.policies()})
+        path = self.ov / "briefs" / f"{fid}-{out.parent.name}-{out.stem}.md"
+        path.write_text(brief, encoding="utf-8")
+        self.arch_meta[fid] = {"phase": n, "file": out.as_posix()}
+        self.start_polish_job(fid, "arch_audit", 1, path, self.prepare_worktree(fid))
+        self.log(None, "arch_audit", f"start {fid}: {scope} model={self.jobs[fid].model}")
+
+    def after_arch_audit(self, job: Job) -> None:
+        meta = self.arch_meta.pop(job.fn, {})
+        tokens, _, _ = read_result(job.out)
+        raw = None if job.timed_out or not meta else self.read_audit(Path(meta["file"]))
+        nos = None if raw is None else [{**n, "evidence": f"{n.get('evidence') or ''} (other: {n['other']})"}
+                                        if n.get("other") else n for n in checklist_nos(raw) or []]
+        why = "" if nos is not None else "auditor timed out" if job.timed_out else "result missing or not a JSON list"
+        blocking = [n for n in nos or [] if n["severity"] in BLOCKING]
+        self.log(None, "arch_audit", f"{job.fn}: " + (f"failed: {why}" if why else
+                 f"{len(nos)} NOs, {len(blocking)} blocking: " + " / ".join(f"{n['id']} {where(n)}" for n in blocking)
+                 )[:REASON_MAX] + f" model={job.model}", time.monotonic() - job.started, tokens)
+        if job.fn == SWEEP_FID:
+            self.sweep_audited(blocking, why)
+            return
+        n = meta.get("phase")
+        pol = self.st.setdefault("phase_polish", {}).setdefault(str(n), {}) if n is not None else self.polish_state()
+        if why and not pol.get("arch_retry") and pol.get("status") == "audit":  # once more, like the checklist
+            pol["arch_retry"] = 1
+            self.start_arch_audit(ARCH_FID, n, Path(meta.get("file") or self.polish_dir() / "arch-1.json"))
+            return
+        if why:
+            pol["arch_failed"] = why
+        pol["arch"] = blocking
+        wait = pol.pop("checklist_wait", None)
+        self.save()
+        if wait and pol is self.polish_state() and pol.get("status") == "audit":
+            self.polish_audited(wait["meta"], wait["blocking"] + blocking)
+
+    def sweep_state(self) -> dict:
+        """st["arch_sweep"]: at (proven count at the last sweep), status (idle|audit|verify|fix), open, history."""
+        return self.st.setdefault("arch_sweep", {"at": 0, "status": "idle", "history": []})
+
+    def arch_step(self) -> bool:
+        """Drive the sweep one step; True if anything started."""
+        sw = self.sweep_state()
+        if not self.phase_audit or self.arch_every < 1:
+            return False
+        if sw["status"] == "fix":
+            started = self.pump_polish_land()
+            for item in self.polish_ready():
+                self.polish_queue.remove(item)
+                self.start_polish_fix(*item, fid=f"arch-r{sw['at']}-{slug(item[0])}")
+                started = True
+            if not self.polish_queue and not self.polish_pending():
+                sw["status"] = "idle"
+                self.save()
+                self.log(None, "arch_sweep", f"done at {sw['at']} lands: {sw.get('open', 0)} verified NOs fixed")
+            return started
+        if sw["status"] != "idle":
+            if SWEEP_FID not in self.jobs and SWEEP_VERIFY not in self.jobs:  # its job ended with a previous drive
+                sw["status"] = "idle"
+                self.save()
+            return False
+        recs = self.st["functions"]
+        proven = sum(1 for f in self.order if recs[f.id]["status"] == "proven")
+        final = self.st.get("polish") or {}
+        if (proven - sw["at"] < self.arch_every or proven == len(self.order) or self.polish_phase() is not None
+                or self.polish_queue or final.get("status", "idle") != "idle" or len(self.jobs) >= self.max_parallel):
+            return False
+        sw.update(at=proven, status="audit")
+        self.start_arch_audit(SWEEP_FID, None, self.ov / "polish" / f"arch-sweep-{proven}.json")
+        self.save()
+        return True
+
+    def sweep_audited(self, blocking: list[dict], why: str) -> None:
+        sw = self.sweep_state()
+        if why or not blocking:
+            self.sweep_checked({"findings": []}, None if why else [])
+            return
+        path = self.verify_brief(SWEEP_VERIFY, self.main, blocking, sw["at"])
+        self.verify_meta[SWEEP_VERIFY] = {"findings": blocking}
+        self.start_polish_job(SWEEP_VERIFY, "polish_verify", sw["at"], path, self.ov / "wt" / SWEEP_FID)
+        sw["status"] = "verify"
+        self.save()
+
+    def sweep_checked(self, meta: dict, real: list[dict] | None) -> None:
+        """The sweep's verified NOs go to one fix per module (the caller of a duplication, its owner first)."""
+        sw, found = self.sweep_state(), len(meta.get("findings") or [])
+        if real is None:
+            self.log(None, "arch_sweep", f"at {sw['at']} lands: no usable audit or verify result")
+            sw["status"] = "idle"
+            self.save()
+            return
+        out = self.ov / "polish" / f"arch-sweep-{sw['at']}-verified.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(real, indent=1), encoding="utf-8")
+        sw["open"] = len(real)
+        sw["history"].append([sw["at"], found, len(real)])
+        self.log(None, "arch_sweep", f"at {sw['at']} lands: {len(real)} of {found} blocking NOs verified")
+        if real:
+            self.polish_queue = sorted(self.route_polish(real).items())
+        sw["status"] = "fix" if real else "idle"
+        self.save()
 
     # ---- probe (v3): mutation score and property counterexamples, one fix pass per module ----
     def probe_modules(self) -> dict[str, str]:
         """{probe fid: module} for every module that owns a function, in build order."""
-        return {PROBE_PREFIX + (re.sub(r"[^A-Za-z0-9._-]+", "-", f.module).strip("-.") or "misc"): f.module
+        return {PROBE_PREFIX + slug(f.module): f.module
                 for f in self.order}
 
     def probe_state(self) -> dict:
