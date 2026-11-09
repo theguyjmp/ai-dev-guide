@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import land as land_mod  # noqa: E402  the lock protocol is land.py's
+import mainred  # noqa: E402  beside this script: main red, systemic failures, dead depfixes
 import memcap  # noqa: E402  beside this script: [limits] proc_mem_gb
 import periodic  # noqa: E402  beside this script: [gates.periodic]
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
@@ -642,7 +643,7 @@ def load_config(repo: Path) -> dict:
     return cfg
 
 
-class Driver:
+class Driver(mainred.MainRed):
     """One run of the harness over one repo."""
 
     def __init__(self, repo: Path, cfg: dict):
@@ -700,6 +701,7 @@ class Driver:
         self.dirty = False  # state.json is behind self.st (land.py held the lock)
         self.cycle_due = ""  # a heartbeat a land asked for, run once the loop has launched what it unblocked
         self.periodic = periodic.Periodic(self, cfg.get("periodic") or {})
+        self.red_init(har)
 
     # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
@@ -796,6 +798,8 @@ class Driver:
         prot |= {f"{Path(p).parent.as_posix()}/" for p in [rel, arch] + [acc_file(a) for f in fns for a in f.acceptance]}
         self.protected = tuple(sorted(p for p in prot if p != "./"))
         self.st = self.disk_state()
+        self.st.pop("main_red", None)  # measured again this run (mainred.py)
+        self.st.pop("systemic", None)
         recs = self.st["functions"]
         for fid in [k for k in recs if k not in self.fns]:
             del recs[fid]
@@ -851,12 +855,13 @@ class Driver:
                 changed = self.probe_step() or changed
                 changed = self.polish_step() or changed
                 changed = self.periodic.step(idle=not self.busy()) or changed
+                changed = self.red_step() or changed
                 if self.cycle_due:
                     why, self.cycle_due = self.cycle_due, ""
                     self.cycle(why)
                 if self.dirty:
                     self.save()  # a write that had to wait for land.py's lock
-                if not self.busy():
+                if not self.busy() or self.red_done():
                     return self.finish()
                 self.dash_due = self.dash_due or changed
                 if time.monotonic() - self.last_cycle >= self.heartbeat_s:
@@ -870,7 +875,8 @@ class Driver:
 
     def busy(self) -> set[str]:
         """In flight: jobs, the land queue, lands, and functions waiting at landing on a main-flake fix."""
-        waiting = {fid for fid, r in self.st["functions"].items() if r["status"] == "landing" and r.get("blocked_on")}
+        waiting = {fid for fid, r in self.st["functions"].items()
+                   if (r["status"] == "landing" and r.get("blocked_on")) or r.get("blocked_on") == mainred.MAIN_RED}
         gates = {"periodic"} if self.periodic.busy() else set()
         return set(self.jobs) | set(self.land_queue) | {j.fn for j in self.land_jobs()} | waiting | gates
 
@@ -916,6 +922,8 @@ class Driver:
 
     def launch(self) -> bool:
         launched = False
+        if self.red_hold():  # main red, or stopping for the manager
+            return False
         for f in self.ready():
             if len(self.jobs) >= self.max_parallel:
                 break
@@ -1193,6 +1201,8 @@ class Driver:
         if (not module or module == self.fns[fid].module or dfid in self.jobs or dfid in self.polish_lands
                 or any(paths_overlap([path], [c]) for c in self.claims(self.fns[fid]))):
             return False
+        if self.red_dead_block(fid, module, f"{path}:{line} {why}"):
+            return True
         out = self.ov / "runs" / f"{fid}-acceptance.out"
         evidence = (f"{why} (found by {fid}, whose acceptance {', '.join(self.fns[fid].acceptance)} fails on it"
                     + (f"; its last output: {out.as_posix()}" if out.is_file() else "") + ")")
@@ -1205,6 +1215,8 @@ class Driver:
 
     def depfix_settled(self, dfid: str, ok: bool, reason: str = "") -> None:
         """A dependency fix landed or failed: its waiting function builds again, or parks with the reason."""
+        if self.red_depfix(dfid, ok, reason):  # the main-red fix, or a second dead depfix in one module
+            return
         for fid, rec in self.st["functions"].items():
             if rec.get("blocked_on") == dfid:
                 self.set(fid, blocked_on=None)
@@ -1678,7 +1690,8 @@ class Driver:
         function whose footprint overlaps no in-flight land's starts stacked on them (land.py --stack): its gate
         runs alongside theirs on main + their branches, and it commits right after them. Overlapping lands wait."""
         flying = self.land_jobs()
-        if not self.land_queue or len(flying) >= self.max_lands or any(j.kind != "land" for j in flying):
+        if (not self.land_queue or len(flying) >= self.max_lands or any(j.kind != "land" for j in flying)
+                or self.st.get("main_red")):
             return False
         fid = self.land_queue[0]
         if flying:
@@ -2249,7 +2262,8 @@ class Driver:
         self.start_polish_job(fid, "polish_verify", job.attempt, path, self.ov / "wt" / fid)
 
     def pump_polish_land(self) -> bool:
-        if self.land_job or self.side_lands or self.land_queue or not self.polish_lands:
+        if (self.land_job or self.side_lands or (self.land_queue and not self.st.get("main_red"))
+                or not self.polish_lands):
             return False
         fid = self.polish_lands.pop(0)
         out = self.ov / "runs" / f"{fid}-land.out"
@@ -2457,6 +2471,8 @@ class Driver:
 
     # ---- outcomes ----
     def fail(self, fid: str, reason: str) -> None:
+        if self.red_fail(fid, reason):  # main fails the same check: not this function's attempt
+            return
         attempts = self.st["functions"][fid]["attempts"] + 1
         self.set(fid, status="planned", attempts=attempts, last_reason=reason[:REASON_MAX])
         self.say(f"{fid} attempt {attempts} failed: {reason}")
@@ -2528,7 +2544,7 @@ class Driver:
         recs = self.st["functions"]
         parked = [fid for fid in self.fns if recs[fid]["status"] == "needs-plan"]
         blocked = [fid for fid in self.fns if recs[fid]["status"] not in ("proven", "needs-plan")]
-        code = 3 if parked or blocked else 0
+        code = 3 if parked or blocked or self.red_stop_reason else 0
         self.cycle("exit")
         if self.dirty:
             self.flush()
@@ -2536,6 +2552,8 @@ class Driver:
             self.say(f"needs-plan {fid}: {recs[fid]['last_reason']}")
         if blocked:
             self.say(f"blocked on unproven deps: {', '.join(blocked)}")
+        if self.red_stop_reason:
+            self.say(f"needs-plan: {self.red_stop_reason}")
         if self.deferred and not code:
             self.say(f"{len(self.deferred)} deferred rows wait for the next plan commit; "
                      "polish, probes and the verdict leave them out")

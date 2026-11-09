@@ -9,7 +9,15 @@ GOOD only when all of these hold:
   5 once every function is proven and state.json has a polish phase, its checklist run left 0 verified P0 or P1
     NOs, i.e. every blocking checklist item is YES (references/checklist.md);
   6 when the log has probe_mutation events, each module's latest mutation score is at or above its floor
-    (the event's floor, else [limits] mutation_floor, default 0.9).
+    (the event's floor, else [limits] mutation_floor, default 0.9);
+  7 main is not red for the harness (state.json main_red, set by drive.py when a whole-tree check fails on clean
+    main too) and no systemic failure was flagged in the last [harness] systemic_window_min (default 30);
+  8 the throughput tripwire holds: while builders ran through the last 60 min, the lands in it reach half the
+    expected rate and [harness] min_rate_per_hour (0 = off). Expected = min(slots x 60 / build minutes /
+    builds per land, 60 / land minutes): slots = max_parallel capped by the ready functions that can run at once
+    (one per module, or per disjoint files cell), build and land minutes the medians of recent build_end and
+    land_ok events (default 8 and none), builds per land rolling over 3 h (default 1.5). The red names the stage
+    that costs most: idle slots, needs-plan, blocked on deps, rework builds per land or the landing queue.
 Nits (capped at 5) and the open-audit trend (the latest open_audit event: SCORES s1..s7 | ISSUES n) are reported
 and never gate.
 Otherwise BAD, with at most 5 reds ranked by harm, each naming its automatic action (R in an action is the repo).
@@ -47,6 +55,8 @@ RATE_WINDOW_H = 3.0
 MUTATION_FLOOR = 0.9  # probe floor when neither the event nor [limits] mutation_floor names one
 BUDGET_RE = re.compile(r"over[ _-]?budget", re.I)
 SEPARATOR_RE = re.compile(r":?-+:?")
+BUILD_MIN_DEFAULT = 8.0
+BUILDS_PER_LAND_TARGET = 1.5
 
 
 PROBE_DETAIL = re.compile(r"^(\S+): score ([\d.]+) floor ([\d.]+)")
@@ -191,6 +201,7 @@ def function_view(rows, state):
         md = r.get("status") or ""
         status = md if md in ("proven", "deferred") else (st if st and st != "proven" else (md or "planned"))
         view.append({"id": fid, "module": r.get("module", ""), "phase": r.get("phase", ""), "status": status,
+                     "deps": r.get("deps", ""), "files": r.get("files", ""), "blocked_on": s.get("blocked_on"),
                      "attempts": as_int(s.get("attempts")), "last_reason": str(s.get("last_reason") or ""),
                      "updated": s.get("updated"), "cycle": s.get("cycle")})
     return view
@@ -230,6 +241,83 @@ def rate_per_h(history, proven, t_now, window_h=RATE_WINDOW_H):
     before = [pt for pt in pts if pt[0] <= start]
     t0, n0 = (start, before[-1][1]) if before else pts[0]
     return (proven - n0) / max((t_now - t0).total_seconds() / 3600, 0.25)
+
+
+def _median(xs):
+    xs = sorted(xs)
+    return (xs[len(xs) // 2] if len(xs) % 2 else (xs[len(xs) // 2 - 1] + xs[len(xs) // 2]) / 2) if xs else None
+
+
+def _deps(cell):
+    return [d for d in re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]*", cell or "") if d != "-"]
+
+
+def ready_slots(view):
+    """How many unproven functions can build at once now: deps proven, not parked, claims disjoint (the files cell,
+    else the whole module, as drive.py locks them)."""
+    proven = {f["id"] for f in view if f["status"] == "proven"}
+    taken, n = set(), 0
+    for f in view:
+        if f["status"] not in ("planned", "building", "review") or f.get("blocked_on"):
+            continue
+        if any(d not in proven for d in _deps(f.get("deps")) if d != f["id"]):
+            continue
+        files = [x.strip("` ") for x in re.split(r"[,\s]+", f.get("files") or "") if x.strip("` -")]
+        claim = set(files) or {"module:" + f.get("module", "")}
+        if claim & taken:
+            continue
+        taken |= claim
+        n += 1
+    return n
+
+
+def throughput(p, events, t_now):
+    """The expected rate for this fleet now, the lands in the last 60 min, and the stage costing the most."""
+    cfg = p["cfg"]
+    har = cfg.get("harness") if isinstance(cfg.get("harness"), dict) else {}
+    lim = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
+    view = p["view"]
+    max_par = max(1, as_int(har.get("max_parallel") or lim.get("max_parallel"), 6))
+    hour, three = t_now - dt.timedelta(hours=1), t_now - dt.timedelta(hours=3)
+
+    def seen(kind, since=None):
+        out = []
+        for e in events:
+            t = parse_t(e.get("t"))
+            if e.get("event") == kind and t and (since is None or t >= since):
+                out.append((t, e))
+        return out
+    builds = seen("build_end")
+    if not builds and not seen("build_start"):
+        return None  # no builder has run: no expectation
+    build_min = _median([float(e.get("seconds") or 0) / 60 for _, e in builds[-20:] if e.get("seconds")]) \
+        or BUILD_MIN_DEFAULT
+    lands = seen("land_ok", three)
+    starts3 = len(seen("build_start", three))
+    per_land = max(1.0, starts3 / len(lands)) if lands and starts3 else BUILDS_PER_LAND_TARGET
+    land_min = _median([float(e.get("seconds") or 0) / 60 for _, e in seen("land_ok")[-20:] if e.get("seconds")])
+    slots = min(max_par, ready_slots(view))
+    per_slot = 60 / build_min / per_land
+    ceiling = 60 / land_min if land_min else None
+    expected = slots * per_slot if ceiling is None else min(slots * per_slot, ceiling)
+    landed = len(seen("land_ok", hour))
+    first = seen("build_start")
+    ran = bool(first) and first[0][0] <= hour and bool(seen("build_start", hour) or seen("build_end", hour))
+    counts = {}
+    for f in view:
+        counts[f["status"]] = counts.get(f["status"], 0) + 1
+    active = counts.get("building", 0) + counts.get("review", 0)
+    parked = counts.get("needs-plan", 0)
+    short_slots = max(0, max_par - slots)
+    costs = {"idle slots": max(0, slots - active) * per_slot,
+             "needs-plan": min(parked, short_slots) * per_slot,
+             "blocked on deps": max(0, short_slots - min(parked, short_slots)) * per_slot,
+             "rework builds per land": slots * 60 / build_min * max(0.0, 1 / BUILDS_PER_LAND_TARGET - 1 / per_land),
+             "landing queue": max(0.0, slots * per_slot - ceiling) if ceiling else 0.0}
+    top = max(costs, key=lambda k: costs[k])
+    return {"expected": round(expected, 2), "slots": slots, "build_min": round(build_min, 1),
+            "builds_per_land": round(per_land, 2), "landed_60m": landed, "builders_ran": ran,
+            "top_stage": top, "top_cost": round(costs[top], 2), "costs": {k: round(v, 2) for k, v in costs.items()}}
 
 
 def run_checks(repo, commands, timeout):
@@ -341,6 +429,28 @@ def judge(p, prev, t_now, checks, events):
         reds.append((1, "owner", f"{gate} gate unavailable: {short(r.get('reason', ''), 80)}",
                      "the owner fixes what stops it running (CI billing, runner) or drops it from [gates.periodic]; "
                      "drive.py never bisects it"))
+    mr = state.get("main_red") if isinstance(state.get("main_red"), dict) else None
+    if mr:  # drive.py: a whole-tree check fails on clean main too, so every build would fail it
+        reds.append((0, "main", f"main red: {mr.get('check', '?')} at {str(mr.get('sha') or '?')[:12]}"
+                     + (f" in {', '.join(mr['files'][:3])}" if mr.get("files") else ""),
+                     mr.get("action") or "drive.py holds builds and lands and sends one fix for main"))
+    har = p["cfg"].get("harness") if isinstance(p["cfg"].get("harness"), dict) else {}
+    win = float(har.get("systemic_window_min", 30) or 0)
+    for s in state.get("systemic") or []:
+        st_t = parse_t(s.get("t")) if isinstance(s, dict) else None
+        if st_t and win and t_now - st_t <= dt.timedelta(minutes=win):
+            reds.append((1, "systemic", f"systemic: {as_int(s.get('count'))} functions fail the same way: "
+                         f"{short(s.get('reason', ''), 90)}",
+                         "fix the shared cause in a plan commit (drive.py stops with needs-plan: systemic), "
+                         "not each function"))
+    tp = throughput(p, events, t_now)
+    floor = float(har.get("min_rate_per_hour", 0) or 0)
+    if tp and tp["builders_ran"] and total and proven < total:
+        under_floor = bool(floor) and tp["landed_60m"] < floor
+        if under_floor or (tp["expected"] and tp["landed_60m"] < 0.5 * tp["expected"]):
+            bar = f"floor {floor:g}/h" if under_floor else f"half of expected {tp['expected']:.1f}/h"
+            reds.append((1, "rate", f"rate red: {tp['landed_60m']}/h < {bar}; top stage {tp['top_stage']} "
+                         f"(~{tp['top_cost']:.1f}/h lost)", RATE_FIX[tp["top_stage"]]))
     nits = pol.get("nits") if pol else None
     trend = open_audit_trend(events)
 
@@ -395,12 +505,29 @@ def judge(p, prev, t_now, checks, events):
             "reds": [{"kind": k, "what": w, "action": a} for _, k, w, a in shown], "reds_total": len(reds),
             "checks": checks if checks is not None else "skipped", "needs_plan_since": since,
             "polish_issues": issues, "nits": nits, "trend": trend,
-            "deferred": p.get("deferred", 0),
+            "deferred": p.get("deferred", 0), "throughput": tp,
             "line": f"VERDICT {verdict} proven {proven}/{total}"
                     f"{' deferred ' + str(p['deferred']) if p.get('deferred') else ''} rate {rate:.1f}/h"
+                    f"{expected_text(tp)}"
                     f"{'' if pol is None else ' issues ' + ('?' if issues is None else str(issues))}"
                     f"{'' if pol is None else ' nits ' + str(as_int(nits))}"
                     f"{'' if trend is None else ' trend ' + trend} reds: {text}"}
+
+
+RATE_FIX = {
+    "idle slots": "slots sit idle with ready work: check that drive.py runs and is not holding (main red, a stop)",
+    "needs-plan": "plan commits for the needs-plan rows free their slots; then drive.py --repo R --reset <id>",
+    "blocked on deps": "too few rows are buildable at once: split rows or modules so more can run in parallel",
+    "rework builds per land": "builds per land above 1.5: read the top failure reasons in log.jsonl and fix that "
+                              "cause (brief, gate, plan) before adding builders",
+    "landing queue": "lands are the ceiling: shorten the land gate or raise [harness] max_lands"}
+
+
+def expected_text(tp):
+    if not tp:
+        return ""
+    return (f" of expected {tp['expected']:.1f}/h (slots {tp['slots']}, build {tp['build_min']:g}m, "
+            f"{tp['builds_per_land']:g} builds/land)")
 
 
 def write_atomic(path, text):

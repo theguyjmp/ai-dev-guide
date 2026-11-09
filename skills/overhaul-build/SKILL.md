@@ -33,6 +33,7 @@ In a POSIX shell (Git Bash on Windows): `mkdir -p R/.overhaul; py -3 <skill>/scr
 - Headless: run drive.py directly, in the foreground. A foreground call is cut at 10 minutes unless the headless session starts with `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` above the run (14400000 is 4 hours).
 - Exit 0: every function is proven and the polish phase has run. Run the proof-check, then report.
 - Exit 3: the manager is needed (below); after the fixes, run again.
+- Exit 3 with `needs-plan: main red in plan stubs: <check> <files>`: main itself fails that whole-tree check in files only plan or m0 commits touched; make the stubs pass it in a plan commit (PLAN OK), then run again. `needs-plan: systemic <reason>`: 3 or more functions failed the same way within [harness] systemic_window_min while main is green; fix that shared cause (brief, gate, plan), not each function. `needs-plan: main red: ...`: the one main fix failed or main is still red; fix main in a plan commit.
 - Any other exit: run once more; the same failure twice is a harness defect. Report its last error line and stop; never do the harness's work by hand.
 - On the owner's stop: stop the command (TaskStop) and say so in one line; the next run resumes from state.json.
 
@@ -96,6 +97,7 @@ Read every time from the clock (`date`) just before writing it, in the owner's l
 - Builders stay in their allowed paths and never edit tests/acceptance, stand in for real behaviour or special-case a test [by drive.py (allowed paths in each brief); the blind review (line 1 PASS or FAIL)].
 - A function counts only when land.py proved it on main and the proof-check finds it REAL [by land.py; the proof-check].
 - The dashboard is dash.py's output, never hand-made or edited; publish `dash/index.html` as an Artifact only if the Artifact tool exists (same file, same URL, at each drive.py exit), else give its path [by dash.py, run by drive.py every cycle].
+- A whole-tree check that fails on clean main too is never a function's attempt: the function waits, new builds and lands hold, and main gets one fix (a depfix-main-<check> to the owning module, or exit 3 for pure plan stubs); 3 functions failing one normalized reason in the window, or 2 dead depfixes in one module, are systemic [by drive.py via mainred.py; verdict.py shows `main red`, `systemic` and the `rate red` tripwire against the expected rate and [harness] min_rate_per_hour].
 
 ## Scaling
 Big projects keep every contract and scale two ways. More parallel builders: give each function its own files (FUNCTIONS.md `files`, so one module's functions build at once) and raise `[harness] max_parallel` (default 6) while the VERDICT rate (proven per hour) rises with it; land.py lands one branch at a time, so builders past its landing rate only queue. More machines: each project's own commands in overhaul.toml may run anywhere (an ssh host, a build farm, CI) as long as each runs from the repo root and exits 0 for pass; drive.py, land.py, FUNCTIONS.md and the proof rule do not change.
