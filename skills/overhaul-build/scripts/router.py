@@ -32,7 +32,7 @@ Routes, at once (not at Exit 3):
   FREE_REQUEUES per function, then an ordinary attempt).
 - review_quality / other: the normal retry.
 
-Each one logs a `routed` event (`class=<c> -> <route>: <evidence>`). failures() counts the last 60 min per class for
+Each one logs a `routed` event (`class=<c> -> <route>: <evidence>`). Holds and releases log `route_hold` (not a failure). failures() counts the last 60 min per class for
 verdict.py and the dashboard; one class over 30 % of at least MIN_FAILS failures is the manager's bottleneck signal.
 
 Why (measured 2026-11-09 on the pilot project): 7 lands since 8 AM (0.85/h) against a 10/h floor; 32 failed attempts since
@@ -293,7 +293,7 @@ def on_failure(d, fid: str, reason: str) -> bool:
         record(d, fid, cls, route, reason)
         d.park(fid, f"router {cls}: {WORDS[cls]}; {HINT[cls]}: {reason}")
         return True
-    if cls == "load_flake" and int(rec.get("load_requeues", 0)) < FREE_REQUEUES:
+    if cls == "load_flake" and rec and int(rec.get("load_requeues", 0)) < FREE_REQUEUES:
         n = int(rec.get("load_requeues", 0)) + 1
         record(d, fid, cls, f"requeue, no attempt charged ({n} of {FREE_REQUEUES})", reason)
         if reason.startswith("land: ") and fid not in d.land_queue:
@@ -342,7 +342,7 @@ def on_depfix_settled(d, dfid: str, ok: bool) -> None:
         return
     for t in gone:
         doc["paused"].pop(t)
-        d.log(None, "routed", f"lands rerunning {t} released: {dfid} {'landed' if ok else 'failed'}")
+        d.log(None, "route_hold", f"lands rerunning {t} released: {dfid} {'landed' if ok else 'failed'}")
     save(ov, doc)
 
 
@@ -381,7 +381,7 @@ def hold_lands(d) -> None:
         if any(reruns(d, fid, p) for p in pauses):
             d.land_queue.remove(fid)
             keep.append(fid)
-            d.log(fid, "routed", "land held: it reruns a test that fails on clean main until that test's fix settles")
+            d.log(fid, "route_hold", "land held: it reruns a test that fails on clean main until that test's fix settles")
     if keep != doc["held"]:
         doc["held"] = keep
         save(ov, doc)
