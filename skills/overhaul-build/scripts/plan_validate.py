@@ -55,9 +55,15 @@ Problems (each is one line):
     [paths] patterns, a `ui:` row or a row whose entry names a [plan] interactive_verbs word that cites no pattern id,
     or a cited pattern id missing from its acceptance test's name and comments. [commands.acceptance_by] templates
     need {test}; [commands.extra] is name = command; [tiers] is name = [globs].
+  - X16 reuse before new: a module name or `Capability:` matching another module's `Forbidden types:` stems (globs,
+    word by word), a stem on two modules, a new module (a `Why new:` line, or absent at git ref [plan] owners_since)
+    with no reason; spec/ROADMAP.md ([paths] roadmap, optional) `| phase | behaviour | owner | why new |` rows: a bad
+    phase, an empty behaviour or owner, an owner not in ARCHITECTURE (new) with no why-new on any row or matching
+    another owner's stems, a phase over max_phase_size rows.
 Python standard library only.
 """
 import argparse
+import fnmatch
 import os
 import re
 import signal
@@ -93,6 +99,7 @@ SERIAL = re.compile(r"single[- ]threaded|serial", re.I)
 RUFF_STRICT = ("E", "W", "F", "I", "B", "UP", "SIM", "RUF", "ARG", "A", "ANN201", "PLR0915")
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ACCEPT = re.compile(r"^tests/acceptance/[\w./-]+\.(py|rs)(::[A-Za-z_]\w*)+$")
+OWNER_LINE = re.compile(r"^[\s>*-]*\**\s*(forbidden[ _-]types|why[ _-]new|capability)\s*\**\s*:\s*(.*)$", re.I)
 NO_ENTRY = {"", "-", "--", "none", "n/a", "na", "tbd", "todo", "?"}
 SEPARATOR = re.compile(r"^:?-+:?$")
 STUB_COLUMNS = ("files", "needs")  # required beside COLUMNS, in any order after them
@@ -225,7 +232,8 @@ def parse_architecture(text):
         m = re.match(r"^##\s+Module\s*:?\s+(\S+)", line, re.I)
         if m:
             cur = mods.setdefault(m.group(1).strip("`:*"), {"paths": None, "deps": None, "line": n,
-                                                          "public": None, "api": []})
+                                                          "public": None, "api": [], "stems": [], "why": None,
+                                                          "capability": ""})
             continue
         if re.match(r"^#{1,2}\s", line):
             cur = None
@@ -233,6 +241,16 @@ def parse_architecture(text):
             continue
         if re.match(r"^\s*[-*]\s+`", line):
             cur["api"].append((n, line.strip()))
+        m = OWNER_LINE.match(line)
+        if m:  # X16: the type stems only this owner may define, why no existing owner fits, what it does
+            key, rest = m.group(1).lower(), re.sub(r"^\*\*\s*", "", m.group(2).strip())  # `**X:** a`: drop the bold close
+            if key.startswith("forbidden"):
+                cur["stems"] += [x.strip("`\"' ") for x in re.split(r"[,;\s]+", rest.strip("[]")) if x.strip("`\"' ")]
+            elif key.startswith("why"):
+                cur["why"] = "" if rest.lower() in NO_ENTRY else rest
+            else:
+                cur["capability"] = rest
+            continue
         m = re.match(r"^[\s>*-]*\**\s*(Paths|Depends on|Public)\s*:\s*\**\s*(.*)$", line, re.I)
         if m:
             items = [x.strip().strip("`").strip() for x in re.split(r"[,;]", m.group(2).strip().strip("*")) if x.strip().strip("`").strip()]
@@ -778,6 +796,170 @@ def check_reuse(mods, rules, problems, alabel):
                                 f"is not on the Public line; add it there")
 
 
+WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+ROADMAP_COLUMNS = ("phase", "behaviour", "owner", "why new")
+
+
+def words(text):
+    """Lower-case words of a name or sentence: snake_case, kebab-case, CamelCase and a::b all split."""
+    return [w.lower() for w in WORD.findall(text or "")]
+
+
+def stem_hits(stems, text, whole=False):
+    """The stems that `text` matches, case and punctuation ignored, word by word: `*CommandStack*` matches the words
+    `command stack`, `*Compar*` (trailing *) also `compare`, `Instance` only the word `instance`. With `whole` (an
+    owner name) only its last `::`, `.` or `/` segment counts: `app-kernel::mesh` is a mesh owner."""
+    ws = words(re.split(r"::|[./]", text or "")[-1] if whole else text)
+    out = []
+    for stem in stems:
+        core, prefix = words(re.sub(r"[*?]", " ", stem)), stem.rstrip().endswith(("*", "?"))
+        k = len(core)
+        for i in range(len(ws) - k + 1) if core else ():
+            run = ws[i:i + k]
+            if run[:-1] == core[:-1] and (run[-1].startswith(core[-1]) if prefix else run[-1] == core[-1]):
+                out.append(stem)
+                break
+    return out
+
+
+def stem_problems(owners, name, texts, where):
+    """X16: `name` and each capability text against every OTHER owner's forbidden type stems."""
+    out = []
+    for other, stems in owners.items():
+        if other == name or not stems:
+            continue
+        hits = stem_hits(stems, name, whole=True)
+        for t in texts:
+            hits += [s for s in stem_hits(stems, t) if s not in hits]
+        if hits:
+            out.append(f"{where}: matches module {other}'s forbidden types {', '.join(hits)}; extend {other} "
+                       "instead of a new owner (X16 reuse before new)")
+    return out
+
+
+def check_stems(mods, problems, alabel):
+    """Forbidden types stems across all owners: each stem has one owner, and no module's name or Capability matches
+    another owner's stems (a second home for the same thing)."""
+    if not mods:
+        return
+    first = {}
+    for name, m in mods.items():
+        for stem in m.get("stems", []):
+            key = stem.lower()
+            if key in first and first[key] != name:
+                problems.append(f"{alabel}:{m['line']} module {name}: forbidden type {stem} is also module "
+                                f"{first[key]}'s; give each stem one owner")
+            first.setdefault(key, name)
+    owners = {k: v.get("stems", []) for k, v in mods.items()}
+    for name, m in mods.items():
+        problems += stem_problems(owners, name, [m.get("capability", "")], f"{alabel}:{m['line']} module {name}")
+
+
+def baseline_modules(repo, ref, apath, problems):
+    """The ARCHITECTURE modules at git `ref` ([plan] owners_since), or None when it cannot be read."""
+    try:
+        p = subprocess.run(["git", "show", f"{ref}:{apath}"], cwd=str(repo), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        problems.append(f"overhaul.toml: [plan] owners_since {ref!r}: git failed ({e})")
+        return None
+    if p.returncode:
+        problems.append(f"overhaul.toml: [plan] owners_since {ref!r}: cannot read {apath} there "
+                        f"({(p.stderr or '').strip()[:100]})")
+        return None
+    return parse_architecture(p.stdout)
+
+
+def check_new_owners(repo, cfg, mods, problems, alabel):
+    """X16: a new owner needs a one-line `Why new:` reason. A module is new when it has a `Why new:` line, or when
+    [plan] owners_since names a git ref whose ARCHITECTURE lacks it."""
+    if not mods:
+        return
+    ref = (cfg.get("plan") or {}).get("owners_since")
+    old = baseline_modules(repo, str(ref), alabel, problems) if ref else None
+    for name, m in mods.items():
+        new = m.get("why") is not None or (old is not None and name not in old)
+        if new and not m.get("why"):
+            problems.append(f"{alabel}:{m['line']} module {name}: a new owner needs a `Why new: <one line>` reason no "
+                            "existing owner fits (X16)")
+
+
+def roadmap_header(line):
+    """The ROADMAP column names when `line` is its table header, else None."""
+    if not line.lstrip().startswith("|"):
+        return None
+    head = [re.sub(r"[_-]", " ", bare(c).lower().strip("*")).replace("behavior", "behaviour") for c in cells(line)]
+    return head if all(c in head for c in ROADMAP_COLUMNS) else None
+
+
+def owner_name(cell):
+    """The owner module of a ROADMAP owner cell (`undo (C02)` -> undo)."""
+    m = re.match(r"[\w.:\-]+", bare(cell))
+    return m.group(0) if m else ""
+
+
+def roadmap_rows(lines, rel, problems):
+    """[(line, {column: cell})] of every ROADMAP table."""
+    rows = []
+    for i, line in enumerate(lines):
+        head = roadmap_header(line)
+        if not head:
+            continue
+        for n in range(i + 1, len(lines)):
+            if not lines[n].lstrip().startswith("|"):
+                break
+            c = cells(lines[n])
+            if all(SEPARATOR.match(x) for x in c):
+                continue
+            if len(c) != len(head):
+                problems.append(f"{rel}:{n + 1}: row has {len(c)} cells, want {len(head)}")
+                continue
+            rows.append((n + 1, dict(zip(head, c))))
+    return rows
+
+
+def check_roadmap(repo, cfg, paths, mods, problems):
+    """spec/ROADMAP.md (optional): the later-phase rows of a rolling plan, `| phase | behaviour | owner | why new |`.
+    Each row names an owner; an owner not in ARCHITECTURE is new and needs a why-new reason on one of its rows, and
+    its name and behaviours must not match another owner's forbidden type stems; each phase holds at most
+    [plan] max_phase_size rows."""
+    rel = paths.get("roadmap") or "spec/ROADMAP.md"
+    f = Path(repo) / rel
+    if not f.is_file():
+        return
+    rows = roadmap_rows(f.read_text(encoding="utf-8", errors="replace").splitlines(), rel, problems)
+    if not rows:
+        problems.append(f"{rel}: no table with the header | {' | '.join(ROADMAP_COLUMNS)} |")
+        return
+    mods = mods or {}
+    owners = {k: v.get("stems", []) for k, v in mods.items()}
+    new, sizes = {}, {}
+    for n, r in rows:
+        ph, owner = bare(r["phase"]), owner_name(r["owner"])
+        if not re.fullmatch(r"[1-9]\d*", ph):
+            problems.append(f"{rel}:{n}: malformed phase {r['phase']!r} (want an integer from 1)")
+        else:
+            sizes[int(ph)] = sizes.get(int(ph), 0) + 1
+        if bare(r["behaviour"]).lower() in NO_ENTRY:
+            problems.append(f"{rel}:{n}: empty behaviour")
+        if not owner:
+            problems.append(f"{rel}:{n}: empty owner; name the ARCHITECTURE owner it extends (X16)")
+        elif owner not in mods:
+            d = new.setdefault(owner, {"line": n, "why": False, "texts": []})
+            d["why"] |= bare(r["why new"]).lower() not in NO_ENTRY
+            d["texts"].append(bare(r["behaviour"]))
+    for owner, d in new.items():
+        where = f"{rel}:{d['line']} owner {owner}"
+        if not d["why"]:
+            problems.append(f"{where}: is not in ARCHITECTURE, so it is a new owner and needs a why-new reason no "
+                            "existing owner fits (X16)")
+        problems += stem_problems(owners, owner, d["texts"], where)
+    limit = int((cfg.get("plan") or {}).get("max_phase_size") or MAX_PHASE_SIZE)
+    for ph, k in sorted(sizes.items()):
+        if k > limit:
+            problems.append(f"{rel}: phase {ph} has {k} rows > max_phase_size {limit}; split it into more phases")
+
+
 def policy_lists(cfg, problems):
     """[plan] policy_lists = {name = test-name regex}: more Policies id lists (`Cancellable:` -> `cancel`)."""
     raw = (cfg.get("plan") or {}).get("policy_lists")
@@ -1138,6 +1320,9 @@ def validate(repo, run=False, timeout=600, notes=None):
         if not mods:
             problems.append(f"{paths['architecture']}: no `## Module <name>` sections")
         check_architecture(mods, problems, paths["architecture"])
+        check_stems(mods, problems, paths["architecture"])
+        check_new_owners(repo, cfg, mods, problems, paths["architecture"])
+    check_roadmap(repo, cfg, paths, mods, problems)
 
     fun_file, rows, every = repo / paths["functions"], [], []
     checks = plan_checks(cfg, problems)
