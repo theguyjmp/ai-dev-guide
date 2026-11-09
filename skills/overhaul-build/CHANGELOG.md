@@ -1,6 +1,8 @@
 # overhaul-build changelog
 
 ## Main guard, 2026-11-09
+- Per commit, not per range: a commit whose subject starts with `plan` or `m0` may also add code (new files,
+  added lines: the stubs and module skeletons overhaul-plan writes), never change or delete an existing line.
 - guard/reference-transaction, installed by drive.py into the repo's git hooks at every start (shared by all
   worktrees): a ref update to main outside the harness is refused unless main moves forward and changes only spec/,
   tests/acceptance/, tests/property/, overhaul.toml, .github/workflows/ or dash/. Commits, ff-merges, `push .`,

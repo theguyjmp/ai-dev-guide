@@ -2,12 +2,14 @@
 # overhaul guard (owner 2026-11-09): main's code changes only through the harness (drive.py -> land.py).
 # drive.py installs it as hooks/reference-transaction in the repo's git dir at every start; git runs it for every ref update.
 # - Under the harness (OVERHAUL_HARNESS, set by drive.py and land.py and inherited by their children): allowed.
-# - Anyone else (the main chat, a manager, a side agent): main may only move forward, and only with plan data and
-#   configuration: spec/, tests/acceptance/, tests/property/, overhaul.toml, .github/workflows/, dash/.
-#   Code (crates/, src/, anything else), deleting main, or rewriting its history is refused.
+# - Anyone else (the main chat, a manager, a planner, a side agent): main may only move forward, and each new commit may
+#   change only plan data and configuration: spec/, tests/acceptance/, tests/property/, overhaul.toml,
+#   .github/workflows/, dash/. A plan commit (subject starting "plan" or "m0") may also ADD code (new files, added
+#   lines: stubs, skeletons, wiring of a new module), never change or delete an existing line of code.
 [ "$1" = "prepared" ] || exit 0
 [ -n "$OVERHAUL_HARNESS" ] && exit 0
 zero=0000000000000000000000000000000000000000
+plan_paths='^(spec/|tests/acceptance/|tests/property/|overhaul\.toml$|\.github/workflows/|dash/)'
 rc=0
 while read -r old new ref; do
   # commits, merges and resets on a checked-out main are reported as refs/heads/main; HEAD lines are branch switches
@@ -19,12 +21,21 @@ while read -r old new ref; do
   if ! git merge-base --is-ancestor "$old" "$new" 2>/dev/null; then
     echo "overhaul guard: main may only move forward (no reset, rebase or force)" >&2; rc=1; continue
   fi
-  bad=$(git diff --name-only "$old" "$new" | grep -v -E '^(spec/|tests/acceptance/|tests/property/|overhaul\.toml$|\.github/workflows/|dash/)')
-  if [ -n "$bad" ]; then
-    echo "overhaul guard: main's code changes only through drive.py/land.py. Refused paths:" >&2
-    echo "$bad" | head -10 >&2
-    echo "Route the change through the harness (a FUNCTIONS row and drive.py --reset, or a plan fix after PLAN OK)." >&2
-    rc=1
-  fi
+  for c in $(git rev-list --reverse "$old..$new"); do
+    subj=$(git log -1 --format=%s "$c")
+    plan=0; case "$subj" in plan*|m0*) plan=1 ;; esac
+    # added<TAB>deleted<TAB>path against the first parent; binary files show "-"
+    bad=$(git diff --numstat "$c^1" "$c" 2>/dev/null | while IFS='	' read -r a d p; do
+      echo "$p" | grep -q -E "$plan_paths" && continue
+      if [ "$plan" = 1 ] && [ "$d" = "0" ]; then continue; fi
+      echo "$p (+$a -$d)"
+    done)
+    if [ -n "$bad" ]; then
+      echo "overhaul guard: commit $(git rev-parse --short "$c") \"$subj\" changes code outside drive.py/land.py:" >&2
+      echo "$bad" | head -10 >&2
+      echo "Code reaches main through a FUNCTIONS row built by drive.py; a plan commit may only add stubs." >&2
+      rc=1
+    fi
+  done
 done
 exit $rc

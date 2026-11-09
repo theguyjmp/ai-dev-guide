@@ -55,6 +55,21 @@ class MainGuard(unittest.TestCase):
         self.assertEqual(run(self.r, "commit", "-qam", "plan edit").returncode, 0)
         self.assertEqual(subject(self.r), "plan edit")
 
+    def test_plan_commit_may_add_stubs_but_never_change_code(self):
+        (self.r / "crates" / "new.rs").write_text("pub fn f() { todo!() }\n")
+        with open(self.r / "crates" / "x.rs", "a") as fh:
+            fh.write("mod new;\n")
+        run(self.r, "add", ".")
+        self.assertEqual(run(self.r, "commit", "-qm", "plan: S99 stub").returncode, 0)
+        self.assertEqual(subject(self.r), "plan: S99 stub")
+        (self.r / "crates" / "x.rs").write_text("changed\n")
+        self.assertNotEqual(run(self.r, "commit", "-qam", "plan: S99 rewrite").returncode, 0)
+        self.assertEqual(subject(self.r), "plan: S99 stub")
+        run(self.r, "checkout", "-q", "--", ".")
+        (self.r / "crates" / "other.rs").write_text("pub fn g() {}\n")
+        run(self.r, "add", ".")
+        self.assertNotEqual(run(self.r, "commit", "-qm", "wire it").returncode, 0)
+
     def test_code_reaches_main_only_through_the_harness(self):
         (self.r / "crates" / "x.rs").write_text("x\ny\n")
         self.assertNotEqual(run(self.r, "commit", "-qam", "code").returncode, 0)
