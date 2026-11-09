@@ -83,7 +83,7 @@ class TierRecoveredTest(unittest.TestCase):
     def recover(self, bad, results):
         calls = []
 
-        def fake_run(cmd, cwd, out_path, timeout, level=priority.NORMAL):
+        def fake_run(cmd, cwd, out_path, timeout, level=priority.NORMAL, label=""):
             calls.append((cmd, level))
             return results.pop(0), "tail"
         with tempfile.TemporaryDirectory() as d, mock.patch.object(land, "run", fake_run), \
