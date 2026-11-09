@@ -14,6 +14,7 @@ ap.add_argument("--fn", required=True)
 ap.add_argument("--main", default="main")
 ap.add_argument("--polish", action="store_true")
 ap.add_argument("--stack", default="")
+ap.add_argument("--parallel", action="store_true")
 ap.add_argument("--target-dir", default="")
 a = ap.parse_args()
 repo = Path(a.repo)
@@ -61,6 +62,12 @@ try:
         why = (f"main flake: test=tests/acceptance/test_f1.py::test_add path=src/alpha/f1.py module=alpha fails on "
                f"clean main 0123456789ab too (run 1/3); on the merged tree: regression: proven F1")
         log("land_fail", why)
+        print(why)
+        sys.exit(1)
+    if mode == "timeout":  # over [harness] land_timeout_min: land.py's land_timeout line and reason
+        why = ("land timeout: over 20 min ([harness] land_timeout_min); slowest test "
+               "tests/acceptance/test_f1.py::test_add (1500s): split it or move it to [harness] heavy_tests")
+        log("land_timeout", why)
         print(why)
         sys.exit(1)
     if mode == "die":  # exits without writing its own log line

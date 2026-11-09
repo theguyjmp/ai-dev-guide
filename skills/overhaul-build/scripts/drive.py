@@ -6,7 +6,9 @@ its own) gets a worktree at .overhaul/wt/<id> on fn/<id> from main, a brief from
 builder. A dep marked `stub` in the FUNCTIONS.md `needs` column does not block: the plan commit landed its interface
 stub, so the dependent builds against that contract at once. A finished build merges main into its branch and reruns
 the gate in its worktree (a conflict there goes to the conflict-fix pass), then gets a blind reviewer; a PASS goes to
-land.py. Lands whose footprints do not overlap run at once, the later ones stacked on the earlier (land.py --stack). A failure retries from main
+land.py. Up to [harness] land_parallel lands whose footprints (files, owning and touched modules) do not overlap run at once
+(land.py --parallel: each gates on main outside the lock, commits under it, and re-gates only what newly landed work
+affects). A land over [harness] land_timeout_min is requeued once uncharged, then fails. A failure retries from main
 with its reason in the brief, then parks the function as needs-plan for the manager. A land.py
 "merge conflict" is not an attempt: a conflict-fix builder pass merges main into the same worktree
 and branch (templates/conflict-brief.md, [limits] conflict_retries per attempt), then the function
@@ -670,7 +672,9 @@ class Driver(mainred.MainRed):
         self.repo, self.cfg = repo, cfg
         # [harness] max_parallel, else the older [limits] key, else 6
         self.max_parallel = max(1, int(har.get("max_parallel") or lim.get("max_parallel") or 6))
-        self.max_lands = max(1, int(har.get("max_lands") or 3))  # lands at once; overlapping footprints never
+        # [harness] land_parallel (the older max_lands): lands at once; overlapping footprints never
+        self.max_lands = max(1, int(har.get("land_parallel") or har.get("max_lands") or 3))
+        self.land_timeout_s = float(har.get("land_timeout_min", land_mod.LAND_TIMEOUT_MIN) or 0) * 60
         self.max_calls = int(lim["builder_max_calls"])
         self.max_tokens = int(lim["brief_max_tokens"])
         self.retries = int(lim["retries_per_function"])
@@ -702,7 +706,7 @@ class Driver(mainred.MainRed):
         self.jobs: dict[str, Job] = {}
         self.land_queue: list[str] = []
         self.land_job: Job | None = None
-        self.side_lands: dict[str, Job] = {}  # lands stacked on the ones in flight (land.py --stack)
+        self.side_lands: dict[str, Job] = {}  # lands started beside the one in flight (land.py --parallel)
         self.slots: dict[str, int] = {}  # fid -> k of the CARGO_TARGET_DIR .overhaul/target/slot-<k> it reuses
         self.flake_tests: set[str] = set()  # main-flake tests already sent to a fix this run (one fix per test)
         self.barrier = bool(har.get("phase_barrier", True))  # phase N+1 waits until every phase <=N is proven
@@ -1709,39 +1713,54 @@ class Driver(mainred.MainRed):
         changed = run(["git", "diff", "--name-only", f"{self.main}...fn/{fid}"], self.repo).stdout.split()
         return [*self.claims(self.fns[fid]), *changed]
 
+    def footprint_modules(self, fid: str, files: list[str]) -> set[str]:
+        """The land's modules: the function's own plus every module whose ARCHITECTURE Paths hold one of files."""
+        mods = {self.fns[fid].module} if fid in self.fns else set()
+        for m in dict.fromkeys(f.module for f in self.order):
+            if m not in mods and paths_overlap(files, module_paths(module_section(self.arch, m), m)):
+                mods.add(m)
+        return mods - {""}
+
+    def land_footprint(self, fid: str) -> tuple[list[str], set[str]]:
+        files = self.footprint(fid)
+        return files, self.footprint_modules(fid, files)
+
     def pump_land(self) -> bool:
-        """Start the next land. With none in flight it is a plain land under the lock. Otherwise the first queued
-        function whose footprint overlaps no in-flight land's starts stacked on them (land.py --stack): its gate
-        runs alongside theirs on main + their branches, and it commits right after them. Overlapping lands wait."""
+        """Start the next land (land.py --parallel): it gates on main outside the lock in its own worktree and
+        target dir, and takes the lock only to commit. Beside lands in flight (up to [harness] land_parallel) only
+        the first queued function whose footprint (files and modules) overlaps none of theirs starts; when it
+        commits after them it re-merges main and reruns only what their landed footprints affect."""
         flying = self.land_jobs()
         if (not self.land_queue or len(flying) >= self.max_lands or any(j.kind != "land" for j in flying)
                 or self.st.get("main_red")):
             return False
         fid = self.land_queue[0]
         if flying:
-            taken = [self.footprint(j.fn) for j in flying]
-            fid = next((q for q in self.land_queue
-                        if not any(paths_overlap(self.footprint(q), t) for t in taken)), "")
+            taken = [self.land_footprint(j.fn) for j in flying]
+
+            def clear(q: str) -> bool:
+                files, mods = self.land_footprint(q)
+                return not any(paths_overlap(files, tf) or mods & tm for tf, tm in taken)
+            fid = next((q for q in self.land_queue if clear(q)), "")
             if not fid:
                 return False
         self.land_queue.remove(fid)
         out = self.ov / "runs" / f"{fid}-a{self.st['functions'][fid]['attempts'] + 1}-land.out"
         # land.py takes .overhaul/lock itself (a stacked land only to commit), so drive.py holds nothing meanwhile.
         cmd = [sys.executable, str(self.scripts / "land.py"), "--repo", str(self.repo), "--fn", fid,
-               "--main", self.main]
-        if flying:
-            cmd += ["--stack", ",".join(j.fn for j in flying)]
+               "--main", self.main, "--parallel"]
         used = {j.slot for j in flying}
         k = next(i for i in range(len(used) + 1) if i not in used)
         cmd += ["--target-dir", str(self.ov / "target" / f"land-{k}")]  # one per concurrent land, reused
         log = self.ov / "log.jsonl"
         log_at = log.stat().st_size if log.exists() else 0
         start = time.monotonic()
-        job = Job(fid, "land", spawn(cmd, self.repo, out), out, start, start + 2 * self.timeout_s, 0, log_at=log_at,
-                  slot=k)
+        # land.py stops itself at land_timeout_min (lock waits excluded); this is the backstop for a hung land
+        limit = max(2 * self.timeout_s, 2 * self.land_timeout_s + 600)
+        job = Job(fid, "land", spawn(cmd, self.repo, out), out, start, start + limit, 0, log_at=log_at, slot=k)
         if flying:
             self.side_lands[fid] = job
-            self.log(fid, "land_stacked", f"on {', '.join(j.fn for j in flying)}")
+            self.log(fid, "land_parallel", f"beside {', '.join(j.fn for j in flying)}")
         else:
             self.land_job = job
         return True
@@ -1766,12 +1785,28 @@ class Driver(mainred.MainRed):
             self.log(fid, "land_fail", reason, secs)
         if reason.startswith(land_mod.MAIN_FLAKE) and self.main_flake(fid, reason):
             return  # a test that fails on clean main too: its owner gets a fix, the function lands after it
+        if reason.startswith(land_mod.LAND_TIMEOUT) and self.land_timed_out(fid, reason):
+            return
         if GREEN_BEFORE in reason:
             self.park(fid, f"land: {reason}")
         elif CONFLICT in reason.lower() and self.start_conflict(fid, reason):
             return  # main moved under the branch: a conflict-fix pass, not an attempt
         else:
             self.fail(fid, f"land: {reason}")
+
+    def land_timed_out(self, fid: str, reason: str) -> bool:
+        """land.py stopped at [harness] land_timeout_min. The first time the function is not charged an attempt: it
+        goes back to the land queue (its land_timeout event names the slowest test, for the plan to split it or move
+        it to [harness] heavy_tests). False from the second on: an ordinary failure."""
+        n = int(self.st["functions"][fid].get("land_timeouts", 0)) + 1
+        self.set(fid, land_timeouts=n, last_reason=reason[:REASON_MAX])
+        if n > 1:
+            return False
+        self.set(fid, status="landing")
+        self.say(f"{fid} land timed out (not charged, requeued): {reason}")
+        if fid not in self.land_queue:
+            self.land_queue.append(fid)
+        return True
 
     def land_logged(self, fid: str, since: int) -> bool:
         """Whether land.py itself appended a land_ok or land_fail line for `fid` after byte offset `since`."""
@@ -1786,7 +1821,8 @@ class Driver(mainred.MainRed):
                 rec = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(rec, dict) and rec.get("fn") == fid and rec.get("event") in ("land_ok", "land_fail"):
+            if isinstance(rec, dict) and rec.get("fn") == fid and rec.get("event") in ("land_ok", "land_fail",
+                                                                                       "land_timeout"):
                 return True
         return False
 
