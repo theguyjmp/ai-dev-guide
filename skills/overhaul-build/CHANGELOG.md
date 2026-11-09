@@ -1,5 +1,32 @@
 # overhaul-build changelog
 
+## Lean workers, 2026-11-09
+Measured on the pilot project (24 h to 16:48): the first API call of every worker session carried 34.6k to 37.9k tokens
+(median 37.5k) of fixed context before the worker read anything: the coordinator's global CLAUDE.md, auto-memory,
+the skills list and every MCP server's tools. That fixed context times each session's calls was 48% of the
+1,455 M replayed context tokens. A GPU gate's ssh also hung a worker for 43 min unseen, because drive.py only
+waited on a blind subprocess with a flat 30-min deadline.
+- worker.py (new): lean flags for every claude worker drive.py starts (builder, conflict, reviewer, verifier,
+  polish fix, polish and arch audit) and for supervise.py's plan-fix, integrator and proof-check agents:
+  `--tools` by role, `--mcp-config '{"mcpServers":{}}' --strict-mcp-config`, `--setting-sources project,local`
+  (the worktree lint hook still loads), `--disable-slash-commands`, env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 and
+  CLAUDE_CODE_DISABLE_AUTO_MEMORY=1. A flag the installed `claude --help` does not list is left out. A custom
+  worker_cmd is unchanged. Measured on a scratch clone of app-rebuild, opus, the same edit + `cargo build -p
+  app-core` + commit brief: first-call context 36,279 -> 7,537 tokens (-79%), whole session 190k -> 32k
+  tokens, 35 -> 6 tools, 2 -> 0 MCP servers, 80 -> 0 skills and commands; cache_read non-zero from call 2 on
+  (7,535, 7,710, 8,284). The worker still edited, built and committed.
+- drive.py runs claude workers with `--output-format stream-json --verbose` and reads each run's events as they
+  arrive (worker.Stream): `.overhaul/runs/<run>.progress` holds the last event age, turns, tokens so far, first-call
+  context and last tool. A worker with no event for `[harness] worker_idle_min` (default 10, 0 = off) is killed
+  and logged as a `timeout` event naming its last tool (e.g. `last tool Bash: ssh gpu-box ...`); the builder's
+  retry reason says so. builder_timeout_min stays as the hard cap.
+- read_result reads the stream's final `result` event (the same object `--output-format json` wrote); a stream
+  killed before it gets its tokens and turns counted from the stream. dash.py and verdict.py read log.jsonl only
+  and are unchanged; the new `timeout` event is additive.
+- Tests: tests/test_lean_workers.py (9): the lean flags on every worker kind, tools by role, a missing flag left
+  out, lean env only for lean commands, worker_idle_min from overhaul.toml, a stalled fake stream killed with its
+  last tool named, a finished stream never stalled, the idle clock, and a stream-json toy run that lands.
+
 ## Supervisor, 2026-11-09
 Measured on the pilot project vc5: the build sat at 44 proven for 4+ hours. drive.py was fine; everything around it was run by
 hand and failed: a bash launcher ran ONE serial headless manager per exit 3 (25+ min, one function at a time);

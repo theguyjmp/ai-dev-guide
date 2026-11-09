@@ -43,6 +43,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import drive  # noqa: E402
 import memcap  # noqa: E402
+import worker  # noqa: E402
 
 PROOF_BRIEF = HERE.parent / "references" / "proof-check.md"
 PLAN_SKILL = HERE.parent.parent / "overhaul-plan"
@@ -129,7 +130,7 @@ class Supervisor:
         try:
             with open(out, "wb") as fo:
                 p = subprocess.run(cmd, check=False, cwd=cwd or self.repo, stdin=subprocess.DEVNULL, stdout=fo,
-                                   stderr=subprocess.STDOUT, env=self.env(), timeout=timeout)
+                                   stderr=subprocess.STDOUT, env=worker.env(cmd, self.env()), timeout=timeout)
         except FileNotFoundError as e:
             raise Stop(f"cannot start {cmd[0]}: {e}") from e
         except subprocess.TimeoutExpired:
@@ -259,10 +260,10 @@ class Supervisor:
         while waiting or running:
             while waiting and len(running) < self.parallel:
                 tag, cwd, brief, out, model = waiting.pop(0)
-                cmd = [*base, "-p", "--dangerously-skip-permissions", "--output-format", "json", "--model", model,
-                       f"Read and do {brief.as_posix()}"]
+                cmd = [*base, "-p", "--dangerously-skip-permissions", "--output-format", "json",
+                       *worker.lean_flags(base[0], "build"), "--model", model, f"Read and do {brief.as_posix()}"]
                 try:
-                    proc = drive.spawn(cmd, cwd, out, self.env())
+                    proc = drive.spawn(cmd, cwd, out, worker.env(cmd, self.env()))
                 except OSError as e:
                     raise Stop(f"cannot start claude for {tag}: {e}") from e
                 running.append((tag, proc, time.monotonic() + self.agent_timeout_s))
@@ -357,8 +358,10 @@ class Supervisor:
 
     def proof_pass(self, only: str, out: Path) -> str:
         out.unlink(missing_ok=True)
-        cmd = [*self.claude(), "-p", "--dangerously-skip-permissions", "--output-format", "json", "--model",
-               self.proof_model, f"Read and do {PROOF_BRIEF.as_posix()} for repo {self.repo.as_posix()}{only}."]
+        base = self.claude()
+        cmd = [*base, "-p", "--dangerously-skip-permissions", "--output-format", "json",
+               *worker.lean_flags(base[0], "proof"), "--model", self.proof_model,
+               f"Read and do {PROOF_BRIEF.as_posix()} for repo {self.repo.as_posix()}{only}."]
         self.log("proof-check start" + (f" (only {only[7:]})" if only else ""))
         code, _ = self.run(cmd, self.ov / "supervise" / "proof-check.json", timeout=self.agent_timeout_s * 4)
         line = first_line(drive.read_text(out))
