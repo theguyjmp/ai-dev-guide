@@ -1,0 +1,30 @@
+#!/bin/sh
+# overhaul guard (owner 2026-11-09): main's code changes only through the harness (drive.py -> land.py).
+# drive.py installs it as hooks/reference-transaction in the repo's git dir at every start; git runs it for every ref update.
+# - Under the harness (OVERHAUL_HARNESS, set by drive.py and land.py and inherited by their children): allowed.
+# - Anyone else (the main chat, a manager, a side agent): main may only move forward, and only with plan data and
+#   configuration: spec/, tests/acceptance/, tests/property/, overhaul.toml, .github/workflows/, dash/.
+#   Code (crates/, src/, anything else), deleting main, or rewriting its history is refused.
+[ "$1" = "prepared" ] || exit 0
+[ -n "$OVERHAUL_HARNESS" ] && exit 0
+zero=0000000000000000000000000000000000000000
+rc=0
+while read -r old new ref; do
+  # commits, merges and resets on a checked-out main are reported as refs/heads/main; HEAD lines are branch switches
+  [ "$ref" = "refs/heads/main" ] || continue
+  case "$new" in ref:*) continue ;; esac
+  # some commands (branch -f, update-ref without old value) pass zeros: use main's current value
+  if [ "$old" = "$zero" ]; then old=$(git rev-parse -q --verify refs/heads/main) || continue; fi
+  if [ "$new" = "$zero" ]; then echo "overhaul guard: deleting main is refused" >&2; rc=1; continue; fi
+  if ! git merge-base --is-ancestor "$old" "$new" 2>/dev/null; then
+    echo "overhaul guard: main may only move forward (no reset, rebase or force)" >&2; rc=1; continue
+  fi
+  bad=$(git diff --name-only "$old" "$new" | grep -v -E '^(spec/|tests/acceptance/|tests/property/|overhaul\.toml$|\.github/workflows/|dash/)')
+  if [ -n "$bad" ]; then
+    echo "overhaul guard: main's code changes only through drive.py/land.py. Refused paths:" >&2
+    echo "$bad" | head -10 >&2
+    echo "Route the change through the harness (a FUNCTIONS row and drive.py --reset, or a plan fix after PLAN OK)." >&2
+    rc=1
+  fi
+done
+exit $rc

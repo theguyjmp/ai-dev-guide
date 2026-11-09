@@ -50,6 +50,7 @@ import memcap  # noqa: E402  beside this script: [limits] proc_mem_gb
 import periodic  # noqa: E402  beside this script: [gates.periodic]
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
+os.environ.setdefault("OVERHAUL_HARNESS", "drive")  # the main guard (guard/reference-transaction) lets only the harness move main's code
 
 HERE = Path(os.path.abspath(__file__)).parent
 TEMPLATES = HERE / "templates"
@@ -1269,7 +1270,8 @@ class Driver:
         return k
 
     def slot_env(self, fid: str) -> dict[str, str]:
-        return {**os.environ, "CARGO_TARGET_DIR": str(self.ov / "target" / f"slot-{self.slot(fid)}")}
+        env = {k: v for k, v in os.environ.items() if k != "OVERHAUL_HARNESS"}  # builders never move main (the guard)
+        return {**env, "CARGO_TARGET_DIR": str(self.ov / "target" / f"slot-{self.slot(fid)}")}
 
     def sh(self, cmd: str, wt: Path, fid: str = "") -> subprocess.CompletedProcess[str] | None:
         """One gate command in a worktree, on fid's slot target dir; None on timeout."""
@@ -2625,6 +2627,20 @@ class Driver:
         self.say(f"marked proven {fid}")
 
 
+def install_guard(repo: Path) -> None:
+    """Install guard/reference-transaction into the repo's git hooks (shared by every worktree): outside the harness,
+    main may only move forward with plan data and configuration (spec/, tests/acceptance/, overhaul.toml, ...)."""
+    src = HERE / "guard" / "reference-transaction"
+    common = Path(git(repo, "rev-parse", "--git-common-dir").strip())
+    hooks = (common if common.is_absolute() else repo / common) / "hooks"
+    dst = hooks / "reference-transaction"
+    body = src.read_bytes()
+    if not dst.is_file() or dst.read_bytes() != body:
+        hooks.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(body)
+        dst.chmod(0o755)
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -2640,6 +2656,7 @@ def main(argv: list[str] | None = None) -> int:
     repo = Path(os.path.abspath(args.repo))
     try:
         drv = Driver(repo, load_config(repo))
+        install_guard(repo)
         drv.load()
         for fid in filter(None, (args.reset, args.mark_proven)):
             if fid not in drv.fns:

@@ -57,6 +57,7 @@ import anchors  # beside this script
 import memcap  # beside this script: [limits] proc_mem_gb
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
+os.environ.setdefault("OVERHAUL_HARNESS", "land")  # the main guard lets only the harness move main's code
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WHOLE_TREE = ("test", "lint", "dup", "literals", "shape", "cycles", "entry_lint")

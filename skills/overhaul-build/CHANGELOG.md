@@ -1,5 +1,13 @@
 # overhaul-build changelog
 
+## Main guard, 2026-11-09
+- guard/reference-transaction, installed by drive.py into the repo's git hooks at every start (shared by all
+  worktrees): a ref update to main outside the harness is refused unless main moves forward and changes only spec/,
+  tests/acceptance/, tests/property/, overhaul.toml, .github/workflows/ or dash/. Commits, ff-merges, `push .`,
+  update-ref, reset, `branch -f` and deleting main are all covered. drive.py and land.py set OVERHAUL_HARNESS;
+  slot_env drops it, so builders, polish agents and their checks cannot move main either. Reason: on 2026-11-09 a
+  coordinator side agent fast-forwarded code onto main outside land.py. Tests: tests/test_main_guard.py.
+
 ## Gates and memory cap, 2026-11-09
 - periodic.py: each gate keeps its own green (state `green: {gate: sha}`; an older state seeds it from last_green
   and from each gate's latest green run in log.jsonl). A red gate bisects over the lands since its own green, gates
