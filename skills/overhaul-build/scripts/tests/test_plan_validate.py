@@ -617,3 +617,19 @@ class StubsAndNeeds(Base):
     def test_a_row_without_a_stub_fails_validate(self):
         p = self.problems(self.make(table(R1, R2, r3(files="src/report_missing.py"))))
         self.assertTrue(self.has(p, "F003: stub file missing", "src/report_missing.py"), p)
+
+
+class PhaseSize(unittest.TestCase):
+    def test_a_phase_over_max_phase_size_is_a_problem(self):
+        rows = [{"ph": 1}] * 41 + [{"ph": 2}] * 3 + [{"ph": None}]
+        p = []
+        pv.check_phase_size(rows, {}, p, "F")
+        self.assertEqual(len(p), 1)
+        self.assertIn("phase 1 has 41 functions > max_phase_size 40", p[0])
+        p = []
+        pv.check_phase_size(rows, {"plan": {"max_phase_size": 2}}, p, "F")
+        self.assertEqual([x.split(";")[0] for x in p], ["F: phase 1 has 41 functions > max_phase_size 2",
+                                                        "F: phase 2 has 3 functions > max_phase_size 2"])
+        p = []
+        pv.check_phase_size(rows, {"plan": {"max_phase_size": 50}}, p, "F")
+        self.assertEqual(p, [])

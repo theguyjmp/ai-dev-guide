@@ -29,7 +29,8 @@ Problems (each is one line):
   - a row is malformed (cells, id, phase, deps, acceptance, status, duplicate id);
   - an acceptance file or its `def <test>` is missing;
   - a function's acceptance tests never invoke the exact entry its row names (entry_match.py);
-  - deps are unknown, point to a later phase, or form a cycle;
+  - deps are unknown, point to a later phase, or form a cycle; a phase holds more than [plan] max_phase_size
+    (default 40) functions;
   - the table lacks the required `files` or `needs` column; a malformed needs cell; an unproven row with no files
     cell, or whose stub files are missing, raise no NotImplementedError or do not import (every function lands an
     importable stub in the plan commit); the critical path counts only `behaviour` deps;
@@ -50,6 +51,10 @@ Problems (each is one line):
     inside `proptest!`; [probe] property_tests = false turns this off. With --run and a [commands].property template
     ({file} = the property file, {stem} its stem), a non-proven function's property file must FAIL and a proven one
     must PASS. Planned tests are anchors: land.py rejects a branch that modifies one (anchors.py).
+  - optional `rules` column (P07, S18; X12/X14): a cited id not defined in the [paths] patterns or standards file; with
+    [paths] patterns, a `ui:` row or a row whose entry names a [plan] interactive_verbs word that cites no pattern id,
+    or a cited pattern id missing from its acceptance test's name and comments. [commands.acceptance_by] templates
+    need {test}; [commands.extra] is name = command; [tiers] is name = [globs].
 Python standard library only.
 """
 import argparse
@@ -68,7 +73,8 @@ os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .propte
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 
 COLUMNS = ["id", "phase", "module", "deps", "entry", "acceptance", "status"]
-STATUSES = {"planned", "building", "review", "landing", "proven", "needs-plan"}
+STATUSES = {"planned", "building", "review", "landing", "proven", "needs-plan", "deferred"}
+DEFERRED = "deferred"  # planned later (rolling plan): id, phase, module, deps and entry are checked, nothing else
 COMMANDS = ["test", "acceptance", "lint", "dup", "literals", "shape", "cycles", "entry_lint"]
 POLICIES = ("concurrency", "persistence", "errors", "untrusted input", "retries")
 ID_LISTS = ("concurrent writers", "boundaries", "multi-store writes")
@@ -86,6 +92,7 @@ ACCEPT = re.compile(r"^tests/acceptance/[\w./-]+\.(py|rs)(::[A-Za-z_]\w*)+$")
 NO_ENTRY = {"", "-", "--", "none", "n/a", "na", "tbd", "todo", "?"}
 SEPARATOR = re.compile(r"^:?-+:?$")
 STUB_COLUMNS = ("files", "needs")  # required beside COLUMNS, in any order after them
+OPTIONAL_COLUMNS = ("rules",)  # allowed beside them: the project rule ids (P07, S18) a row must hold
 STUB_CHECK = """import importlib, sys
 bad = []
 for name in sys.argv[1:]:
@@ -125,8 +132,9 @@ def load_toml(path):
     return data
 
 
-def run_cmd(cmd, cwd, timeout):
-    """Run a shell command line from cwd; return (exit code, last output line). Kills the whole tree on timeout (code 124)."""
+def run_cmd(cmd, cwd, timeout, full=False):
+    """Run a shell command line from cwd; return (exit code, last output line), plus the whole output with `full`.
+    Kills the whole tree on timeout (code 124)."""
     kw = {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)} if os.name == "nt" else {"start_new_session": True}
     p = subprocess.Popen(cmd, shell=True, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", **kw)
@@ -141,7 +149,8 @@ def run_cmd(cmd, cwd, timeout):
         out, _ = p.communicate()
         code, out = 124, f"timed out after {timeout}s"
     lines = [x.strip() for x in (out or "").splitlines() if x.strip()]
-    return code, (lines[-1][:160] if lines else "")
+    tail = lines[-1][:160] if lines else ""
+    return (code, tail, out or "") if full else (code, tail)
 
 
 def cells(line):
@@ -156,19 +165,34 @@ def bare(cell):
     return cell.strip().strip("`").strip()
 
 
+def function_header(line):
+    """The lower-cased column names when `line` is a FUNCTIONS.md table header, else None."""
+    head = [bare(c).lower().strip("*") for c in cells(line)] if line.lstrip().startswith("|") else []
+    if (head and [c for c in head if c not in STUB_COLUMNS + OPTIONAL_COLUMNS] == COLUMNS
+            and all(head.count(c) <= 1 for c in STUB_COLUMNS + OPTIONAL_COLUMNS)):
+        # `files` (the function's own files: its stub, drive.py's lock) and `needs` (stub or behaviour per dep)
+        return head
+    return None
+
+
 def parse_functions(text, problems, label):
-    """Rows of the FUNCTIONS.md table as dicts (with `line`); malformed cell counts are reported and dropped."""
-    rows, header_at, lines, names = [], None, text.splitlines(), COLUMNS
-    for i, line in enumerate(lines):
-        head = [bare(c).lower().strip("*") for c in cells(line)] if line.lstrip().startswith("|") else []
-        if (head and [c for c in head if c not in STUB_COLUMNS] == COLUMNS
-                and all(head.count(c) <= 1 for c in STUB_COLUMNS)):
-            # `files` (the function's own files: its stub, drive.py's lock) and `needs` (stub or behaviour per dep)
-            header_at, names = i, head
-            break
-    if header_at is None:
+    """Rows of every FUNCTIONS.md table (one per phase is fine; drive.py reads them all) as dicts with `line`."""
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if function_header(line)]
+    if not starts:
         problems.append(f"{label}: no table with the header | {' | '.join(COLUMNS + list(STUB_COLUMNS))} |")
-        return rows
+        return []
+    rows = []
+    for i in starts:
+        rows += parse_table(lines, i, function_header(lines[i]), problems, label)
+    if not rows:
+        problems.append(f"{label}: no function rows")
+    return rows
+
+
+def parse_table(lines, header_at, names, problems, label):
+    """The rows of the one FUNCTIONS.md table whose header is on line index header_at."""
+    rows = []
     lacking = [c for c in STUB_COLUMNS if c not in names]
     if lacking:
         problems.append(f"{label}:{header_at + 1}: the table lacks the required column(s) {', '.join(lacking)}: "
@@ -176,8 +200,6 @@ def parse_functions(text, problems, label):
     i = header_at + 1
     if i < len(lines) and lines[i].lstrip().startswith("|") and all(SEPARATOR.match(c) for c in cells(lines[i])):
         i += 1
-    if i >= len(lines) or not lines[i].lstrip().startswith("|"):
-        problems.append(f"{label}: no function rows")
     for n in range(i, len(lines)):
         if not lines[n].lstrip().startswith("|"):
             break
@@ -331,7 +353,7 @@ def check_rows(rows, mods, repo, problems, flabel):
             problems.append(f"{where}: malformed module (empty)")
         elif mods is not None and module not in mods:
             problems.append(f"{where}: module {module!r} is not in ARCHITECTURE (has: {', '.join(sorted(mods)) or 'none'})")
-        elif mods is not None and mods[module]["paths"] and "files" in r:
+        elif mods is not None and mods[module]["paths"] and "files" in r and status != DEFERRED:
             for f in (bare(x) for x in re.split(r"[,;]", r["files"])):
                 if f not in ("", "-") and not any(f == p or (p.endswith("/") and f.startswith(p))
                                                   for p in mods[module]["paths"]):
@@ -351,8 +373,12 @@ def check_rows(rows, mods, repo, problems, flabel):
                 problems.append(f"{where}: dep {d} is unknown")
             elif r["ph"] is not None and phases[d] is not None and phases[d] > r["ph"]:
                 problems.append(f"{where}: dep {d} is in phase {phases[d]}, a later phase than {r['ph']}")
+            elif status != DEFERRED and bare(by_id[d]["status"]) == DEFERRED:
+                problems.append(f"{where}: dep {d} is deferred; defer {rid} too, or plan {d} now")
         if rid in by_id and by_id[rid] is r:
             graph[rid] = [d for d in deps if d in phases]
+        if status == DEFERRED:  # planned later: no files, stubs or tests yet
+            continue
         items = [bare(x) for x in r["acceptance"].split(";")]
         if not any(items):
             problems.append(f"{where}: no acceptance (want tests/acceptance/<f>.py::<test>)")
@@ -454,6 +480,93 @@ def check_stubs(rows, repo, problems, flabel, timeout=120):
         bad = ["import of the stubs timed out"]
     for ln in bad[:10]:
         problems.append(f"{flabel}: stub does not import: {ln[:200]}")
+
+
+MAX_PHASE_SIZE = 40
+
+
+TEST_ITEM = re.compile(r"^\s*(?:#\[|@|(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:def|fn)\s)")
+
+
+def test_block(text, name):
+    """The source of test `name` (a Python def or a Rust fn) with the comment, decorator and attribute lines just
+    above it, up to the next test item; '' if absent."""
+    lines = text.splitlines()
+    at = next((i for i, ln in enumerate(lines)
+               if re.match(rf"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:def|fn)\s+{re.escape(name)}\s*[(<]", ln)), None)
+    if at is None:
+        return ""
+    start = at
+    while start > 0 and re.match(r"^\s*(?:#|//|@)", lines[start - 1]):
+        start -= 1
+    end = next((i for i in range(at + 1, len(lines)) if TEST_ITEM.match(lines[i])), len(lines))
+    while end < len(lines) and end - 1 > at and re.match(r"^\s*(?:#(?!\[)|//)", lines[end - 1]):
+        end -= 1  # the comments just above the next item are that item's
+    return "\n".join(lines[start:end])
+
+
+def interactive_row(r, verbs):
+    """A row the patterns bind: its entry is `ui:` or names one of [plan] interactive_verbs as a word."""
+    entry = bare(r["entry"]).lower()
+    return entry.startswith("ui:") or any(re.search(rf"(?<![\w-]){re.escape(v.lower())}(?![\w-])", entry)
+                                          for v in verbs)
+
+
+def check_project_rules(rows, cfg, paths, repo, problems, flabel):
+    """The optional rules column (X12/X14): every cited id is defined in the [paths] patterns or standards file,
+    every interactive row names at least one pattern id, and each pattern id it names appears in its acceptance
+    test (name or comment). Off when neither the column nor [paths] patterns is set."""
+    files = {k: paths[k] for k in drive.RULE_PATHS if paths.get(k)}
+    if not files and not any(bare(r.get("rules", "")) not in ("", "-") for r in rows):
+        return
+    defs = {}
+    for key, rel in files.items():
+        f = repo / rel
+        if not f.is_file():
+            problems.append(f"overhaul.toml: [paths] {key} = {rel!r} is missing")
+            continue
+        defs[key] = drive.rule_defs(f.read_text(encoding="utf-8", errors="replace"))
+    known = {k for d in defs.values() for k in d}
+    pats = set(defs.get("patterns", {}))
+    verbs = [str(v) for v in ((cfg.get("plan") or {}).get("interactive_verbs") or []) if str(v).strip()]
+    for r in rows:
+        where = f"{flabel}:{r['line']} {bare(r['id'])}"
+        ids = list(dict.fromkeys(drive.RULE_ID.findall(r.get("rules", ""))))
+        if ids and not files:
+            problems.append(f"{where}: rules {', '.join(ids)} but overhaul.toml sets no [paths] patterns or standards")
+            continue
+        for rid in ids:
+            if defs and rid not in known:
+                problems.append(f"{where}: rule {rid} is not defined in {', '.join(files.values())}")
+        if "patterns" in defs and interactive_row(r, verbs) and not any(i in pats for i in ids):
+            problems.append(f"{where}: interactive row (entry {bare(r['entry'])!r}) names no pattern id in its "
+                            f"rules column; cite the {files['patterns']} ids its acceptance proves")
+        cited = [i for i in ids if i in pats]
+        if not cited or not r.get("tests"):
+            continue
+        blocks = []
+        for item, name in r["tests"]:
+            src = repo / item.split("::")[0]
+            blocks.append(test_block(src.read_text(encoding="utf-8", errors="replace"), name) if src.is_file() else "")
+        text = "\n".join(blocks)
+        for rid in cited:
+            if not re.search(rf"(?<![A-Za-z0-9]){re.escape(rid)}(?![0-9])", text, re.I):
+                problems.append(f"{where}: pattern {rid} does not appear in its acceptance test (name it in the "
+                                "test's name or a comment on the test that proves it)")
+
+
+def check_phase_size(rows, cfg, problems, flabel):
+    """At most [plan] max_phase_size (default 40) functions per phase: drive.py's phase barrier holds phase N+1
+    until every phase <=N function is proven, so a huge phase is one wide, late-failing batch."""
+    limit = int((cfg.get("plan") or {}).get("max_phase_size") or MAX_PHASE_SIZE)
+    sizes = {}
+    for r in rows:
+        if r.get("ph") is not None:
+            sizes[r["ph"]] = sizes.get(r["ph"], 0) + 1
+    for ph, n in sorted(sizes.items()):
+        if n > limit:
+            problems.append(f"{flabel}: phase {ph} has {n} functions > max_phase_size {limit}; split it into "
+                            "more phases, or set [plan] max_phase_size in overhaul.toml")
 
 
 def check_depth(rows, cfg, problems, flabel):
@@ -843,6 +956,20 @@ def validate(repo, run=False, timeout=600, notes=None):
     if "acceptance" in cmd and "{test}" not in cmd["acceptance"]:
         problems.append("overhaul.toml: [commands].acceptance has no {test} placeholder")
         cmd.pop("acceptance")
+    by = cmds.get("acceptance_by")
+    if by is not None and not isinstance(by, dict):
+        problems.append("overhaul.toml: [commands].acceptance_by must be a table of glob = template")
+    for glob, tmpl in (by.items() if isinstance(by, dict) else ()):
+        if not isinstance(tmpl, str) or "{test}" not in tmpl:
+            problems.append(f"overhaul.toml: [commands.acceptance_by] {glob!r} has no {{test}} placeholder")
+    extra = cmds.get("extra")
+    if extra is not None and not (isinstance(extra, dict) and all(isinstance(v, str) for v in extra.values())):
+        problems.append("overhaul.toml: [commands.extra] must be a table of name = command")
+    tiers = cfg.get("tiers")
+    if tiers is not None and not (isinstance(tiers, dict)
+                                  and all(isinstance(v, list) and all(isinstance(g, str) for g in v)
+                                          for v in tiers.values())):
+        problems.append("overhaul.toml: [tiers] must be a table of name = [test file globs]")
 
     arch_file = repo / paths["architecture"]
     mods = None
@@ -860,7 +987,10 @@ def validate(repo, run=False, timeout=600, notes=None):
     else:
         rows = parse_functions(fun_file.read_text(encoding="utf-8", errors="replace"), problems, paths["functions"])
         check_rows(rows, mods, repo, problems, paths["functions"])
+        every, rows = rows, [r for r in rows if r.get("st") != DEFERRED]  # deferred rows: check_rows only
         check_cargo_targets(rows, repo, problems, paths["functions"])
+        check_phase_size(rows, cfg, problems, paths["functions"])
+        check_project_rules(rows, cfg, paths, repo, problems, paths["functions"])
         problems += entry_match.entry_problems(
             repo, [r for r in rows if r["entry"].strip().strip("`").strip().lower() not in NO_ENTRY], paths["functions"])
         check_needs(rows, problems, paths["functions"])
@@ -870,7 +1000,8 @@ def validate(repo, run=False, timeout=600, notes=None):
         check_property(rows, cfg, repo, problems, paths["functions"])
         depth, width, _ = check_depth(rows, cfg, problems, paths["functions"])
         if notes is not None:
-            notes.append(f"{paths['functions']}: critical path {depth} functions, widest level {width}")
+            notes.append(f"{paths['functions']}: critical path {depth} functions, widest level {width}"
+                         + (f", {len(every) - len(rows)} deferred" if len(every) > len(rows) else ""))
     if arch_file.is_file():
         check_policies(arch_file.read_text(encoding="utf-8", errors="replace"), mods, rows, problems,
                        paths["architecture"])
@@ -892,15 +1023,18 @@ def validate(repo, run=False, timeout=600, notes=None):
                 problems.append(f"overhaul.toml: {k} command exited {code}" + (f": {tail}" if tail else ""))
 
     if run and "acceptance" in cmd:
-        for r in rows:
-            for item, name in r.get("tests", []):
-                node = f"{item.split('::')[0]}::{name}"  # {test} = the bare test name, {stem} = the file stem
-                code, tail = run_cmd(drive.land_mod.acceptance_cmds(cmd["acceptance"], [node])[0][1], repo, timeout)
-                where = f"{paths['functions']}:{r['line']} {r['rid']}"
-                if r["st"] == "proven" and code:
-                    problems.append(f"{where}: proven, but its acceptance {item} FAILS (exit {code})" + (f": {tail}" if tail else ""))
-                elif r["st"] != "proven" and r["st"] in STATUSES and not code:
-                    problems.append(f"{where}: {r['st']}, but its acceptance {item} already PASSES (it must be red before the build)")
+        tests = [(r, item, f"{item.split('::')[0]}::{name}") for r in rows for item, name in r.get("tests", [])]
+        # one command per test target ({test} = the bare test name, {stem} = the file stem), mapped back to ids
+        acc = drive.land_mod.acceptance_template({**cmds, "acceptance": cmd["acceptance"]})
+        res = drive.land_mod.batch_results(acc, [node for _, _, node in tests],
+                                           lambda c: run_cmd(c, repo, timeout, full=True))
+        for r, item, node in tests:
+            code, tail, _ = res[node]
+            where = f"{paths['functions']}:{r['line']} {r['rid']}"
+            if r["st"] == "proven" and code:
+                problems.append(f"{where}: proven, but its acceptance {item} FAILS (exit {code})" + (f": {tail}" if tail else ""))
+            elif r["st"] != "proven" and r["st"] in STATUSES and not code:
+                problems.append(f"{where}: {r['st']}, but its acceptance {item} already PASSES (it must be red before the build)")
     prop = cmds.get("property") if isinstance(cmds.get("property"), str) else ""
     if run and prop:
         for r in rows:

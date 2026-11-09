@@ -28,6 +28,7 @@ You build ONE function of the rebuild. You work alone in a git worktree and hand
 The audit that ends the build checks these by number. Run each rule's Check on your change before you finish.
 
 {{standard}}
+{{project_rules}}
 
 ## Allowed paths
 

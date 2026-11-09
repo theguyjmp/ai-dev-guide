@@ -64,6 +64,7 @@ RULE_TRIGGERS = (  # words in a function's row, module section or acceptance tes
     (r"store|json|file|save|write|persist|database|\bdb\b|record", (23, 29, 30, 31, 32, 33, 34)),
     (r"lock", (34,)),
     (r"csv|export", (31, 36)),
+    (r"output|--out\b|save as|write to", (36,)),  # a user-named output target must not clobber (C33)
     (r"\bcli\b|argparse|command|argv", (5, 6)),
     (r"total|tax|price|sum|report", (9, 11)),
 )
@@ -74,6 +75,28 @@ SHARED_LINE = re.compile(r"\W*shared\W*?[:=]\s*(.+)", re.I)  # files every funct
 CONFLICT_SYNC = "merge conflict merging"
 FILES_COLUMN = "files"  # required FUNCTIONS.md column (plan_validate): the function's own files, the unit of the build lock
 NEEDS_COLUMN = "needs"  # required FUNCTIONS.md column: which deps must land first (behaviour) or only stub (default)
+RULES_COLUMN = "rules"  # optional FUNCTIONS.md column: the project rule ids (P07, S18) the row must hold
+RULE_PATHS = ("patterns", "standards")  # [paths] keys of the project's rule files (spec/PATTERNS.md, spec/STANDARDS.md)
+RULE_ID = re.compile(r"\b[A-Z]{1,3}\d+\b")
+RULE_DEF = re.compile(r"^[\s|#>*-]*\**([A-Z]{1,3}\d+)\**(?:[.:)|]|\s|$)")
+RULE_TEXT_MAX = 700  # characters of one cited rule in a brief
+
+
+def rule_defs(text: str) -> dict[str, str]:
+    """Rule id -> its text, from a rule file: a line that starts with the id (`S18. ...`, `| P07 | ... |`,
+    `### P07 ...`) plus the lines that continue it up to a blank line, a table row, a heading or the next id."""
+    defs: dict[str, str] = {}
+    cur = None
+    for line in text.splitlines():
+        m = RULE_DEF.match(line)
+        if m and m.group(1) not in defs:
+            cur = m.group(1)
+            defs[cur] = re.sub(r"\s+", " ", line.strip().strip("|#>*- "))
+        elif m or not line.strip() or line.lstrip().startswith(("|", "#")):
+            cur = None
+        elif cur:
+            defs[cur] += " " + line.strip()
+    return {k: v if len(v) <= RULE_TEXT_MAX else v[:RULE_TEXT_MAX - 4] + " ..." for k, v in defs.items()}
 
 
 def parse_needs(cell: str, deps: list[str]) -> list[str] | None:
@@ -128,6 +151,7 @@ PROBE_FIXES = 2  # fix passes per module below its mutation floor; the score is 
 DEPFIX_PREFIX = "depfix-"  # a dependency fix: a builder's BLOCKED-BY defect, fixed in the owning module
 BLOCKED_BY = re.compile(r"^\s*BLOCKED-BY:\s*`?([^\s`:]+)(?::(\d+))?`?\s*(.*)$", re.M)
 GAPS_FID = "polish-gaps"  # the one cross-module pass over .overhaul/plan-gaps.jsonl, run alone before polish round 1
+MAIN_FLAKE_RE = re.compile(r"main flake: test=(\S+) path=(\S+) module=(\S+)")
 FIX_RETRIES = 1  # a probe or polish fix whose review has verified blocking NOs gets this many retry passes
 
 
@@ -149,6 +173,7 @@ class Fn:
     order: int
     files: list[str] = field(default_factory=list)
     needs: list[str] | None = None  # deps that must land before the build starts (behaviour); None = all deps
+    rules: list[str] = field(default_factory=list)  # project rule ids from the optional rules column
 
     @property
     def blocking(self) -> list[str]:
@@ -169,6 +194,7 @@ class Job:
     log_at: int = 0  # size of log.jsonl when a land job started
     base: str = ""  # a conflict pass: the sha of main when it started (the branch must contain it)
     model: str = ""  # the --model a claude worker got; "custom" for a worker_cmd without one
+    slot: int = -1  # a land: k of its CARGO_TARGET_DIR .overhaul/target/land-<k>
 
 
 def now_iso() -> str:
@@ -250,6 +276,8 @@ class Item:
     rules: tuple[int, ...]
     question: str
     decide: str
+    project: bool = False  # `R` in the rules field: asked only of a row that cites project rules
+    whole: bool = False  # `W` in the rules field: a whole-tree item, asked only by the polish audit
 
 
 @lru_cache(maxsize=1)
@@ -262,21 +290,27 @@ def checklist() -> tuple[str, dict[str, Item]]:
         it = ITEM_LINE.match(line)
         if it:
             nums = tuple(int(n) for n in re.findall(r"Q(\d+)", it[3]))
-            items[it[1]] = Item(it[1], it[2], nums, it[4].strip(), it[5].strip())
+            items[it[1]] = Item(it[1], it[2], nums, it[4].strip(), it[5].strip(),
+                                bool(re.search(r"(?<![A-Za-z])R(?![A-Za-z0-9])", it[3])),
+                                bool(re.search(r"(?<![A-Za-z])W(?![A-Za-z0-9])", it[3])))
     return (m[1] if m else "v?"), items
 
 
-def applicable_items(text: str | None) -> list[Item]:
-    """Contract items always, plus the items whose rules apply to the text; None means the whole checklist."""
-    items = list(checklist()[1].values())
+def applicable_items(text: str | None, project_rules: bool = False) -> list[Item]:
+    """Contract items always, plus the items whose rules apply to the text; None means the whole checklist. The
+    project-rules item (C30) only for a row that cites project rules; whole-tree (W) items only for None, or for a
+    text that names the item (the review of a polish fix of that finding)."""
+    items = [i for i in checklist()[1].values() if project_rules or not i.project]
     if text is None:
         return items
     want = wanted_rules(text)
-    return [i for i in items if not i.rules or want.intersection(i.rules)]
+    return [i for i in items if (i.whole and re.search(rf"\b{i.id}\b", text))  # the review of a polish fix of a W finding
+            or (not i.whole and (not i.rules or want.intersection(i.rules)))]
 
 
 def checklist_text(items: list[Item]) -> str:
-    lines = [f"- {i.id} [{i.severity}] {i.question} Decide: {i.decide}" for i in items]
+    whole = " (whole tree: judge it on the whole tree, not only the scope)"
+    lines = [f"- {i.id} [{i.severity}]{whole if i.whole else ''} {i.question} Decide: {i.decide}" for i in items]
     return "\n".join(lines) or f"(checklist missing: {CHECKLIST.as_posix()})"
 
 
@@ -352,12 +386,12 @@ def in_changed(n: dict, changed: dict[str, set[int]]) -> bool:
         return True
 
 
-def spawn(cmd: list[str], cwd: Path, out: Path) -> subprocess.Popen:
-    """Start a worker in its own process group; stdout to out, stderr beside it."""
+def spawn(cmd: list[str], cwd: Path, out: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
+    """Start a worker in its own process group; stdout to out, stderr beside it; env replaces the environment."""
     group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
              else {"start_new_session": True})
     with open(out, "wb") as fo, open(out.with_suffix(".err"), "wb") as fe:
-        return subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, **group)
+        return subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, env=env, **group)
 
 
 def kill_tree(proc: subprocess.Popen) -> None:
@@ -425,6 +459,7 @@ def parse_functions(text: str) -> list[Fn]:
     idx: dict[str, int] | None = None
     names_files: int | None = None
     names_needs: int | None = None
+    names_rules: int | None = None
     header = ""
     for line in text.splitlines():
         if not line.lstrip().startswith("|"):
@@ -436,11 +471,13 @@ def parse_functions(text: str) -> list[Fn]:
             idx, header = {c: names.index(c) for c in COLUMNS}, line.strip()
             names_files = names.index(FILES_COLUMN) if FILES_COLUMN in names else None
             names_needs = names.index(NEEDS_COLUMN) if NEEDS_COLUMN in names else None
+            names_rules = names.index(RULES_COLUMN) if RULES_COLUMN in names else None
             continue
         if idx is None or all(set(c) <= set(":- ") for c in row):
             continue
         get = {c: (row[i] if i < len(row) else "") for c, i in idx.items()}
         files = row[names_files] if names_files is not None and names_files < len(row) else ""
+        rules = row[names_rules] if names_rules is not None and names_rules < len(row) else ""
         deps = [bare(d) for d in get["deps"].split(",") if bare(d) not in ("", "-")]
         # no needs column: every dep blocks (the v2 behaviour, so old plans are unchanged)
         needs = parse_needs(row[names_needs], deps) if names_needs is not None and names_needs < len(row) else None
@@ -449,7 +486,8 @@ def parse_functions(text: str) -> list[Fn]:
             deps=deps, needs=deps if names_needs is not None and needs is None else needs,
             entry=get["entry"], acceptance=[bare(a) for a in get["acceptance"].split(";") if bare(a)],
             status=bare(get["status"]).lower(), header=header, row=line.strip(), order=len(fns),
-            files=[bare(x) for x in re.split(r"[,;]", files) if bare(x) not in ("", "-")]))
+            files=[bare(x) for x in re.split(r"[,;]", files) if bare(x) not in ("", "-")],
+            rules=list(dict.fromkeys(RULE_ID.findall(rules)))))
     return fns
 
 
@@ -558,7 +596,11 @@ def load_config(repo: Path) -> dict:
     except tomllib.TOMLDecodeError as e:
         raise DriveError(f"overhaul.toml: {e}") from e
     cfg = {name: {**base, **raw.get(name, {})} for name, base in DEFAULTS.items()}
-    cfg["commands"] = {k: str(v) for k, v in raw.get("commands", {}).items()}
+    raw_cmds = raw.get("commands", {})
+    # [commands.acceptance_by] and [commands.extra] are tables, kept apart: every cfg["commands"] value is a string
+    cfg["commands"] = {k: str(v) for k, v in raw_cmds.items() if not isinstance(v, dict)}
+    cfg["acceptance"] = land_mod.acceptance_template(raw_cmds)
+    cfg["extra"] = land_mod.extra_cmds(raw_cmds)
     return cfg
 
 
@@ -600,6 +642,9 @@ class Driver:
         self.land_queue: list[str] = []
         self.land_job: Job | None = None
         self.side_lands: dict[str, Job] = {}  # lands stacked on the ones in flight (land.py --stack)
+        self.slots: dict[str, int] = {}  # fid -> k of the CARGO_TARGET_DIR .overhaul/target/slot-<k> it reuses
+        self.flake_tests: set[str] = set()  # main-flake tests already sent to a fix this run (one fix per test)
+        self.barrier = bool(har.get("phase_barrier", True))  # phase N+1 waits until every phase <=N is proven
         self.fns: dict[str, Fn] = {}
         self.order: list[Fn] = []
         self.arch = ""
@@ -772,7 +817,9 @@ class Driver:
             raise
 
     def busy(self) -> set[str]:
-        return set(self.jobs) | set(self.land_queue) | {j.fn for j in self.land_jobs()}
+        """In flight: jobs, the land queue, lands, and functions waiting at landing on a main-flake fix."""
+        waiting = {fid for fid, r in self.st["functions"].items() if r["status"] == "landing" and r.get("blocked_on")}
+        return set(self.jobs) | set(self.land_queue) | {j.fn for j in self.land_jobs()} | waiting
 
     def land_jobs(self) -> list[Job]:
         """Lands in flight, the plain one (or a polish land) first, then the stacked ones in start order."""
@@ -795,12 +842,14 @@ class Driver:
         without it a function claims its module's paths, one function per module at a time."""
         recs = self.st["functions"]
         proven = {fid for fid, r in recs.items() if r["status"] == "proven"}
+        # the phase barrier: nothing past the lowest phase that still has an unproven function starts
+        open_phase = min((phase_key(f)[0] for f in self.order if f.id not in proven), default=0)
         busy = self.busy()
         taken = [self.claims(self.fns[fid]) for fid in busy if fid in self.fns]
         ready: list[Fn] = []
         for f in self.order:
             if (recs[f.id]["status"] != "planned" or f.id in busy or recs[f.id]["attempts"] > self.budget(f.id)
-                    or recs[f.id].get("blocked_on")
+                    or recs[f.id].get("blocked_on") or (self.barrier and phase_key(f)[0] > open_phase)
                     or not all(d in proven for d in f.blocking)):
                 continue
             mine = self.claims(f)
@@ -870,7 +919,7 @@ class Driver:
         base = self.worker_cmd(kind)
         cmd = [*base, f"Read and do {brief.as_posix()}"]
         try:
-            proc = spawn(cmd, cwd, out)
+            proc = spawn(cmd, cwd, out, self.slot_env(fid))
         except OSError as e:
             raise DriveError(f"cannot start the {kind} worker {cmd[0]}: {e}") from e
         model = base[base.index("--model") + 1] if "--model" in base[:-1] else (
@@ -958,10 +1007,13 @@ class Driver:
     def commands_text(self, f: Fn) -> str:
         lines = []
         for name, cmd in self.cfg["commands"].items():
-            if "{test}" in cmd:  # the exact commands the gate runs ({test}, {file}, {stem}, {node} filled)
+            if name == "acceptance":  # per test file: [commands.acceptance_by] may give a file its own template
+                cmd = self.cfg.get("acceptance") or cmd
+            if "{test}" in str(cmd):  # the exact commands the gate runs ({test}, {file}, {stem}, {node} filled)
                 lines += [f"- {name}: `{c}`" for _, c in land_mod.acceptance_cmds(cmd, f.acceptance)]
             else:
                 lines.append(f"- {name}: `{cmd}`")
+        lines += [f"- {name}: `{cmd}`" for name, cmd in self.cfg.get("extra", [])]
         return "\n".join(lines) or "(overhaul.toml has no [commands])"
 
     def row_table(self, f: Fn) -> str:
@@ -1046,6 +1098,32 @@ class Driver:
                 self.set(fid, blocked_on=None)
                 if not ok:
                     self.park(fid, f"dependency fix {dfid} failed: {reason}")
+                elif rec["status"] == "landing":  # it waited on a main-flake fix: its reviewed branch lands now
+                    self.land_queue.append(fid)
+
+    def main_flake(self, fid: str, reason: str) -> bool:
+        """land.py found the land's red test failing on clean main too (`main flake: test=.. path=.. module=..`):
+        the branch did not cause it, so the test's owner module gets a fix pass (fid depfix-flake-<id>) and the
+        function waits at landing, its branch reviewed, to land after the fix. One fix per test per run: the same
+        test failing again parks the function with the reason. False when no owner module is found."""
+        m = MAIN_FLAKE_RE.match(reason)
+        if not m:
+            return False
+        test, path, module = (x if x != "?" else "" for x in m.groups())
+        module = module or (self.owner_module(path) if path else "")
+        dfid = f"{DEPFIX_PREFIX}flake-{fid}"
+        if not module or dfid in self.jobs or dfid in self.polish_lands:
+            return False
+        self.log(fid, "main_flake", f"test={test} path={path or '?'} module={module}")
+        if test in self.flake_tests:
+            self.park(fid, f"main flake on {test} again after its fix this run: {reason}")
+            return True
+        self.flake_tests.add(test)
+        self.set(fid, status="landing", blocked_on=dfid,
+                 last_reason=f"waiting on {dfid}: {test} fails on clean main"[:REASON_MAX])
+        self.start_polish_fix(module, [{"file": path or "?", "line": "?", "rule": f"main flake found by {fid}",
+                                        "evidence": f"{test} fails on clean {self.main}: {reason}"}], fid=dfid)
+        return True
 
     def to_review(self, job: Job, problem: str) -> None:
         """After a build or conflict pass: review when clean, a conflict pass on a pre-review merge conflict."""
@@ -1068,11 +1146,26 @@ class Driver:
             return CONFLICT_SYNC
         return self.gate_problem(wt, fid)
 
-    def sh(self, cmd: str, wt: Path) -> subprocess.CompletedProcess[str] | None:
-        """One gate command in a worktree; None on timeout."""
+    def slot(self, fid: str) -> int:
+        """The parallel slot whose CARGO_TARGET_DIR fid's worktree commands reuse, so a worktree does not
+        cold-build: fid keeps its slot while no other running job holds it, else takes the lowest free one. Two
+        processes that run at once never share a slot."""
+        held = {self.slots[j] for j in self.jobs if j != fid and j in self.slots}
+        k = self.slots.get(fid)
+        if k is None or k in held:
+            k = next(i for i in range(len(held) + 1) if i not in held)
+            self.slots[fid] = k
+        return k
+
+    def slot_env(self, fid: str) -> dict[str, str]:
+        return {**os.environ, "CARGO_TARGET_DIR": str(self.ov / "target" / f"slot-{self.slot(fid)}")}
+
+    def sh(self, cmd: str, wt: Path, fid: str = "") -> subprocess.CompletedProcess[str] | None:
+        """One gate command in a worktree, on fid's slot target dir; None on timeout."""
         try:
             return subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=self.timeout_s, stdin=subprocess.DEVNULL)
+                                  errors="replace", timeout=self.timeout_s, stdin=subprocess.DEVNULL,
+                                  env=self.slot_env(fid or wt.name))
         except subprocess.TimeoutExpired:
             return None
 
@@ -1080,17 +1173,14 @@ class Driver:
         """The whole-tree gate commands land.py runs ([harness] pre_review names them; default all of them), run
         in the worktree on the merged branch. '' when all pass."""
         names = self.cfg["harness"].get("pre_review", land_mod.WHOLE_TREE)
-        for name in names:
-            cmd = self.cfg["commands"].get(name)
-            if not cmd:
-                continue
+        for name, cmd in self.gate_list(names):
             if name == "cycles":
                 problem = self.cycles_problem(wt)
                 if problem:
                     return problem
                 continue
             cmd = land_mod.fill(cmd)
-            p = self.sh(cmd, wt)
+            p = self.sh(cmd, wt, fid)
             if p is None:
                 return f"{name} timed out in the worktree after merging {self.main}: `{cmd}`"
             if not land_mod.passes(cmd, p.returncode):
@@ -1099,14 +1189,19 @@ class Driver:
                         f"review: `{cmd}`: {tail}. Merge {self.main} and rerun the gate before you hand back")
         return self.acceptance_problem(wt, fid)
 
+    def gate_list(self, names) -> list[tuple[str, str]]:
+        """The pre-review commands: the named [commands] that are set, then [commands.extra], as land runs them."""
+        return [(n, self.cfg["commands"][n]) for n in names if self.cfg["commands"].get(n)] + \
+            list(self.cfg.get("extra", []))
+
     def acceptance_problem(self, wt: Path, fid: str) -> str:
         """The function's own acceptance tests, run before review: a red one would only fail at land, after a
         wasted review. The full output goes to a file the retry brief names. '' when green or not a function."""
-        tmpl = self.cfg["commands"].get("acceptance")
+        tmpl = self.cfg.get("acceptance") or self.cfg["commands"].get("acceptance")
         if fid not in self.fns or not tmpl or not self.cfg["harness"].get("pre_review_acceptance", True):
             return ""
         for node, cmd in land_mod.acceptance_cmds(tmpl, self.fns[fid].acceptance):
-            p = self.sh(cmd, wt)
+            p = self.sh(cmd, wt, fid)
             if p is None:
                 return f"acceptance {node} timed out in the worktree after merging {self.main}: `{cmd}`"
             if p.returncode != 0:
@@ -1228,7 +1323,24 @@ class Driver:
     def standard_values(self, f: Fn) -> dict[str, str]:
         """The quality-standard placeholders of a build or review brief for function f."""
         text = "\n".join((self.row_table(f), module_section(self.arch, f.module), self.acceptance_text(f)))
-        return {"standard_path": STANDARD.as_posix(), "standard": relevant_rules(text)}
+        return {"standard_path": STANDARD.as_posix(), "standard": relevant_rules(text),
+                "project_rules": self.project_rules(f)}
+
+    def project_rules(self, f: Fn) -> str:
+        """The brief section quoting each project rule the row's rules column cites, from the [paths] patterns and
+        standards files on main; '' when the row cites none."""
+        if not f.rules:
+            return ""
+        srcs = [str(self.cfg["paths"][k]) for k in RULE_PATHS if self.cfg["paths"].get(k)]
+        defs: dict[str, str] = {}
+        for rel in srcs:
+            for k, v in rule_defs(self.read_main(rel) or "").items():
+                defs.setdefault(k, v)
+        where = ", ".join(f"`{x}`" for x in srcs) or "no [paths] patterns or standards in overhaul.toml"
+        lines = [f"- {defs[r]}" if r in defs else f"- {r}: (not found in {where})" for r in f.rules]
+        return (f"\n## Project rules this row cites (from {where})\n\n"
+                "Every rule below must hold in the change, and the acceptance test proves each pattern id it names "
+                "(checklist C30).\n\n" + "\n".join(lines) + "\n")
 
     def round_rule(self, fid: str) -> str:
         prev = self.st["functions"][fid].get("review")
@@ -1251,7 +1363,8 @@ class Driver:
             "id": fid, "branch": branch, "row": self.row_table(f), "allowed_paths": self.allowed(f),
             "acceptance_source": self.acceptance_text(f), "review_file": review_file.as_posix(),
             "policies": self.policies(), **values, "checklist_path": CHECKLIST.as_posix(),
-            "checklist_version": checklist()[0], "checklist": checklist_text(applicable_items(scope)),
+            "checklist_version": checklist()[0],
+            "checklist": checklist_text(applicable_items(scope, bool(f.rules))),
             "round_rule": self.round_rule(fid),
             "diffstat": git(self.repo, "diff", "--stat", f"{self.main}...{branch}").rstrip(),
             "diff": git(self.repo, "diff", f"{self.main}...{branch}").rstrip(),
@@ -1440,10 +1553,14 @@ class Driver:
                "--main", self.main]
         if flying:
             cmd += ["--stack", ",".join(j.fn for j in flying)]
+        used = {j.slot for j in flying}
+        k = next(i for i in range(len(used) + 1) if i not in used)
+        cmd += ["--target-dir", str(self.ov / "target" / f"land-{k}")]  # one per concurrent land, reused
         log = self.ov / "log.jsonl"
         log_at = log.stat().st_size if log.exists() else 0
         start = time.monotonic()
-        job = Job(fid, "land", spawn(cmd, self.repo, out), out, start, start + 2 * self.timeout_s, 0, log_at=log_at)
+        job = Job(fid, "land", spawn(cmd, self.repo, out), out, start, start + 2 * self.timeout_s, 0, log_at=log_at,
+                  slot=k)
         if flying:
             self.side_lands[fid] = job
             self.log(fid, "land_stacked", f"on {', '.join(j.fn for j in flying)}")
@@ -1468,6 +1585,8 @@ class Driver:
             last_line(out) or last_line(err) or f"land.py exit {job.proc.returncode}")
         if not self.land_logged(fid, job.log_at):  # killed or crashed before land.py wrote its own land_fail line
             self.log(fid, "land_fail", reason, secs)
+        if reason.startswith(land_mod.MAIN_FLAKE) and self.main_flake(fid, reason):
+            return  # a test that fails on clean main too: its owner gets a fix, the function lands after it
         if GREEN_BEFORE in reason:
             self.park(fid, f"land: {reason}")
         elif CONFLICT in reason.lower() and self.start_conflict(fid, reason):
@@ -1595,7 +1714,7 @@ class Driver:
         base, model = self.polish_cmd(kind)
         out = self.ov / "runs" / f"{fid}-r{rnd}-{kind}.json"
         try:
-            proc = spawn([*base, f"Read and do {brief.as_posix()}"], cwd, out)
+            proc = spawn([*base, f"Read and do {brief.as_posix()}"], cwd, out, self.slot_env(fid))
         except OSError as e:
             raise DriveError(f"cannot start the {kind} worker {base[0]}: {e}") from e
         start = time.monotonic()
@@ -1901,10 +2020,10 @@ class Driver:
         fid = self.polish_lands.pop(0)
         out = self.ov / "runs" / f"{fid}-land.out"
         cmd = [sys.executable, str(self.scripts / "land.py"), "--repo", str(self.repo), "--fn", fid,
-               "--main", self.main, "--polish"]
+               "--main", self.main, "--polish", "--target-dir", str(self.ov / "target" / "land-0")]
         start = time.monotonic()
         self.land_job = Job(fid, "polish_land", spawn(cmd, self.repo, out), out, start,
-                            start + 2 * self.timeout_s, 0)
+                            start + 2 * self.timeout_s, 0, slot=0)
         return True
 
     def after_polish_land(self, job: Job) -> None:
@@ -2004,7 +2123,8 @@ class Driver:
                "--max-mutants", str(self.max_mutants)] + (["--cmd", self.probe_cmd] if self.probe_cmd else [])
         out = self.ov / "runs" / f"{fid}-mutate.out"
         start = time.monotonic()
-        self.jobs[fid] = Job(fid, "probe_mutate", spawn(cmd, wt, out), out, start, start + 2 * self.timeout_s, 0)
+        self.jobs[fid] = Job(fid, "probe_mutate", spawn(cmd, wt, out, self.slot_env(fid)), out, start,
+                             start + 2 * self.timeout_s, 0)
         pst[module] = {**pst.get(module, {}), "status": "mutating"}
         self.save()
         self.say(f"probe {module}: mutating")
@@ -2208,6 +2328,35 @@ class Driver:
         self.log(fid, "cycle", "reset to planned, attempts 0")
         self.say(f"reset {fid}")
 
+    def repolish(self) -> None:
+        """--repolish: the next run audits again with the current checklist (a new item, a bumped version), as a
+        fresh polish phase of at most polish_rounds fix rounds. Old rounds stay in history and the plan-gaps pass
+        does not rerun. Bounded too: at most polish_rounds repolishes per build."""
+        if self.polish_rounds < 1:
+            raise DriveError("[limits] polish_rounds is 0: there is no polish to run again")
+        old = self.st.get("polish") or {}
+        if old.get("status", "idle") not in ("idle", "done", "failed"):
+            raise DriveError(f"polish is {old.get('status')} (round {old.get('round')}): let it finish first")
+        done = int(old.get("repolishes", 0))
+        if done >= self.polish_rounds:
+            raise DriveError(f"already repolished {done} times ([limits] polish_rounds {self.polish_rounds}): "
+                             "report the issues left in .overhaul/polish/ to the owner instead")
+        new = {"round": 0, "status": "idle", "issues": None, "history": list(old.get("history") or []),
+               "repolishes": done + 1, "checklist": checklist()[0]}
+        if old.get("gaps"):
+            new["gaps"] = old["gaps"]
+        before = json.loads(json.dumps(self.st))
+        self.st["polish"] = new
+        for ph in (self.st.get("polish_phases") or {}).values():  # per-phase polish: audit each phase again
+            ph.update(round=0, status="idle", issues=None, best=None, audit_retry=None)
+        if not self.save():  # a run (or its land) holds the lock: never wait, never race its state write
+            self.st = before
+            raise DriveError(f"{lock_path(self.repo).as_posix()} is held by {lock_holder(self.repo) or '?'}: "
+                             "stop the run (or let its land finish), then --repolish")
+        self.log(None, "polish_repolish", f"polish reset ({done + 1} of {self.polish_rounds}), checklist "
+                 f"{checklist()[0]}")
+        self.say(f"repolish: the next run audits again with checklist {checklist()[0]}")
+
     def mark_proven(self, fid: str, evidence: Path) -> None:
         if not evidence.is_file() or not read_text(evidence).strip():
             raise DriveError(f"evidence file missing or empty: {evidence}")
@@ -2237,6 +2386,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reset", metavar="ID", help="set ID to planned with attempts 0, then exit")
     ap.add_argument("--mark-proven", metavar="ID", help="mark ID proven (needs --evidence), then exit")
     ap.add_argument("--evidence", metavar="FILE", help="blind review file backing --mark-proven")
+    ap.add_argument("--repolish", action="store_true",
+                    help="reset the polish state so the next run audits again with the current checklist, then exit")
     args = ap.parse_args(argv)
     repo = Path(os.path.abspath(args.repo))
     try:
@@ -2247,6 +2398,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise DriveError(f"{fid} is not in {drv.cfg['paths']['functions']}")
         if args.reset:
             drv.reset(args.reset)
+            return 0
+        if args.repolish:
+            drv.repolish()
             return 0
         if args.mark_proven:
             if not args.evidence:

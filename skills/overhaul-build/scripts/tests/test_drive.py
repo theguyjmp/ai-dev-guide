@@ -342,9 +342,9 @@ pre_review_acceptance = {pre_review_acceptance}
 class TestTemplates(unittest.TestCase):
     def test_every_placeholder_is_one_drive_fills(self):
         build = "id attempt worktree branch row entry module module_section allowed_paths " \
-                "acceptance_source policies commands max_calls previous standard_path standard".split()
+                "acceptance_source policies commands max_calls previous standard_path standard project_rules".split()
         review = "id branch row allowed_paths acceptance_source review_file policies diffstat diff max_calls " \
-                 "standard_path standard checklist_path checklist_version checklist round_rule".split()
+                 "standard_path standard project_rules checklist_path checklist_version checklist round_rule".split()
         conflict = "id pass worktree branch main module reason row allowed_paths commands max_calls".split()
         audit = "round main audit_file max_calls scratch modules policies commands standard " \
                 "checklist_path checklist_version checklist scope".split()
@@ -1294,3 +1294,79 @@ class TestProbe(Toy):
         ev = self.probe_events(repo)
         self.assertEqual(len([1 for e, _ in ev if e == "probe_mutation"]), 2, ev)
         self.assertFalse([1 for e, _ in ev if e == "probe_fix"], ev)
+
+
+PHASED = """# Functions
+| id | phase | module | deps | entry | acceptance | status |
+|----|-------|--------|------|-------|------------|--------|
+| F1 | 1 | alpha | - | `toy add 1 2` | tests/acceptance/test_f1.py::test_add | planned |
+| F2 | 2 | beta | - | `toy double 4` | tests/acceptance/test_f2.py::test_double | planned |
+"""
+
+
+class TestScale(Toy):
+    def test_phase_barrier_holds_the_next_phase_until_the_last_is_proven(self):
+        repo = self.make_repo(functions=PHASED)
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        self.assertEqual([f.id for f in drv.ready()], ["F1"])  # F2 has no deps but is in phase 2
+        drv.st["functions"]["F1"]["status"] = "needs-plan"
+        self.assertEqual(drv.ready(), [])  # an unproven phase 1 function still holds phase 2
+        drv.st["functions"]["F1"]["status"] = "proven"
+        self.assertEqual([f.id for f in drv.ready()], ["F2"])
+
+    def test_phase_barrier_off(self):
+        repo = self.make_repo(functions=PHASED, harness_extra="phase_barrier = false")
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        self.assertEqual([f.id for f in drv.ready()], ["F1", "F2"])
+
+    def test_each_running_job_gets_its_own_reused_slot_target_dir(self):
+        repo = self.make_repo()
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        job = SimpleNamespace()
+        self.assertEqual(drv.slot("A"), 0)
+        drv.jobs["A"] = job
+        self.assertEqual(drv.slot("B"), 1)
+        drv.jobs["B"] = job
+        self.assertEqual(drv.slot("A"), 0)  # keeps its own while it runs
+        del drv.jobs["A"]
+        self.assertEqual(drv.slot("C"), 0)  # A is done: its dir is reused
+        drv.jobs["C"] = job
+        self.assertEqual(drv.slot("A"), 2)  # A's old slot is held by C now
+        env = drv.slot_env("B")
+        self.assertEqual(Path(env["CARGO_TARGET_DIR"]), repo / ".overhaul" / "target" / "slot-1")
+        with mock.patch.object(drive, "spawn") as sp:
+            drv.start_job("B", "build", 1, repo / "brief.md", repo)
+        self.assertEqual(Path(sp.call_args.args[3]["CARGO_TARGET_DIR"]).name, "slot-1")
+
+    def test_land_gets_its_own_target_dir(self):
+        repo = self.make_repo()
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        argv = json.loads((repo / ".overhaul" / "land-argv.json").read_text(encoding="utf-8"))
+        self.assertEqual(Path(argv[argv.index("--target-dir") + 1]), repo / ".overhaul" / "target" / "land-0")
+
+    def test_main_flake_sends_a_fix_to_the_test_owner_and_lands_after_it(self):  # slice F18
+        repo = self.make_repo({"F2": {"land": ["flake", "ok"]}}, retries=0)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.state(repo)["functions"]["F2"]["status"], "proven")
+        ev = [(e["event"], e["fn"], e["detail"]) for e in self.events(repo)]
+        self.assertIn(("main_flake", "F2", "test=tests/acceptance/test_f1.py::test_add path=src/alpha/f1.py "
+                                           "module=alpha"), ev)
+        self.assertTrue(any(e == "dep_fix" and f == "depfix-flake-F2" and d == "landed alpha" for e, f, d in ev), ev)
+        self.assertEqual([f for e, f, _ in ev if e == "build_start"].count("F2"), 1)  # no rebuild, no attempt
+        self.assertFalse(any(e == "needs_plan" for e, _, _ in ev))
+
+    def test_main_flake_twice_on_one_test_parks_the_function(self):
+        repo = self.make_repo({"F2": {"land": ["flake", "flake"]}}, retries=0)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 3, out)
+        rec = self.state(repo)["functions"]["F2"]
+        self.assertEqual(rec["status"], "needs-plan")
+        self.assertIn("main flake on tests/acceptance/test_f1.py::test_add again", rec["last_reason"])
+        ev = [(e["event"], e["fn"]) for e in self.events(repo)]
+        self.assertIn(("dep_fix", "depfix-flake-F2"), ev)
+        self.assertEqual(ev.count(("main_flake", "F2")), 2)
