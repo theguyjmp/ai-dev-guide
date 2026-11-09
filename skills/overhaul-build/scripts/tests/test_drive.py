@@ -669,7 +669,9 @@ class TestNeeds(Toy):
                               commands_extra='lint = "py -3 -c \\"import sys; sys.exit(3)\\""')
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 3, out)
-        self.assertIn("lint failed (exit 3) in the worktree after merging main, before review", out)
+        # lint fails on clean main too: main red (mainred.py), no attempt counted, exit 3 for the manager
+        self.assertIn("F1: lint red on clean main too; attempt not counted", out)
+        self.assertIn("needs-plan: main red: lint", out)
 
 
 class TestFileLock(Toy):
