@@ -54,6 +54,7 @@ import tomllib
 from pathlib import PurePosixPath
 
 import anchors  # beside this script
+import memcap  # beside this script: [limits] proc_mem_gb
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 
@@ -266,9 +267,10 @@ def run(cmd, cwd, out_path, timeout):
             proc.kill()
             return -1, f"timeout after {timeout}s"
     with open(out_path, "rb") as f:
-        lines = [x.strip() for x in f.read().decode("utf-8", "replace").splitlines() if x.strip()]
+        text = f.read().decode("utf-8", "replace")
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
     tail = lines[-1] if len(lines) > 1 else ""
-    return code, tail[:200]
+    return code, (memcap.note(text, tail[:200]) if code else tail[:200])
 
 
 def acceptance_template(commands):
@@ -927,6 +929,19 @@ def target_dir(repo, given, stacked_fid=""):
     return os.path.abspath(path if os.path.isabs(path) else os.path.join(repo, path))
 
 
+def proc_mem_gb(repo):
+    """[limits] proc_mem_gb of the working tree's overhaul.toml (default 12; 0 = no cap)."""
+    try:
+        with open(os.path.join(repo, "overhaul.toml"), "rb") as f:
+            lim = tomllib.load(f).get("limits") or {}
+    except (OSError, tomllib.TOMLDecodeError):
+        lim = {}
+    try:
+        return float(lim.get("proc_mem_gb", 12) or 0)
+    except (TypeError, ValueError):
+        return 12.0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", required=True)
@@ -943,6 +958,8 @@ def main(argv=None):
     repo = os.path.abspath(a.repo)
     stack = [x.strip() for x in a.stack.split(",") if x.strip()]
     os.environ["CARGO_TARGET_DIR"] = target_dir(repo, a.target_dir, a.fid if stack and not a.polish else "")
+    if not os.environ.get(memcap.ENV):  # run by hand, not under drive.py: take the same [limits] proc_mem_gb cap
+        memcap.cap_self(proc_mem_gb(repo))
     if stack and not a.polish:
         return main_stacked(repo, a, stack)
 

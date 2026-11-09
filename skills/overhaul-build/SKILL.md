@@ -44,7 +44,15 @@ acceptance proves each pattern id). `[commands.extra]` runs after the whole-tree
 `[commands.acceptance_by]` picks a test file's template; a proven `[tiers]` test reruns at land only by footprint.
 `[gates.periodic]` (scripts/periodic.py): slow gates (CI parity matrix via `periodic.py ci`, full scale tier, GPU over ssh)
 run on main in the background every N lands or M minutes and once at the end; `BENCH` lines are judged against
-spec/BUDGETS.toml (CI at ci_factor 2x, macOS record-only); red bisects to the culprit land, one depfix; verdict BAD while red.
+spec/BUDGETS.toml (CI at ci_factor 2x, macOS record-only); each gate keeps its own green, so a red gate bisects to
+its culprit land (one depfix) whatever the other gates do; verdict BAD while red. A gate that cannot run at all
+(`periodic.py ci` exits 75, `ci: unavailable: <reason>`: GitHub billing, spending limit, unsupported runner) is
+unavailable: never bisected, no depfix, not green; the verdict shows it as an owner line.
+Per-gate cadence: make `every_lands` or `every_min` a table (`[gates.periodic.every_min] default = 120`,
+`parity = 10080`); such a gate runs only on the keys it names, and at the end only once every function is proven.
+`[limits] proc_mem_gb` (default 12, 0 = off): on Windows drive.py runs in a Job Object that caps every process it
+starts (builders, lands, checks, gates, and their cargo and test binaries) at that much memory; a process over it
+fails its allocation and the failure reads `process memory cap N GB hit`; shrink the fixture, do not raise the cap.
 Rolling plans: a `deferred` row is never started and counts apart (`proven N/T deferred D`); polish waits until
 no row is deferred. Tests a later `plan:` commit adds, or FUNCTIONS names on main, are anchors too. `drive.py --repolish`
 reruns the polish audit (at most polish_rounds times, default 3; each fix gets `[limits] fix_retries`, default 2);

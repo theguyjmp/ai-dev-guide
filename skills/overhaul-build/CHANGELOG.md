@@ -1,5 +1,25 @@
 # overhaul-build changelog
 
+## Gates and memory cap, 2026-11-09
+- periodic.py: each gate keeps its own green (state `green: {gate: sha}`; an older state seeds it from last_green
+  and from each gate's latest green run in log.jsonl). A red gate bisects over the lands since its own green, gates
+  one after another, so one gate's red (or a never-green gate) no longer blocks another's bisect. A gate still red
+  keeps the culprit found before instead of bisecting again every run.
+- periodic.py ci: when the run failed and no job ran a step, the job annotations (`gh run view`) are read; jobs
+  GitHub never started (billing, spending limit, unsupported runner) print `ci: unavailable: <reason>` and exit 75.
+  periodic records such a gate under `unavailable`: never bisected, no depfix, not green. verdict.py shows it as an
+  owner line (`parity gate unavailable: ...`). No threshold changed and no runnable gate is skipped.
+- periodic.py: per-gate cadence. `every_lands` and `every_min` may be tables (`default` plus gate names), e.g.
+  `[gates.periodic.every_min] parity = 10080` for a weekly paid CI gate. A gate with its own cadence runs only on the
+  keys it names, and at the end once, only when every function is proven (once per plan size, state `finish`).
+  Lands and run times are counted per gate (state `since`, `ran`); last_green moves only on a run of every gate.
+- memcap.py (new): `[limits] proc_mem_gb` (default 12, 0 = off). drive.py (and land.py run by hand) put themselves
+  in a Windows Job Object with JOB_OBJECT_LIMIT_PROCESS_MEMORY, so every process they start is capped; a process over
+  the cap fails its allocation instead of starving the machine. Failure reasons with an allocation failure in the
+  output (builder exit, pre-review gate and acceptance, land commands, periodic gates) start
+  `process memory cap N GB hit`. ctypes only; nothing on other systems.
+- tests: test_gates_memcap.py.
+
 ## Pass E: polish converges, 2026-11-08
 - drive.py: visibility-only edits (pub / pub(crate) / export / a re-export of an existing item) are also allowed in
   the modules the fixing module depends on (ARCHITECTURE.md `Depends on:`), for builders and polish fixes alike;
