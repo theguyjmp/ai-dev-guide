@@ -3,7 +3,9 @@
 On Windows, cap_self puts the calling process in a Job Object with JOB_OBJECT_LIMIT_PROCESS_MEMORY. Every child it
 starts later (builders, polish and fix agents, land.py and its acceptance runs, check commands, periodic gates, and
 their cargo, rustc and test binaries) is in the same job, so any one process that passes the cap fails its next
-allocation instead of starving the machine. The job does not kill anything when drive exits. Elsewhere it does
+allocation instead of starving the machine. With kill_on_close (drive.py and supervise.py) the same job also has
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: one job, both limits, so killing drive kills every builder, reviewer, land and
+cargo/test process it started (measured 2026-11-09: builders of a killed drive kept running). Elsewhere it does
 nothing. ctypes only.
 
 cap_self also sets OVERHAUL_PROC_MEM_GB so children (land.py) can name the cap: note() turns an allocation failure in
@@ -28,10 +30,16 @@ OOM = re.compile(r"memory allocation of \d+ bytes failed|out of memory|std::bad_
 _job = None  # the job handle; kept open for the life of the process
 
 
-def cap_self(gb: float) -> str:
-    """Cap every process of this tree at gb GB. Returns what it did ('' when off or not Windows)."""
+KILL_ON_CLOSE = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+PROCESS_MEMORY = 0x100  # JOB_OBJECT_LIMIT_PROCESS_MEMORY
+
+
+def cap_self(gb: float, kill_on_close: bool = False) -> str:
+    """Cap every process of this tree at gb GB and, with kill_on_close, kill the whole tree when this process ends.
+    Returns what it did ('' when neither is on or not Windows)."""
     global _job
-    if not gb or float(gb) <= 0 or os.name != "nt":
+    gb = float(gb or 0)
+    if (gb <= 0 and not kill_on_close) or os.name != "nt":
         return ""
     if _job is not None:
         return f"process memory cap {gb:g} GB (already set)"
@@ -64,15 +72,18 @@ def cap_self(gb: float) -> str:
     if not job:
         return f"process memory cap not set: CreateJobObject error {ctypes.get_last_error()}"
     info = Extended()
-    info.Basic.LimitFlags = 0x100  # JOB_OBJECT_LIMIT_PROCESS_MEMORY
-    info.ProcessMemoryLimit = int(float(gb) * 1024 ** 3)
+    info.Basic.LimitFlags = (PROCESS_MEMORY if gb > 0 else 0) | (KILL_ON_CLOSE if kill_on_close else 0)
+    info.ProcessMemoryLimit = int(gb * 1024 ** 3)
     if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):  # extended limits
         return f"process memory cap not set: SetInformationJobObject error {ctypes.get_last_error()}"
     if not k32.AssignProcessToJobObject(job, k32.GetCurrentProcess()):
         return f"process memory cap not set: AssignProcessToJobObject error {ctypes.get_last_error()}"
-    _job = job
-    os.environ[ENV] = f"{float(gb):g}"
-    return f"process memory cap {float(gb):g} GB per process"
+    _job = job  # never inherited by children (no security attributes), so only this process's exit closes it
+    kill = "; the tree dies with this process" if kill_on_close else ""
+    if gb <= 0:
+        return "job object: the tree dies with this process"
+    os.environ[ENV] = f"{gb:g}"
+    return f"process memory cap {gb:g} GB per process{kill}"
 
 
 class NotFound(Exception):

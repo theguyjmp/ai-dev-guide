@@ -1,5 +1,28 @@
 # overhaul-build changelog
 
+## Single drive, 2026-11-09
+Measured on the pilot project: two supervise.py + drive.py pairs ran on the same repo at once (a relaunch while the old one was
+alive). They overwrote each other's .overhaul/state.json (manager resets "did not stick") and handed the same
+.overhaul/target/slot-<k> to two worktrees, so a test ran a app.exe built from another worktree and reported a false
+"acceptance red" (R0422). Builders started by an earlier drive kept running after that drive was killed.
+- drivelock.py (new): `.overhaul/drive.lock` with pid + process start time, created exclusively and checked against the
+  live process table (a dead or reused pid is stale and taken over). supervise.py and drive.py take it first; a second
+  start exits 1 at once naming the running pid. drive.py started by supervise.py runs under its lock
+  (OVERHAUL_DRIVE_LOCK; builders and plan-fix agents never get it). --reset/--mark-proven/--repolish refuse while
+  another drive holds it, pointing at `.overhaul/requests/reset-<id>` when live re-plan is in drive.py, else at the pid
+  to stop.
+- No orphans: memcap.cap_self(gb, kill_on_close=True) makes one Job Object with both limits (memory cap and
+  JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE), so killing supervise or drive kills its builders, reviewers, lands and their
+  cargo/test processes. At start drive kills leftover processes whose command line names this repo's .overhaul/wt or
+  .overhaul/target (by pid, taskkill /T; event orphan_killed).
+- Slots: drive persists the fid -> slot map in state.json (`slots`), checks it at start (a slot given twice or held by
+  another live drive is dropped, event slot_dropped), and marks each slot dir (.overhaul-slot: drive pid/start and job).
+  A slot another live drive holds is never handed out. Before a job's acceptance runs, a slot last built by another job
+  is rebuilt (`[commands] build` when set); a red whose slot changed hands during the run, or whose cargo `Running`
+  binary is outside the job's slot dir, is rebuilt and run once more, never reported red (event slot_rebuild).
+- tests/test_single_drive.py: fake process table, stale and reused-pid locks, double start of drive/--reset/supervise
+  as real processes, orphan matching, a real Job Object kill, slot persistence, reuse and the rebuild-not-red cases.
+
 ## Supervisor, 2026-11-09
 Measured on the pilot project vc5: the build sat at 44 proven for 4+ hours. drive.py was fine; everything around it was run by
 hand and failed: a bash launcher ran ONE serial headless manager per exit 3 (25+ min, one function at a time);

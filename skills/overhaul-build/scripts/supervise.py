@@ -21,6 +21,10 @@ writes is under .overhaul/. Every headless claude it starts gets CLAUDE_CODE_PRI
 Exit: 0 every function proven and the proof-check found every one REAL; 4 the proof-check found some not REAL (its
 line is logged); 3 rounds used up; 1 error (the line is logged).
 
+One supervise per repo: it takes .overhaul/drive.lock (drivelock.py) before anything else, and a second start exits at
+once naming the running pid; its drive.py runs under that lock. The memcap job also kills the whole tree (drive, its
+builders, plan-fix agents) when supervise ends.
+
 Why (measured 2026-11-09 on the pilot project vc5): 44 proven for 4+ hours while a bash launcher ran one serial headless
 manager per exit 3 (25+ min each), planners ran plan_validate --run and 1M-fixture tests outside the memory cap
 (30 GB processes, three low-memory reaps), `memcap.py 12 -- bash` picked WSL bash and `-- claude` was not found.
@@ -41,6 +45,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import drivelock  # noqa: E402  one drive per repo
 import drive  # noqa: E402
 import memcap  # noqa: E402
 
@@ -106,7 +111,14 @@ class Supervisor:
 
     def env(self) -> dict[str, str]:
         """The children's environment: never the harness flag (only drive.py and land.py move main's code)."""
-        return {**{k: v for k, v in os.environ.items() if k != "OVERHAUL_HARNESS"}, **BG_WAIT}
+        return {**{k: v for k, v in os.environ.items() if k not in ("OVERHAUL_HARNESS", drivelock.ENV)}, **BG_WAIT}
+
+    def child_env(self, cmd: list[str]) -> dict[str, str]:
+        """env(), plus the drive lock for drive.py only: it runs under supervise's lock, every other child does not."""
+        env = self.env()
+        if cmd[:len(self.drive_cmd)] == self.drive_cmd and os.environ.get(drivelock.ENV):
+            env[drivelock.ENV] = os.environ[drivelock.ENV]
+        return env
 
     def claude(self) -> list[str]:
         if self._claude is None:
@@ -129,7 +141,7 @@ class Supervisor:
         try:
             with open(out, "wb") as fo:
                 p = subprocess.run(cmd, check=False, cwd=cwd or self.repo, stdin=subprocess.DEVNULL, stdout=fo,
-                                   stderr=subprocess.STDOUT, env=self.env(), timeout=timeout)
+                                   stderr=subprocess.STDOUT, env=self.child_env(cmd), timeout=timeout)
         except FileNotFoundError as e:
             raise Stop(f"cannot start {cmd[0]}: {e}") from e
         except subprocess.TimeoutExpired:
@@ -385,19 +397,28 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     repo = Path(os.path.abspath(args.repo))
     try:
-        sup = Supervisor(repo, args.max_rounds)
-    except drive.DriveError as e:
-        print(f"supervise: error: {e}", flush=True)
+        drivelock.acquire(repo, "supervise.py")  # one drive per repo, first; drive.py runs under this lock
+    except drivelock.Held as e:
+        print(f"supervise: error: {e}; this start exits, the running one keeps going", flush=True)
         return 1
-    os.environ.update(BG_WAIT)  # drive.py's builders and reviewers are headless claudes too
-    cap = memcap.cap_self(float(sup.cfg["limits"].get("proc_mem_gb") or 0))  # every child inherits it
-    sup.log(f"start {repo.as_posix()}" + (f"; {cap}" if cap else ""))
     try:
-        sup.claude()
-    except Stop as e:
-        sup.log(f"stop: error: {e}")
-        return 1
-    return sup.supervise()
+        try:
+            sup = Supervisor(repo, args.max_rounds)
+        except drive.DriveError as e:
+            print(f"supervise: error: {e}", flush=True)
+            return 1
+        os.environ.update(BG_WAIT)  # drive.py's builders and reviewers are headless claudes too
+        # every child inherits the cap and dies with supervise (one job, both limits)
+        cap = memcap.cap_self(float(sup.cfg["limits"].get("proc_mem_gb") or 0), kill_on_close=True)
+        sup.log(f"start {repo.as_posix()}" + (f"; {cap}" if cap else ""))
+        try:
+            sup.claude()
+        except Stop as e:
+            sup.log(f"stop: error: {e}")
+            return 1
+        return sup.supervise()
+    finally:
+        drivelock.release(repo)
 
 
 if __name__ == "__main__":
