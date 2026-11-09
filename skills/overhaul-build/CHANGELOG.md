@@ -38,6 +38,20 @@ plan-fix + integrator flow done by hand that day fixed 9 functions in ~6 min.
 - Dead depfix: a second "builder left no committed change" depfix for one owner module in the window parks the waiting function at once as `plan gap: <blocked-by text>` without spending attempts, and later BLOCKED-BY lines on that module park the same way without a depfix.
 - verdict.py: `main red: <check>` is the top red with its action; `systemic: <n> functions ...` while in the window; the line shows `rate N/h of expected E/h (slots S, build Bm, B builds/land)`, where expected = min(slots x 60 / median build minutes / rolling builds per land, 60 / median land minutes) and slots is max_parallel capped by the ready functions that can build at once (module rule, files cells). `rate red` when the last 60 min landed under half the expected rate or under [harness] min_rate_per_hour (default 0 = off) while builders ran, naming the stage that costs most (idle slots, needs-plan, blocked on deps, rework builds per land, landing queue). Tests: tests/test_main_red.py.
 
+## Land priority and tier reruns, 2026-11-09
+- Measured 2026-11-09 13:00 CST on the pilot project with 16 builders running: S123 passed review, then failed at land with
+  `regression: proven S02 tests/acceptance/s02_bench.rs::test_s02_stats_and_bench_record fails`, a timing benchmark
+  that passes alone in 2.7 s; plan_validate --run failed the same way on S02/S06/S12/S15 under load. Timing tests in
+  a [tiers] glob rerun at land when the footprint touches their module, so under load they rejected most lands.
+- priority.py (new; Windows creationflags and ctypes SetPriorityClass, a no-op elsewhere): drive.py starts builders,
+  reviewers, fix agents and probes (slot_env work) at BELOW_NORMAL, and their checks inherit it; land.py, the
+  pre-review gate (whole-tree commands, cycles, the function's acceptance) and periodic gates run at NORMAL; land.py
+  sets itself NORMAL and runs its acceptance batch, reruns and main-flake reruns at ABOVE_NORMAL.
+- land.py: a proven test inside the footprint that matches a [tiers] glob and fails reruns alone, serially after the
+  batch, up to 2 more times (TIER_RERUNS) before it counts as a regression; a recovery appends `tier rerun passed:
+  ...` to land.out and prints it (rerun output in land-tier.out). Non-tier proven tests keep the old rule.
+  Tests: scripts/tests/test_priority.py (fake Popen creationflags, a fake flaky tier test, an end-to-end land).
+
 ## Main guard, 2026-11-09
 - Per commit, not per range: a commit whose subject starts with `plan` or `m0` may also add code (new files,
   added lines: the stubs and module skeletons overhaul-plan writes), never change or delete an existing line.

@@ -49,6 +49,7 @@ import land as land_mod  # noqa: E402  the lock protocol is land.py's
 import mainred  # noqa: E402  beside this script: main red, systemic failures, dead depfixes
 import memcap  # noqa: E402  beside this script: [limits] proc_mem_gb
 import periodic  # noqa: E402  beside this script: [gates.periodic]
+import priority  # noqa: E402  beside this script: Windows process priority classes
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 os.environ.setdefault("OVERHAUL_HARNESS", "drive")  # the main guard (guard/reference-transaction) lets only the harness move main's code
@@ -140,6 +141,7 @@ REVIEW_MAX_CALLS = 20
 REASON_MAX = 1500
 POLL_S = 0.25
 DASH_EVERY_S = 15
+GATE_PRIORITY = priority.popen_kwargs(priority.NORMAL)  # the pre-review gate: above the builders
 LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py's lock
 DEFAULTS = {
     "limits": {"builder_max_calls": 60, "brief_max_tokens": 40000,
@@ -395,10 +397,16 @@ def in_changed(n: dict, changed: dict[str, set[int]]) -> bool:
 
 def spawn(cmd: list[str], cwd: Path, out: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
     """Start a worker in its own process group; stdout to out, stderr beside it; env replaces the environment."""
-    group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+    group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | spawn_priority(env)} if os.name == "nt"
              else {"start_new_session": True})
     with open(out, "wb") as fo, open(out.with_suffix(".err"), "wb") as fe:
         return subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, env=env, **group)
+
+
+def spawn_priority(env: dict[str, str] | None) -> int:
+    """Windows priority class for spawn: slot work (a builder, reviewer, fix agent or probe, given its slot_env)
+    runs BELOW_NORMAL and its checks inherit it; land.py (no env) runs NORMAL and lifts its own acceptance."""
+    return priority.flag(priority.BELOW_NORMAL if env is not None else priority.NORMAL)
 
 
 def kill_tree(proc: subprocess.Popen) -> None:
@@ -1290,7 +1298,7 @@ class Driver(mainred.MainRed):
         try:
             return subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True, encoding="utf-8",
                                   errors="replace", timeout=self.timeout_s, stdin=subprocess.DEVNULL,
-                                  env=self.slot_env(fid or wt.name))
+                                  env=self.slot_env(fid or wt.name), **GATE_PRIORITY)
         except subprocess.TimeoutExpired:
             return None
 
@@ -1373,7 +1381,7 @@ class Driver(mainred.MainRed):
             return ""
         try:
             p = subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=self.timeout_s, stdin=subprocess.DEVNULL)
+                               errors="replace", timeout=self.timeout_s, stdin=subprocess.DEVNULL, **GATE_PRIORITY)
         except subprocess.TimeoutExpired:
             return f"cycles check timed out in the worktree: `{cmd}`"
         if p.returncode == 0:
