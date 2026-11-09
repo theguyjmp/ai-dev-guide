@@ -1,5 +1,36 @@
 # overhaul-build changelog
 
+## Supervisor, 2026-11-09
+Measured on the pilot project vc5: the build sat at 44 proven for 4+ hours. drive.py was fine; everything around it was run by
+hand and failed: a bash launcher ran ONE serial headless manager per exit 3 (25+ min, one function at a time);
+planners and managers ran `plan_validate --run` and 1M-fixture tests outside drive's memory cap (30 GB processes,
+three Claude Code low-memory reaps); `memcap.py 12 -- bash` picked WSL bash and `-- claude` was not found, so
+relaunches silently ran nothing; `plan_validate --run` failed on timing tests that pass alone. The parallel
+plan-fix + integrator flow done by hand that day fixed 9 functions in ~6 min.
+- supervise.py (new): the one launcher. It calls memcap.cap_self first, so every child is capped at
+  `[limits] proc_mem_gb`; runs drive.py in the foreground; exit 0 runs the blind proof-check (only when every
+  non-deferred row is proven) and stops; exit 3 runs one Exit-3 round and drives again (`--max-rounds`, default 12);
+  any other exit runs drive once more, then stops with the error line. One line per step in
+  `.overhaul/supervise.log`; it writes nothing outside `.overhaul/`. Exit 0 done, 4 proof not all REAL, 3 rounds
+  used up, 1 error.
+- Exit-3 round, parallel: one `claude -p --model opus` plan-fix agent per needs-plan function at once
+  (`[harness] plan_fix_parallel`, default 12; `templates/plan-fix-brief.md`), each in its own worktree on
+  `plan/fix-<id>` with 5 new ids reserved after the highest id, so splits never collide. One integrator
+  (`templates/plan-fix-merge.md`, `[harness] plan_merge_model`, default sonnet; skipped for a single fix)
+  cherry-picks the branches into `plan/fixes-r<round>` with the phase cap kept. supervise.py checks PLAN OK on it,
+  fast-forwards main, runs `plan_validate --run` once and `drive.py --reset` for each fixed id still a row. A function
+  with two plan fixes is never reset again: its agent must replace it with new ids (supervise stops if it did not).
+- plan_validate.py --run: a proven acceptance that fails reruns ONCE alone, serially, before it counts; a pass then
+  is a `flaky under load` note on stderr, only a second failure is a PLAN FAIL (`settle_flaky`).
+- memcap.py: `which`/`resolve` find child programs like a shell: on Windows `bash` is Git Bash (from
+  `git --exec-path`, else Program Files), never System32 or WindowsApps bash.exe (WSL); a bare name tries .exe, .cmd,
+  .bat, so `claude` is the npm shim or claude.exe. `memcap.py GB -- cmd` exits 127 with `memcap: error: cannot find`
+  instead of running nothing.
+- Every headless claude supervise.py starts (and drive.py's, through the environment) gets
+  `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`.
+- tests: test_supervise.py (fake drive exit codes, fake claude, fake plan_validate; two needs-plan rows that would
+  split into the same id).
+
 ## Main guard, 2026-11-09
 - Per commit, not per range: a commit whose subject starts with `plan` or `m0` may also add code (new files,
   added lines: the stubs and module skeletons overhaul-plan writes), never change or delete an existing line.

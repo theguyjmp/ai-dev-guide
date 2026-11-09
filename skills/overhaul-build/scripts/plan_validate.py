@@ -45,7 +45,8 @@ Problems (each is one line):
   - tests/conftest.py is missing;
   - the cycles, entry_lint, literals or shape command exits non-zero (run from the repo root, through overhaul.toml);
   - the longest deps chain is over [plan] max_depth, default max(4, ceil(N/4)); depth and widest level print to stderr;
-  - with --run: a non-proven function's acceptance test PASSES (it must be red before the build), or a proven one FAILS.
+  - with --run: a non-proven function's acceptance test PASSES (it must be red before the build), or a proven one FAILS
+    (a proven failure reruns once alone first; one that passes then is only a "flaky under load" note on stderr).
   - a Python plan (acceptance in .py files) without tests/property/test_<id>.py per function holding 1 to 3 Hypothesis
     tests (`def test_*` under `@given`); a Rust plan without tests/property/test_<id>.rs holding 1 to 3 `#[test]` fns
     inside `proptest!`; [probe] property_tests = false turns this off. With --run and a [commands].property template
@@ -1375,8 +1376,14 @@ def validate(repo, run=False, timeout=600, notes=None):
         tests = [(r, item, f"{item.split('::')[0]}::{name}") for r in rows for item, name in r.get("tests", [])]
         # one command per test target ({test} = the bare test name, {stem} = the file stem), mapped back to ids
         acc = drive.land_mod.acceptance_template({**cmds, "acceptance": cmd["acceptance"]})
-        res = drive.land_mod.batch_results(acc, [node for _, _, node in tests],
-                                           lambda c: run_cmd(c, repo, timeout, full=True))
+        runner = lambda c: run_cmd(c, repo, timeout, full=True)  # noqa: E731
+        res = drive.land_mod.batch_results(acc, [node for _, _, node in tests], runner)
+        proven = [node for r, _, node in tests if r["st"] == "proven"]
+        for node in settle_flaky(acc, proven, res, runner):
+            r, item = next((r, item) for r, item, n in tests if n == node)
+            if notes is not None:
+                notes.append(f"{paths['functions']}:{r['line']} {r['rid']}: flaky under load: its acceptance {item} "
+                             "failed in the batch and passed alone")
         for r, item, node in tests:
             code, tail, _ = res[node]
             where = f"{paths['functions']}:{r['line']} {r['rid']}"
@@ -1399,6 +1406,24 @@ def validate(repo, run=False, timeout=600, notes=None):
                 problems.append(f"{where}: {r['st']}, but its property tests {r['property']} already PASS "
                                 "(they must be red before the build)")
     return problems, len(rows)
+
+
+def settle_flaky(template, proven, res, runner):
+    """A proven acceptance that failed reruns ONCE alone, one after another, before it counts: timing tests failed
+    only under load on 2026-11-09 (three planners and a build at once). A pass alone updates res and the node is
+    returned as flaky under load; a second failure stands as the PLAN FAIL."""
+    flaky = []
+    for node in dict.fromkeys(proven):
+        if not res.get(node) or res[node][0] == 0:
+            continue
+        (_, one), = drive.land_mod.acceptance_cmds(template, [node])
+        code, tail, _ = runner(one)
+        if code == 0:
+            res[node] = (0, "", True)
+            flaky.append(node)
+        else:
+            res[node] = (code, tail, True)
+    return flaky
 
 
 def main(argv=None):
