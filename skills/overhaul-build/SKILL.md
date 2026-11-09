@@ -42,6 +42,9 @@ Project rules: a row's `rules` column ids are quoted from `[paths] patterns`/`st
 briefs ("Project rules this row cites"), and only such a row gets checklist item C30 (each cited rule holds, the
 acceptance proves each pattern id). `[commands.extra]` runs after the whole-tree gate, at pre-review and land;
 `[commands.acceptance_by]` picks a test file's template; a proven `[tiers]` test reruns at land only by footprint.
+Priority (Windows): builders, reviewers, fix agents and probes run BELOW_NORMAL, the pre-review gate, land and periodic
+gates NORMAL, land's acceptance ABOVE_NORMAL; a failed `[tiers]` test reruns alone 2 more times before it is a
+regression (`tier rerun passed` in land.out).
 `[gates.periodic]` (scripts/periodic.py): slow gates (CI parity matrix via `periodic.py ci`, full scale tier, GPU over ssh)
 run on main in the background every N lands or M minutes and once at the end; `BENCH` lines are judged against
 spec/BUDGETS.toml (CI at ci_factor 2x, macOS record-only); each gate keeps its own green, so a red gate bisects to

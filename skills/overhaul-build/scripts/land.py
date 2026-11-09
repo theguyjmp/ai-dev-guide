@@ -22,6 +22,8 @@ R/.overhaul/wt/land, never in R's own working tree.
      to a fix in the owning module instead of failing the function. A proven test whose file matches a [tiers]
      glob (`scale = ["tests/acceptance/scale_*.rs"]`) reruns only when its row's module is the function's own or a
      module whose ARCHITECTURE.md Paths the branch changes (or a stacked row's); the function's own always run.
+     A tier test that fails reruns alone, serially after the batch, up to 2 more times before it is a regression
+     (a timing bench starved by builders); a pass prints `tier rerun passed`. Acceptance runs at ABOVE_NORMAL.
   6. One commit sets the row's status cell to `proven` in FUNCTIONS.md; main fast-forwards to it (and fn/<ID> too).
 
 FUNCTIONS.md rows: | id | phase | module | deps | entry | acceptance | status |, acceptance =
@@ -55,6 +57,7 @@ from pathlib import PurePosixPath
 
 import anchors  # beside this script
 import memcap  # beside this script: [limits] proc_mem_gb
+import priority  # beside this script: Windows process priority classes
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 os.environ.setdefault("OVERHAUL_HARNESS", "land")  # the main guard lets only the harness move main's code
@@ -256,12 +259,14 @@ def fill(template, **values):
     return out
 
 
-def run(cmd, cwd, out_path, timeout):
-    """Run one shell command in cwd; output goes to out_path. Returns (exit code, last output line)."""
+def run(cmd, cwd, out_path, timeout, level=priority.NORMAL):
+    """Run one shell command in cwd at priority `level` (Windows); output goes to out_path. Returns (exit code,
+    last output line)."""
     with open(out_path, "wb") as out:
         out.write(f"$ {cmd}\n".encode())
         out.flush()
-        proc = subprocess.Popen(cmd, cwd=cwd, shell=True, stdout=out, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, cwd=cwd, shell=True, stdout=out, stderr=subprocess.STDOUT,
+                                **priority.popen_kwargs(level))
         try:
             code = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -469,12 +474,12 @@ def red_nodes(template, nodes, wt, out_path, timeout, alone=True):
     """[(node, code, tail)] of the nodes that fail in wt, in order, batched by test target. With `alone`, the first
     one found in a batch reruns by itself so out_path holds its own output (the batch verdict stands)."""
     def runner(cmd):
-        code, tail = run(cmd, wt, out_path, timeout)
+        code, tail = run(cmd, wt, out_path, timeout, ACCEPTANCE_PRIORITY)
         return code, tail, read_out(out_path)
     res = batch_results(template, nodes, runner)
     bad = [(n, res[n][0], res[n][1]) for n in dict.fromkeys(nodes) if res[n][0] != 0]
     if bad and alone and not res[bad[0][0]][2]:
-        code, tail = run(acceptance_cmds(template, [bad[0][0]])[0][1], wt, out_path, timeout)
+        code, tail = run(acceptance_cmds(template, [bad[0][0]])[0][1], wt, out_path, timeout, ACCEPTANCE_PRIORITY)
         if code != 0:
             bad[0] = (bad[0][0], code, tail)
     return bad
@@ -670,10 +675,42 @@ def regression(rows, ids, commands, wt, out_path, timeout, tiers=(), near=None, 
     if not owner:
         return None
     bad = red_nodes(acceptance_template(commands), list(owner), wt, out_path, timeout)
+    bad = tier_recovered(bad, acceptance_template(commands), tiers, owner, wt, out_path, timeout)
     if not bad:
         return None
     node, code, tail = bad[0]
     return owner[node], node, f"regression: proven {owner[node]} {node} fails (exit {code}): {tail}"
+
+
+TIER_RERUNS = 2  # a failed [tiers] test (a timing bench) reruns alone this many more times before it counts
+ACCEPTANCE_PRIORITY = priority.ABOVE_NORMAL  # land's acceptance runs: ahead of the BELOW_NORMAL builders
+
+
+def tier_recovered(bad, template, tiers, owner, wt, out_path, timeout):
+    """bad without the [tiers] tests that pass when rerun alone. A tier test runs only inside the footprint, and
+    a timing bench starved by 16 builders fails a land it passes alone (pilotS123 on S02, 2026-11-09): each
+    failed one reruns by itself, serially after the batch, up to TIER_RERUNS times; a pass drops it and writes
+    `tier rerun passed` to out_path (land.out) and stdout. Reruns write <out_path>-tier.out, so land.out keeps a
+    failing test's own output. Other proven tests keep the batch verdict."""
+    keep, rerun_out = [], os.path.splitext(out_path)[0] + "-tier.out"
+    for node, code, tail in bad:
+        if not under(node.partition("::")[0], tiers):
+            keep.append((node, code, tail))
+            continue
+        cmd = acceptance_cmds(template, [node])[0][1]
+        for k in range(1, TIER_RERUNS + 1):
+            c, t = run(cmd, wt, rerun_out, timeout, ACCEPTANCE_PRIORITY)
+            if c == 0:
+                note = (f"tier rerun passed: proven {owner.get(node, '?')} {node} failed (exit {code}) in the "
+                        f"batch, passed alone on rerun {k}/{TIER_RERUNS} (output {rerun_out})")
+                with open(out_path, "a", encoding="utf-8") as f:
+                    f.write(note + "\n")
+                print(note, flush=True)
+                break
+            code, tail = c, t
+        else:
+            keep.append((node, code, tail))
+    return keep
 
 
 # ---- main flakes: a test outside the function's footprint that fails on clean main too ------------------------------
@@ -694,7 +731,7 @@ def flake_on_main(ctx, test, path, module, cmd, timeout):
     if git(wt, "checkout", "-q", "--detach", main, check=False).returncode != 0:
         return ""
     for k in range(1, FLAKE_RUNS + 1):
-        code, _ = run(cmd, wt, out, timeout)
+        code, _ = run(cmd, wt, out, timeout, ACCEPTANCE_PRIORITY)
         if code != 0:
             return (f"{MAIN_FLAKE} test={test} path={path or '?'} module={module or '?'} fails on clean main "
                     f"{main[:12]} too (run {k}/{FLAKE_RUNS}, output {out})")
@@ -958,6 +995,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     repo = os.path.abspath(a.repo)
     stack = [x.strip() for x in a.stack.split(",") if x.strip()]
+    priority.set_self(priority.NORMAL)  # a land outranks the BELOW_NORMAL builders even if started from one
     os.environ["CARGO_TARGET_DIR"] = target_dir(repo, a.target_dir, a.fid if stack and not a.polish else "")
     if not os.environ.get(memcap.ENV):  # run by hand, not under drive.py: take the same [limits] proc_mem_gb cap
         memcap.cap_self(proc_mem_gb(repo))

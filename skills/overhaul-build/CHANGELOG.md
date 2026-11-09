@@ -1,5 +1,19 @@
 # overhaul-build changelog
 
+## Land priority and tier reruns, 2026-11-09
+- Measured 2026-11-09 13:00 CST on the pilot project with 16 builders running: S123 passed review, then failed at land with
+  `regression: proven S02 tests/acceptance/s02_bench.rs::test_s02_stats_and_bench_record fails`, a timing benchmark
+  that passes alone in 2.7 s; plan_validate --run failed the same way on S02/S06/S12/S15 under load. Timing tests in
+  a [tiers] glob rerun at land when the footprint touches their module, so under load they rejected most lands.
+- priority.py (new; Windows creationflags and ctypes SetPriorityClass, a no-op elsewhere): drive.py starts builders,
+  reviewers, fix agents and probes (slot_env work) at BELOW_NORMAL, and their checks inherit it; land.py, the
+  pre-review gate (whole-tree commands, cycles, the function's acceptance) and periodic gates run at NORMAL; land.py
+  sets itself NORMAL and runs its acceptance batch, reruns and main-flake reruns at ABOVE_NORMAL.
+- land.py: a proven test inside the footprint that matches a [tiers] glob and fails reruns alone, serially after the
+  batch, up to 2 more times (TIER_RERUNS) before it counts as a regression; a recovery appends `tier rerun passed:
+  ...` to land.out and prints it (rerun output in land-tier.out). Non-tier proven tests keep the old rule.
+  Tests: scripts/tests/test_priority.py (fake Popen creationflags, a fake flaky tier test, an end-to-end land).
+
 ## Main guard, 2026-11-09
 - Per commit, not per range: a commit whose subject starts with `plan` or `m0` may also add code (new files,
   added lines: the stubs and module skeletons overhaul-plan writes), never change or delete an existing line.

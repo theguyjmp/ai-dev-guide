@@ -44,6 +44,7 @@ import tomllib
 from pathlib import Path
 
 import memcap  # beside this script: names a process memory cap hit in a red's reason
+import priority  # beside this script: periodic gates run at NORMAL, above the builders
 
 BENCH = re.compile(r"^\s*BENCH\s+(\S+)\s+(\S+)\s+([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\b", re.M)
 LAND_MSG = re.compile(r"^(?:land|polish)\s+([A-Za-z0-9][A-Za-z0-9._-]*):")
@@ -251,7 +252,8 @@ class Periodic:
                      ("{scripts}", self.drv.scripts.as_posix())):
             cmd = cmd.replace(k, v)
         with out.open("wb") as fo:
-            proc = subprocess.Popen(cmd, shell=True, cwd=wt, stdin=subprocess.DEVNULL, stdout=fo, stderr=subprocess.STDOUT)
+            proc = subprocess.Popen(cmd, shell=True, cwd=wt, stdin=subprocess.DEVNULL, stdout=fo, stderr=subprocess.STDOUT,
+                                    **priority.popen_kwargs(priority.NORMAL))  # above the BELOW_NORMAL builders
         self.job = (proc, gate, sha, out, time.monotonic() + float(self.cfg["timeout_min"]) * 60, mode)
         self.drv.log(None, "periodic_start", f"{gate} {mode} at {sha[:12]}")
         return True
