@@ -77,3 +77,13 @@ It does not launch builders or reviewers itself, read diffs, or hand-edit state.
 - plan under 45 min, with plan_validate passing;
 - build: every function proven through its public entry (red before, green after), the whole tree clean, at most 2 builder passes per function, under 2 h wall time, 0 manual interventions;
 - at the end, a blind proof-check finds every proven function REAL.
+
+## Resolutions (added 9:50 AM CST, gaps raised by agent E)
+R-a. **State ownership.** `.overhaul/` is runtime state and stays UNTRACKED (in .gitignore). The committed source of truth for "proven" is the status column of spec/FUNCTIONS.md, written only by land.py in the land commit. drive.py and land.py write state.json under the same lock file (.overhaul/lock).
+R-b. **Plan fixes and retries.**
+- The manager fixes the plan in a "plan commit" on main that touches only spec/, tests/acceptance/ and overhaul.toml, and only after `plan_validate.py --repo R` prints PLAN OK.
+- To retry a function: `drive.py --repo R --reset <id>` sets it to planned with attempts 0. Nobody hand-edits state.json.
+- A function demoted by the end proof-check is reset the same way.
+R-c. **Empty test dirs.** overhaul-plan creates the package skeleton plus a smoke unit test (tests/unit/test_smoke.py), so the test command never runs on an empty dir. land.py and verdict.py also treat pytest exit 5 ("no tests collected") as pass.
+R-d. **Acceptance already green on main before the change.** land.py fails it with the reason `acceptance already green before change` and drive.py marks it needs-plan at once (no retry). The manager either strengthens the test (a plan commit) or, if a dependency legitimately delivered the behaviour, has a blind reviewer confirm it and marks it proven via `drive.py --mark-proven <id> --evidence <review file>`.
+R-e. **Long runs.** The manager runs drive.py as ONE background command and waits with one long wait (interactive), or the harness runs it directly (headless). The model never runs it as a 10-minute foreground tool call.
