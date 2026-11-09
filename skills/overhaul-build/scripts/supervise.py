@@ -15,6 +15,9 @@ plan_validate, the tests they run) is capped too. Then, in a loop:
   that is still a row. A function that already had two plan fixes is never reset again: its agent must replace it
   with new rows. Then drive.py runs again; at most --max-rounds rounds (default 12);
 - any other exit: drive.py once more, then stop with its error line.
+- while drive runs, router.py's route rounds: functions drive parked with a plan-class failure (files gap, missing dep,
+  contract defect, oversized) get a plan-fix agent at once with the class and evidence in its brief; after an exit 3,
+  the reset requests those rounds wrote are applied first (drive --reset), so no Exit-3 round redoes them.
 Never runs the proof-check while functions remain. One line per step goes to .overhaul/supervise.log; everything it
 writes is under .overhaul/. Every headless claude it starts gets CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0.
 
@@ -43,6 +46,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import drive  # noqa: E402
 import memcap  # noqa: E402
+import router  # noqa: E402
 
 PROOF_BRIEF = HERE.parent / "references" / "proof-check.md"
 PLAN_SKILL = HERE.parent.parent / "overhaul-plan"
@@ -159,11 +163,16 @@ class Supervisor:
         while True:
             n += 1
             self.log(f"drive start (run {n})")
-            rc, tail = self.run([*self.drive_cmd, "--repo", str(self.repo)], self.ov / "drive.out")
+            with router.watching(self):  # routed plan fixes (router.py) while drive runs
+                rc, tail = self.run([*self.drive_cmd, "--repo", str(self.repo)], self.ov / "drive.out")
             self.log(f"drive exit {rc}: {tail}")
             if rc == 0:
                 return self.proof()
             if rc == 3:
+                if reset := router.apply_requests(self):  # plan fixes landed while drive ran: no Exit-3 round
+                    self.log(f"drive exit 3 after routed plan fixes ({' '.join(reset)}): drive again")
+                    failed = False
+                    continue
                 if rounds >= self.max_rounds:
                     self.log(f"stop: {rounds} exit-3 rounds used (--max-rounds {self.max_rounds}); needs-plan: "
                              f"{' '.join(self.needs_plan()) or '-'}")

@@ -1,5 +1,33 @@
 # overhaul-build changelog
 
+## Failure router, 2026-11-09
+Measured on the pilot project: 7 lands since 8 AM (0.85/h) against a 10/h floor; 32 failed attempts since 12:34 PM: 8 review
+failed, 7 acceptance red after merging main (several really files-cell gaps or oversized 1M rows), 6 timing/flaky tests
+on main, 3 builder made no change, 2 outside files cell, 2 builder timed out, 1 contract defect, 1 plan gap. The verdict
+showed an expected rate and a bottleneck stage, but nothing classified WHY attempts failed; the systemic detector needs
+one normalized reason 3 times and never fired; the manager classified by hand, hours late.
+- router.py (new): every failed attempt (drive.fail and drive.park: needs_plan, land_fail, review_fail, builder and
+  land timeouts, failed dependency fixes) gets one class from its reason and, for a thin reason ("no committed
+  change", "acceptance red"), from the builder's last output: files_gap, missing_dep, contract_defect, main_flake,
+  load_flake, oversized, review_quality, other. Event `routed` (`class=<c> -> <route>: <evidence>`); rolling 60-min
+  counts in `.overhaul/router/router.json`. `py -3 router.py --repo R` prints the last hour's classes.
+- Routed at once, not at Exit 3: a plan class parks the function needs-plan with the class and evidence in its
+  reason and writes `.overhaul/router/routes/<id>.json`; supervise.py, while drive runs, gives each routed function
+  a plan-fix agent (class and evidence in the brief's mode line; oversized means split), one route per function, at
+  most `[harness] plan_fix_parallel` at once, the integrator when more than one fixed, lands the plan under
+  `.overhaul/lock`, and writes `.overhaul/requests/reset-<id>` (live-replan's request file). Until drive consumes
+  requests itself (live-replan), supervise applies them with `drive --reset` when drive exits 3, then drives again
+  without an Exit-3 round. With live-replan's live rounds present the router's round steps aside and the live round
+  reads the class from the reason. main_flake: drive's existing fix packet to the owner module, plus lands of queued
+  rows whose footprint reruns the test (same module, or a changed file in its module or the test file) are held
+  until that fix settles. load_flake: no attempt charged, the land requeued (at most 2 per function).
+- verdict.py: `failures` in verdict.json (counts per class, top class, a human line), ` failures N top <class>` on
+  the VERDICT line, and a red when one class is over 30% of at least 3 failures in the last hour, in words: "most
+  failures: builders cannot edit a needed file (5 of 9)". An older log without `routed` events is classified from its
+  raw failure events, one per function per 2 min. dash.py shows the line.
+- On the pilot project's log for 12:34-16:20 (raw): 30 failures: other 7 (regressions of proven rows the branch caused, empty
+  builder output), review_quality 6, oversized 5, files_gap 4, missing_dep 3, main_flake 3, contract_defect 2.
+
 ## Supervisor, 2026-11-09
 Measured on the pilot project vc5: the build sat at 44 proven for 4+ hours. drive.py was fine; everything around it was run by
 hand and failed: a bash launcher ran ONE serial headless manager per exit 3 (25+ min, one function at a time);

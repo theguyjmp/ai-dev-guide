@@ -40,6 +40,10 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import router  # noqa: E402  beside this script: failure classes
 
 try:
     import tomllib
@@ -475,6 +479,10 @@ def judge(p, prev, t_now, checks, events):
             bar = f"floor {floor:g}/h" if under_floor else f"half of expected {tp['expected']:.1f}/h"
             reds.append((1, "rate", f"rate red: {tp['landed_60m']}/h < {bar}; top stage {tp['top_stage']} "
                          f"(~{tp['top_cost']:.1f}/h lost)", RATE_FIX[tp["top_stage"]]))
+    odir = os.path.dirname(p["log"])
+    fails = router.failures(events, t_now, builder=lambda fid: router.builder_text(Path(odir), fid))
+    if fails["red"]:  # one cause over 30% of the last hour's failures: the manager's bottleneck, in words
+        reds.append((1, "failures", fails["words"], fails["action"]))
     nits = pol.get("nits") if pol else None
     trend = open_audit_trend(events)
 
@@ -529,14 +537,16 @@ def judge(p, prev, t_now, checks, events):
             "reds": [{"kind": k, "what": w, "action": a} for _, k, w, a in shown], "reds_total": len(reds),
             "checks": checks if checks is not None else "skipped", "needs_plan_since": since,
             "polish_issues": issues, "nits": nits, "trend": trend, "phase_audits": audits,
-            "deferred": p.get("deferred", 0), "throughput": tp,
+            "deferred": p.get("deferred", 0), "throughput": tp, "failures": fails,
             "line": f"VERDICT {verdict} proven {proven}/{total}"
                     f"{' deferred ' + str(p['deferred']) if p.get('deferred') else ''} rate {rate:.1f}/h"
                     f"{expected_text(tp)}"
                     f"{'' if pol is None else ' issues ' + ('?' if issues is None else str(issues))}"
                     f"{'' if pol is None else ' nits ' + str(as_int(nits))}"
                     f"{'' if trend is None else ' trend ' + trend}"
-                    f"{' ' + audit_text if audit_text else ''} reds: {text}"}
+                    f"{' ' + audit_text if audit_text else ''}"
+                    f"{' failures ' + str(fails['total']) + ' top ' + fails['top'] if fails['total'] else ''}"
+                    f" reds: {text}"}
 
 
 RATE_FIX = {

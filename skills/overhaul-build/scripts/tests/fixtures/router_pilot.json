@@ -1,0 +1,162 @@
+[
+ {
+  "t": "2026-11-09T12:56:00-06:00",
+  "event": "blocked_by",
+  "fn": "R0524",
+  "detail": "contract tests/acceptance/r0524_define.rs:111: input: complex_elements (LTSCALE 1) then ltscale 2.5, save and reopen; the test expects GAS_LINE effective_length 30 (its listing captured at LTSCALE 1); with `effective_length = pattern_length * ltscale` the correct value is 75, so compare without effective_length or capture `gas` after the ltscale change.",
+  "builder": "",
+  "class": "contract_defect"
+ },
+ {
+  "t": "2026-11-09T12:56:00-06:00",
+  "event": "needs_plan",
+  "fn": "R0524",
+  "detail": "contract defect reported by the builder in tests/acceptance/r0524_define.rs:111: input: complex_elements (LTSCALE 1) then ltscale 2.5, save and reopen; the test expects GAS_LINE effective_length 30 (its listing captured at LTSCALE 1); with `effective_length = pattern_length * ltscale` the correct value is 75, so compare without effective_length or capture `gas` after the ltscale change.",
+  "builder": "",
+  "class": "contract_defect"
+ },
+ {
+  "t": "2026-11-09T12:59:47-06:00",
+  "event": "land_fail",
+  "fn": "S123",
+  "detail": "regression: proven S02 tests/acceptance/s02_bench.rs::test_s02_stats_and_bench_record fails (exit 101): error: test failed, to rerun pass `--test s02_bench`",
+  "builder": "",
+  "class": "other"
+ },
+ {
+  "t": "2026-11-09T13:11:44-06:00",
+  "event": "needs_plan",
+  "fn": "S45",
+  "detail": "builder left no committed change on fn/S45",
+  "builder": "BLOCKED S45 72ac620\n`app do --stats` prints the stats line on stderr after the refusal JSON, but the test reads all of stderr as one JSON value, so `test_s45_rejects_cell_out_of_range` can't pass from the allowed paths (the previous attempt got the right refusal and still failed only for this).\nBLOCKED-BY: src/main.rs:81 `do element.set --params {\"path\":..,\"id\":4,\"props\":{\"12\":1}} --stats` writes two stderr lines, `{\"code\":\"invalid-args\",\"field\":\"props\",..}` then `{\"stats\":{..}}`; it should write one JSON object starting with `\"stats\"` and holding the refusal fields, so both `entry::stderr_json` and `entry::stats` can read it.",
+  "class": "missing_dep"
+ },
+ {
+  "t": "2026-11-09T13:21:34-06:00",
+  "event": "review_fail",
+  "fn": "R0501",
+  "detail": "plan gap: 1 of 1 verified blocking NOs need a change outside the allowed paths: PLAN-GAP: K2: geom/kernel must expose the plane of a face (feature, face index) so sketch.create can support face sketches. / [K2 crates/sketch/src/sketch_create.rs:378] Support::Face of an EXISTING feature always returns Unsupported (MSG_FACE_PLANE); creating a sketch on a face never succeeds though the row says 'on a plane or face'. Input {face:{feature:<existing>,face:0}} exits 6. none inside allowed paths: no face-plane API in the tree (git grep finds none) model=sonnet",
+  "builder": "",
+  "class": "files_gap"
+ },
+ {
+  "t": "2026-11-09T13:21:34-06:00",
+  "event": "needs_plan",
+  "fn": "R0501",
+  "detail": "review asks for a change outside the allowed paths (plan gap): PLAN-GAP: K2: geom/kernel must expose the plane of a face (feature, face index) so sketch.create can support face sketches. / [K2 crates/sketch/src/sketch_create.rs:378] Support::Face of an EXISTING feature always returns Unsupported (MSG_FACE_PLANE); creating a sketch on a face never succeeds though the row says 'on a plane or face'. Input {face:{feature:<existing>,face:0}} exits 6. none inside allowed paths: no face-plane API in the tree (git grep finds none)",
+  "builder": "",
+  "class": "files_gap"
+ },
+ {
+  "t": "2026-11-09T13:21:35-06:00",
+  "event": "review_fail",
+  "fn": "R0530",
+  "detail": "2 verified blocking NOs model=sonnet",
+  "builder": "",
+  "class": "review_quality"
+ },
+ {
+  "t": "2026-11-09T13:26:46-06:00",
+  "event": "needs_plan",
+  "fn": "S123",
+  "detail": "review FAIL: 1 verified blocking NOs; fix every one (full list: <repo>/.overhaul/reviews/S123-nos.md):\n- [C20 P1] `src/bench.rs:100` fixture_cache() has no test: dropping .filter(!is_empty) or changing DEFAULT_CACHE survives; only the env-set path is hit by the acceptance test -> unit-test fixture_cache default/empty-env branch (or split a pure fn taking Option<OsString> and test it)",
+  "builder": "",
+  "class": "review_quality"
+ },
+ {
+  "t": "2026-11-09T13:56:29-06:00",
+  "event": "land_fail",
+  "fn": "S111",
+  "detail": "acceptance still red after merge: tests/acceptance/s111_pick_1m_memory.rs::test_s111_pick_and_hover_1m_in_memory_p19_p69 (exit 1): running 1 test",
+  "builder": "",
+  "class": "oversized"
+ },
+ {
+  "t": "2026-11-09T14:02:30-06:00",
+  "event": "land_fail",
+  "fn": "S113",
+  "detail": "main flake: test=tests/acceptance/s06_snapshot_reads.rs::test_s06_concurrent_readers_never_torn path=tests/acceptance/s06_snapshot_reads.rs module=store fails on clean main eecca84eb058 too (run 2/3, output <repo>\\.overhaul\\land-S113-flake.out); on the merged tree: regression: proven S06 tests/acceptance/s06_snapshot_reads.rs::test_s06_concurrent_readers_never_torn fails (exit 101): error: test failed, to rerun pass `--test s06_snapshot_reads`",
+  "builder": "",
+  "class": "main_flake"
+ },
+ {
+  "t": "2026-11-09T14:09:11-06:00",
+  "event": "needs_plan",
+  "fn": "S113",
+  "detail": "dependency fix depfix-flake-S113 failed: builder left no committed change on fn/depfix-flake-S113",
+  "builder": "",
+  "class": "main_flake"
+ },
+ {
+  "t": "2026-11-09T14:11:15-06:00",
+  "event": "needs_plan",
+  "fn": "S111",
+  "detail": "changed crates/view/src/cull.rs beyond visibility: outside its files cell (module view and the modules it depends on) a function may only make an existing item pub/pub(crate)/export or re-export it there",
+  "builder": "",
+  "class": "files_gap"
+ },
+ {
+  "t": "2026-11-09T14:29:03-06:00",
+  "event": "land_fail",
+  "fn": "S110",
+  "detail": "acceptance still red after merge: tests/acceptance/s110_cull_budget.rs::test_s110_cull_1m_under_budget_p19 (exit 101): error: test failed, to rerun pass `--test s110_cull_budget`",
+  "builder": "",
+  "class": "oversized"
+ },
+ {
+  "t": "2026-11-09T14:40:07-06:00",
+  "event": "needs_plan",
+  "fn": "S43",
+  "detail": "main flake on tests/acceptance/s06_snapshot_reads.rs::test_s06_concurrent_readers_never_torn again after its fix this run: main flake: test=tests/acceptance/s06_snapshot_reads.rs::test_s06_concurrent_readers_never_torn path=tests/acceptance/s06_snapshot_reads.rs module=store fails on clean main 2b0956f582aa too (run 1/3, output <repo>\\.overhaul\\land-S43-flake.out); on the merged tree: regression: proven S06 tests/acceptance/s06_snapshot_reads.rs::test_s06_concurrent_readers_never_torn fails (exit 101): error: test failed, to rerun pass `--test s06_snapshot_reads`",
+  "builder": "",
+  "class": "main_flake"
+ },
+ {
+  "t": "2026-11-09T15:19:24-06:00",
+  "event": "build_end",
+  "fn": "S140",
+  "detail": "rc=1 turns=None/60 timeout model=opus",
+  "builder": "",
+  "class": "oversized"
+ },
+ {
+  "t": "2026-11-09T15:19:24-06:00",
+  "event": "needs_plan",
+  "fn": "S140",
+  "detail": "builder timed out after 30 min and was killed; work in smaller steps and commit as you go",
+  "builder": "",
+  "class": "oversized"
+ },
+ {
+  "t": "2026-11-09T15:31:20-06:00",
+  "event": "needs_plan",
+  "fn": "R0403",
+  "detail": "contract defect reported by the builder in spec/FUNCTIONS.md:213: R0403's files list only crates/kernel/src/solid_sphere.rs, but `{kind:\"sphere\",radius:0.25}` gives exit 7 `bad_recipe` instead of volume 4/3·π·r³; the row also needs crates/kernel/src/engine.rs (a `Solid::Sphere`), crates/kernel/shim/occt_shim.cpp (a sphere kind built with `BRepPrimAPI_MakeSphere`) and crates/kernel/src/solid_box.rs (a `\"sphere\"` arm in `solid_of`).",
+  "builder": "",
+  "class": "contract_defect"
+ },
+ {
+  "t": "2026-11-09T15:43:58-06:00",
+  "event": "needs_plan",
+  "fn": "R0408",
+  "detail": "acceptance red in the worktree after merging main, before review: tests/acceptance/r0408_revolve.rs::test_r0408_revolve_360_pappus_volume_area_bbox (exit 101): assertion `left == right` failed: {\"code\":\"eval-failed\",\"field\":\"recipe\",\"message\":\"the shape recipe does not describe a buildable solid\",\"reason\":\"bad_recipe\"} / left: 7 / right: 0 / note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace / failures: / test_r0408_revolve_360_pappus_volume_area_bbox / test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.50s / error: test failed, to rerun pass `--test r0408_revolve` (full output: <repo>/",
+  "builder": "BLOCKED R0408 5841475\nI wrote `solid.revolve`: it parses the axis, checks the profile doesn't cross the axis, and records the solid, with 4 unit tests passing, but the engine can't build a revolve, so the acceptance tests still fail with exit 7 `bad_recipe`.\nBLOCKED-BY: crates/kernel/src/engine.rs:53 input `solid.revolve` with profile [[1,0],[3,0],[3,2],[1,2]] about the Y axis: wrong result is exit 7 `bad_recipe`, because `engine::Solid`, the shim's `build()` (crates/kernel/shim/occt_shim.cpp:78) and `solid_box::solid_of` (solid_box.rs:93) have no revolve kind; right result is a revolve recipe built with OCCT's BRepPrimAPI_MakeRevol, giving volume 16π.",
+  "class": "missing_dep"
+ },
+ {
+  "t": "2026-11-09T15:48:22-06:00",
+  "event": "needs_plan",
+  "fn": "S39",
+  "detail": "acceptance red in the worktree after merging main, before review: tests/acceptance/s39_occt_payload.rs::test_s39_occt_payload_meshes_in_the_worker_without_copying (exit 101): test_s39_occt_payload_meshes_in_the_worker_without_copying / test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.08s / thread 'test_s39_occt_payload_meshes_in_the_worker_without_copying' (138996) panicked at tests\\acceptance\\s39_occt_payload.rs:36:5: / assertion `left == right` failed: the registered payload ran: {\"elements\":1,\"kinds\":{\"part\":1},\"root\":{\"id\":1,\"kind\":\"part\",\"name\":\"part-1\",\"parent\":1001,\"props\":{\"at\":[3726.5,8344.6,848.4],\"divisions\":5,\"faces\":6,\"shape\":\"box\",\"s",
+  "builder": "BLOCKED S39 c2665eb\nI built and unit-tested the payload registry and shared-memory handoff in `payload.rs` (`register`, `call`, `share_mesh`). The 3 acceptance tests can't pass: the code that has to call the payload is outside my allowed files, and the kernel `occt` payload returns no mesh bytes to share, so `mesh_bytes_shared` can't reach 1.\nBLOCKED-BY: crates/jobs/src/worker.rs:176 part.evaluate on asm-unique-1k part 1 (a part with a shape recipe) returns the S11 `{root, elements, kinds}` value, but it should return `payload::call(\"occt\")`'s `{payload, volume, faces, triangles}`. S39's files column needs `worker.rs` and `evaluate.rs` (for the two mesh counters), and `crates/kernel/src/occt_payload.rs` must hand back a mesh to share.",
+  "class": "files_gap"
+ },
+ {
+  "t": "2026-11-09T14:34:13-06:00",
+  "event": "land_fail",
+  "fn": "S24",
+  "detail": "regression: proven S42 tests/acceptance/s42_lod_chains.rs::test_s42_lod_chains_hlod_impostors fails (exit 101): error: test failed, to rerun pass `--test s42_lod_chains`",
+  "builder": "",
+  "class": "other"
+ }
+]
