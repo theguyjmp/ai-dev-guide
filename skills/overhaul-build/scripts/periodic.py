@@ -4,8 +4,14 @@ overhaul.toml (all optional; without [gates.periodic] nothing changes):
   [gates.periodic]
   every_lands = 10          # run after this many lands since the last run ...
   every_min = 120           # ... or this many minutes, if anything landed; and once more when the build is done
+  # Per gate: make every_lands / every_min a table instead; its gates run on their own cadence, the rest on
+  # `default` (else 10 / 120), and at the end such a gate runs once only when every function is proven:
+  #   [gates.periodic.every_min]
+  #   default = 120
+  #   parity = 10080          # weekly (a paid CI minute budget), plus once at the finish
+  # A gate named in only one of the two tables runs on that one alone.
   timeout_min = 60          # per gate command
-  bisect = true             # red: bisect the main commits since the last green, culprit's module gets one depfix
+  bisect = true             # red: bisect the main commits since that gate's last green; culprit's module, one depfix
   budgets = "spec/BUDGETS.toml"
   [gates.periodic.commands]  # name = command, run in .overhaul/periodic (a detached worktree at {sha})
   parity = "py -3 {scripts}/periodic.py ci --workflow parity.yml --sha {sha}"   # X2: Windows/macOS/Linux matrix
@@ -16,9 +22,16 @@ Placeholders: {sha}, {sha12}, {repo}, {scripts}. A gate is red when its command 
 BUDGETS.toml (D9): `ci_factor = 2.0`, `reference = "desk"` (the os label whose numbers are the budget itself),
 `record_only = ["macos"]` (recorded, never gated) and `[budgets] <name> = <value>`: lower is better; a value
 over budget x (1 on the reference, else ci_factor) fails. Unknown names are recorded only.
-State: state.json "periodic" {last_green, lands, last_run, red: {gate: {sha, reason, culprit}}, bisect, fixed}.
+Each gate keeps its own green: a red gate bisects over the lands since ITS last green, so one gate's red never
+blocks another's bisect. A gate whose command exits 75 after printing `ci: unavailable: <reason>` (CI that cannot
+run: billing, spending limit, unsupported runner) is UNAVAILABLE: never bisected, no depfix, not green; the verdict
+shows it as an owner line.
+State: state.json "periodic" {green: {gate: sha}, last_green (every gate green; older states seed green from it),
+  lands, last_run (the last run of any gate), since: {gate: lands}, ran: {gate: time}, finish: {gate: functions},
+  red: {gate: {sha, reason, culprit}}, unavailable: {gate: {sha, reason}}, bisect, fixed}.
   py -3 periodic.py ci --workflow W --sha S [--timeout-min 90]   push S to overhaul-periodic/<sha12>, run W there, wait,
-                                                                print its BENCH lines; exit 0 only on success
+                                                                print its BENCH lines; exit 0 only on success, 75 when
+                                                                GitHub never started the jobs (unavailable)
 Python standard library only.
 """
 import argparse
@@ -30,8 +43,15 @@ import time
 import tomllib
 from pathlib import Path
 
+import memcap  # beside this script: names a process memory cap hit in a red's reason
+
 BENCH = re.compile(r"^\s*BENCH\s+(\S+)\s+(\S+)\s+([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\b", re.M)
 LAND_MSG = re.compile(r"^(?:land|polish)\s+([A-Za-z0-9][A-Za-z0-9._-]*):")
+UNAVAILABLE = 75  # EX_TEMPFAIL: the gate could not run at all; not a code red
+UNAVAIL_MSG = re.compile(r"^ci: unavailable: (.+)$", re.M)
+# GitHub annotations on jobs that never started: billing, spending limit, a runner label it does not offer
+NOT_STARTED = re.compile(r"The job was not started because [^\n]*?(?:\.(?=\s|$)|$)|"
+                         r"The configuration '[^'\n]+' is not supported", re.I | re.M)
 DEFAULTS = {"every_lands": 10, "every_min": 120, "timeout_min": 60, "bisect": True, "budgets": "", "commands": {}}
 
 
@@ -87,28 +107,83 @@ class Periodic:
         self.queue: list[str] = []  # gates left in the current full run
         self.run_sha = ""
         self.run_red: list[str] = []
+        self.run_all = False  # this run has every gate: all green moves last_green
 
     @property
     def st(self) -> dict:
         st = self.drv.st.setdefault("periodic", {})
         for k, v in (("last_green", ""), ("lands", 0), ("last_run", 0.0), ("red", {}), ("bisect", None),
-                     ("fixed", [])):
+                     ("fixed", []), ("unavailable", {})):
             st.setdefault(k, v)
+        if "green" not in st:  # an older state: one last_green for all gates, plus each gate's greens in the log
+            st["green"] = self.seed_green(st["last_green"])
         return st
+
+    def seed_green(self, last_green: str) -> dict:
+        """{gate: sha} from the old last_green, then each gate's latest green full run in log.jsonl."""
+        gates = self.cfg.get("commands", {})
+        green = {g: last_green for g in gates} if last_green else {}
+        try:
+            lines = (self.drv.ov / "log.jsonl").read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            if '"periodic_green"' not in line:
+                continue
+            try:
+                m = re.match(r"(\S+) run at ([0-9a-f]{7,40})\b", json.loads(line).get("detail") or "")
+            except (ValueError, AttributeError):
+                continue
+            if m and m.group(1) in gates:
+                sha = self.drv_git("rev-parse", "--verify", "-q", f"{m.group(2)}^{{commit}}")
+                if sha:
+                    green[m.group(1)] = sha
+        return green
 
     def landed(self) -> None:
         if self.cfg:
-            self.st["lands"] += 1
+            st = self.st
+            st["lands"] += 1
+            for g in st.setdefault("since", {}):
+                st["since"][g] += 1
 
     def busy(self) -> bool:
         return bool(self.cfg) and bool(self.job or self.queue or self.st["bisect"])
 
-    def due(self, idle: bool) -> bool:
-        st = self.st
-        if not st["lands"]:
-            return False
-        mins = (time.time() - float(st["last_run"] or 0)) / 60
-        return idle or st["lands"] >= int(self.cfg["every_lands"]) or mins >= float(self.cfg["every_min"])
+    def every(self, key: str, gate: str) -> float:
+        """every_lands / every_min for one gate: a number for all, or a table {gate: n, default: n}."""
+        v = self.cfg.get(key, DEFAULTS[key])
+        if self.own_cadence(gate) and not (isinstance(v, dict) and gate in v):
+            return float("inf")  # a gate with its own cadence runs only on the keys it names
+        if isinstance(v, dict):
+            v = v.get(gate, v.get("default", DEFAULTS[key]))
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return float(DEFAULTS[key])
+
+    def own_cadence(self, gate: str) -> bool:
+        return any(isinstance(self.cfg.get(k), dict) and gate in self.cfg[k] for k in ("every_lands", "every_min"))
+
+    def all_proven(self) -> bool:
+        recs = self.drv.st.get("functions") or {}
+        return bool(self.drv.fns) and all((recs.get(fid) or {}).get("status") == "proven" for fid in self.drv.fns)
+
+    def due_gates(self, idle: bool) -> list[str]:
+        """The gates due now, each with lands since its own last run: past its every_lands or every_min, or the
+        build is idle (a gate with its own cadence: only once all functions are proven, once per plan size)."""
+        st, now, out = self.st, time.time(), []
+        since, ran, fin = st.get("since") or {}, st.get("ran") or {}, st.get("finish") or {}
+        for g in self.cfg["commands"]:
+            n = since.get(g, st["lands"])
+            if not n:
+                continue
+            mins = (now - float(ran.get(g, st["last_run"]) or 0)) / 60
+            if n >= self.every("every_lands", g) or mins >= self.every("every_min", g):
+                out.append(g)
+            elif idle and (not self.own_cadence(g) or (self.all_proven() and fin.get(g) != len(self.drv.fns))):
+                out.append(g)
+        return out
 
     def step(self, idle: bool = False) -> bool:
         """One poll; idle = nothing else is in flight (the build is done but main has untested lands)."""
@@ -120,18 +195,30 @@ class Periodic:
             return self.start(self.queue.pop(0), self.run_sha, "run")
         if self.run_sha:
             return self.end_run()
-        b = self.st["bisect"]
+        b = self.st["bisect"] or self.next_bisect()
         if b:
             mid = next_mid(b["lo"], b["hi"])
             if mid is None:
                 return self.blame(b["gate"], b["cands"][b["hi"]])
             return self.start(b["gate"], b["cands"][mid], "bisect")
-        if self.due(idle):
+        gates = self.due_gates(idle)
+        if gates:
             sha = self.drv_git("rev-parse", self.drv.main)
             if not sha:
                 return False
-            self.st.update(lands=0, last_run=time.time())
-            self.run_sha, self.run_red, self.queue = sha, [], list(self.cfg["commands"])
+            st, now = self.st, time.time()
+            since, ran, fin = st.setdefault("since", {}), st.setdefault("ran", {}), st.setdefault("finish", {})
+            done = idle and self.all_proven()
+            for g in self.cfg["commands"]:
+                since.setdefault(g, st["lands"])
+                ran.setdefault(g, st["last_run"])
+                if g in gates:
+                    since[g], ran[g] = 0, now
+                    if done:
+                        fin[g] = len(self.drv.fns)
+            st.update(lands=0, last_run=now)
+            self.run_sha, self.run_red, self.queue = sha, [], list(gates)
+            self.run_all = len(gates) == len(self.cfg["commands"])
             return self.start(self.queue.pop(0), sha, "run")
         return False
 
@@ -196,40 +283,69 @@ class Periodic:
                                      "value": value, "limit": limit, "ok": ok}) + "\n")
                 if not ok:
                     over.append(f"{name} {os_} {value:g} > {limit:g}")
+        st = self.st
+        un = UNAVAIL_MSG.search(text) if code == UNAVAILABLE else None
+        if un:  # the gate could not run (CI billing, runner): not red, not green, never bisected
+            reason = un.group(1).strip()[:200]
+            self.drv.log(None, "periodic_unavailable", f"{gate} {mode} at {sha[:12]} {reason}"[:1500])
+            if gate not in st["unavailable"]:
+                self.drv.say(f"periodic gate {gate} unavailable: {reason}; the owner decides")
+            st["unavailable"][gate] = {"sha": sha, "reason": reason}
+            st["red"].pop(gate, None)
+            if mode == "run":
+                self.run_red.append(gate)  # the run is not all green
+            elif (st["bisect"] or {}).get("gate") == gate:
+                st["bisect"] = None
+            return
         red = code != 0 or bool(over)
         tail = [x for x in text.splitlines() if x.strip()][-1:] or [""]
         reason = (f"over budget: {'; '.join(over)}" if over else f"exit {code}: {tail[0][:160]}") if red else ""
+        reason = memcap.note(text, reason) if red and not over else reason
         self.drv.log(None, "periodic_red" if red else "periodic_green", f"{gate} {mode} at {sha[:12]} {reason}"[:1500])
         if mode == "run":
+            st["unavailable"].pop(gate, None)
             if red:
                 self.run_red.append(gate)
-                self.st["red"][gate] = {"sha": sha, "reason": reason, "culprit": ""}
+                old = st["red"].get(gate) or {}  # red since its last green: the culprit found then stands
+                st["red"][gate] = {"sha": sha, "reason": reason, "culprit": old.get("culprit", "")}
             else:
-                self.st["red"].pop(gate, None)
+                st["red"].pop(gate, None)
+                st["green"][gate] = sha
             return
-        bis = self.st["bisect"]
+        bis = st["bisect"]
+        if not bis or bis.get("gate") != gate or sha not in bis["cands"]:
+            return
         idx = bis["cands"].index(sha)
         bis["hi" if red else "lo"] = idx
 
     def end_run(self) -> bool:
-        """A full run is done: green moves last_green; a newly red gate is bisected over the lands since then."""
+        """A full run is done: all green moves last_green too. Red gates are bisected next, each on its own."""
         sha, red, self.run_sha = self.run_sha, self.run_red, ""
-        st = self.st
-        if not red:
-            st["last_green"] = sha
+        if not red and self.run_all:
+            self.st["last_green"] = sha
             self.drv.say(f"periodic gates green at {sha[:12]}")
-            return True
-        gate = next((g for g in red if not st["red"][g].get("culprit")), "")
-        if not gate or not self.cfg.get("bisect", True):
-            return True
-        cands = self.drv_git("rev-list", "--first-parent", "--reverse", f"{st['last_green']}..{sha}").split() \
-            if st["last_green"] else []
-        if not cands:  # no green yet: nothing to bisect against; the red stands for the owner
-            st["red"][gate]["culprit"] = f"{sha[:12]} (no earlier green)"
-            self.drv.say(f"periodic gate {gate} red at {sha[:12]} with no earlier green: {st['red'][gate]['reason']}")
-            return True
-        st["bisect"] = {"gate": gate, "cands": cands, "lo": -1, "hi": len(cands) - 1}
         return True
+
+    def next_bisect(self) -> dict | None:
+        """The next red gate without a culprit, bisected over the lands since ITS own last green. A gate with no
+        earlier green gets that as its culprit (the red is the owner's) and the next gate is tried."""
+        st = self.st
+        if not self.cfg.get("bisect", True):
+            return None
+        for gate in [g for g in self.cfg["commands"] if g in st["red"]]:
+            rec = st["red"][gate]
+            if rec.get("culprit") or gate in st["unavailable"]:
+                continue
+            green, sha = st["green"].get(gate) or st["last_green"], rec.get("sha", "")  # all green is green too
+            cands = self.drv_git("rev-list", "--first-parent", "--reverse", f"{green}..{sha}").split() \
+                if green and sha else []
+            if not cands:  # no green yet: nothing to bisect against
+                rec["culprit"] = f"{sha[:12]} (no earlier green)"
+                self.drv.say(f"periodic gate {gate} red at {sha[:12]} with no earlier green: {rec['reason']}")
+                continue
+            st["bisect"] = {"gate": gate, "cands": cands, "lo": -1, "hi": len(cands) - 1}
+            return st["bisect"]
+        return None
 
     def blame(self, gate: str, sha: str) -> bool:
         """The first red commit: its function's module gets one depfix per gate; otherwise the red is the owner's."""
@@ -266,6 +382,24 @@ def gh(*args: str, timeout: float = 120) -> tuple[int, str]:
     return r.returncode, r.stdout + r.stderr
 
 
+def not_started(run, rid: str) -> str:
+    """Why GitHub never ran this run, from its job annotations, or '' when any job ran (a real red)."""
+    code, out = run("run", "view", rid, "--json", "jobs")
+    try:
+        jobs = (json.loads(out) if code == 0 else {}).get("jobs") or []
+    except (ValueError, AttributeError):
+        jobs = []
+    if not jobs or any(j.get("steps") for j in jobs):  # a job that ran steps: its failure is the code's
+        return ""
+    _, text = run("run", "view", rid)
+    found = []
+    for m in NOT_STARTED.finditer(text or ""):
+        why = m.group(0).strip()
+        if why not in found:
+            found.append(why)
+    return "; ".join(found)[:300]
+
+
 def ci(workflow: str, sha: str, timeout_min: float, run=gh, git=None, sleep=time.sleep) -> int:
     """X2 parity: push sha to a branch, dispatch the matrix workflow there, wait for it, print its BENCH lines."""
     ref = f"overhaul-periodic/{sha[:12]}"
@@ -288,9 +422,15 @@ def ci(workflow: str, sha: str, timeout_min: float, run=gh, git=None, sleep=time
             runs = []
         if not runs or runs[0].get("headSha", sha) != sha or runs[0].get("status") != "completed":
             continue
-        _, log = run("run", "view", str(runs[0]["databaseId"]), "--log", timeout=600)
+        rid = str(runs[0]["databaseId"])
+        _, log = run("run", "view", rid, "--log", timeout=600)
         for name, os_, value in benches(log):
             print(f"BENCH {name} {os_} {value:g}")
+        if runs[0].get("conclusion") != "success":
+            why = not_started(run, rid)
+            if why:
+                print(f"ci: unavailable: {why}")
+                return UNAVAILABLE
         print(f"ci: {workflow} at {sha[:12]}: {runs[0].get('conclusion')}")
         return 0 if runs[0].get("conclusion") == "success" else 1
     print(f"ci: {workflow} at {sha[:12]} not done after {timeout_min} min")

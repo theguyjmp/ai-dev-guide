@@ -336,6 +336,11 @@ def judge(p, prev, t_now, checks, events):
         reds.append((1, "periodic", f"periodic gate {gate} red at {str(r.get('sha', '?'))[:12]}: "
                      f"{short(r.get('reason', ''), 60)}" + (f" (culprit {r['culprit']})" if r.get("culprit") else ""),
                      "drive.py bisects it and sends one depfix to the culprit's module; else fix main by hand"))
+    for gate, r in sorted((per.get("unavailable") or {}).items()):  # cannot run at all: the owner's, not code
+        r = r if isinstance(r, dict) else {}
+        reds.append((1, "owner", f"{gate} gate unavailable: {short(r.get('reason', ''), 80)}",
+                     "the owner fixes what stops it running (CI billing, runner) or drops it from [gates.periodic]; "
+                     "drive.py never bisects it"))
     nits = pol.get("nits") if pol else None
     trend = open_audit_trend(events)
 

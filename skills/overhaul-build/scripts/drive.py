@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import land as land_mod  # noqa: E402  the lock protocol is land.py's
+import memcap  # noqa: E402  beside this script: [limits] proc_mem_gb
 import periodic  # noqa: E402  beside this script: [gates.periodic]
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
@@ -141,7 +142,7 @@ LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py'
 DEFAULTS = {
     "limits": {"builder_max_calls": 60, "brief_max_tokens": 40000,
                "retries_per_function": 1, "conflict_retries": 2, "builder_timeout_min": 30,
-               "polish_rounds": 3, "fix_retries": 2},
+               "polish_rounds": 3, "fix_retries": 2, "proc_mem_gb": 12},
     "paths": {"functions": "spec/FUNCTIONS.md", "architecture": "spec/ARCHITECTURE.md",
               "state": ".overhaul/state.json"},
     "harness": {"builder_model": "opus", "review_model": "sonnet"},
@@ -1295,8 +1296,9 @@ class Driver:
                 return f"{name} timed out in the worktree after merging {self.main}: `{cmd}`"
             if not land_mod.passes(cmd, p.returncode):
                 tail = " / ".join([ln.strip() for ln in (p.stdout + p.stderr).splitlines() if ln.strip()][-3:])
-                return (f"{name} failed (exit {p.returncode}) in the worktree after merging {self.main}, before "
-                        f"review: `{cmd}`: {tail}. Merge {self.main} and rerun the gate before you hand back")
+                return memcap.note(p.stdout + p.stderr, f"{name} failed (exit {p.returncode}) in the worktree after "
+                                   f"merging {self.main}, before review: `{cmd}`: {tail}. Merge {self.main} and "
+                                   "rerun the gate before you hand back")
         return self.acceptance_problem(wt, fid)
 
     def gate_list(self, names) -> list[tuple[str, str]]:
@@ -1319,8 +1321,9 @@ class Driver:
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_text(p.stdout + p.stderr, encoding="utf-8")
                 tail = " / ".join([ln.strip() for ln in (p.stdout + p.stderr).splitlines() if ln.strip()][-8:])
-                return (f"acceptance red in the worktree after merging {self.main}, before review: {node} "
-                        f"(exit {p.returncode}): {tail} (full output: {out.as_posix()}). Make it pass, then hand back")
+                return memcap.note(p.stdout + p.stderr, f"acceptance red in the worktree after merging {self.main}, "
+                                   f"before review: {node} (exit {p.returncode}): {tail} (full output: "
+                                   f"{out.as_posix()}). Make it pass, then hand back")
         return ""
 
     def build_problem(self, job: Job, text: str) -> str:
@@ -1330,7 +1333,7 @@ class Driver:
                     "work in smaller steps and commit as you go")
         if job.proc.returncode != 0:
             why = last_line(text) or last_line(read_text(job.out.with_suffix(".err"))) or "no output"
-            return f"builder exited rc={job.proc.returncode}: {why}"
+            return memcap.note(text, f"builder exited rc={job.proc.returncode}: {why}")
         wt, branch = self.ov / "wt" / job.fn, f"fn/{job.fn}"
         try:
             if git(wt, "status", "--porcelain").strip():
@@ -2652,6 +2655,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise DriveError("--mark-proven needs --evidence FILE")
             drv.mark_proven(args.mark_proven, Path(os.path.abspath(args.evidence)))
             return 0
+        cap = memcap.cap_self(float(drv.cfg["limits"].get("proc_mem_gb") or 0))  # every child inherits the cap
+        if cap:
+            print(f"drive: {cap}", flush=True)
         return drv.run()
     except DriveError as e:
         print(f"drive: error: {e}", flush=True)
