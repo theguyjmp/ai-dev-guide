@@ -1306,7 +1306,8 @@ class Driver(mainred.MainRed):
             k = next(i for i in range(len(held) + 64) if i not in held and
                      not drivelock.held_by_other(self.slot_dir(i), me))
             self.slots[fid] = k
-            self.st.setdefault("slots", {})[fid] = k  # persisted with the next save; checked at start
+            if hasattr(self, "st"):  # persisted with the next save; checked at start
+                self.st.setdefault("slots", {})[fid] = k
         if me and not drivelock.owns(self.slot_dir(k), me, fid):
             drivelock.claim(self.slot_dir(k), me, fid)
         return k
