@@ -268,7 +268,7 @@ class Toy(unittest.TestCase):
                   brief_max: int = 40000, functions: str = FUNCTIONS, max_parallel: int = 2,
                   conflict_retries: int | None = None, worker_args: str = "", harness_extra: str = "",
                   commands_extra: str = "", pre_review: str = '["cycles"]',
-                  pre_review_acceptance: str = "false") -> Path:
+                  pre_review_acceptance: str = "false", phase_polish: bool = False) -> Path:
         self.root = Path(tempfile.mkdtemp(prefix="drive-test-")).resolve()
         self.addCleanup(self.cleanup_root)
         repo, scripts = self.root / "repo", self.root / "scripts"
@@ -305,6 +305,7 @@ worker_cmd = ["{py}", "{worker}"{worker_args}]
 scripts_dir = "{scripts.as_posix()}"
 pre_review = {pre_review}
 pre_review_acceptance = {pre_review_acceptance}
+phase_polish = {str(phase_polish).lower()}
 {harness_extra}
 """)
         git(repo, "init", "-q", "-b", "main")
@@ -581,17 +582,20 @@ class TestBudgets(Toy):
         self.assertFalse((self.root / "seen").exists())  # no worker was ever started
 
     def test_timeout_kills_the_worker_tree_and_nothing_else(self):
-        repo = self.make_repo({"F1": {"build": ["hang"]}}, retries=0, timeout_min=0.1)
-        bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        # 18 s, not 6: under a loaded full suite the fake worker's start and its child's Popen took longer than 6 s,
+        # so the kill came before the pid files existed. The checks stay the same; only the margins grew.
+        repo = self.make_repo({"F1": {"build": ["hang"]}}, retries=0, timeout_min=0.3)
+        bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
         self.addCleanup(bystander.wait)
         self.addCleanup(bystander.kill)
         rc, out = self.drive_cli(repo)
         self.assertEqual(rc, 3, out)
         self.assertIn("timed out", self.state(repo)["functions"]["F1"]["last_reason"])
-        worker = int((self.root / "pids" / "F1.worker").read_text())
-        child = int((self.root / "pids" / "F1.child").read_text())
-        self.assertTrue(wait_dead(worker), "the timed-out worker is still running")
-        self.assertTrue(wait_dead(child), "the worker's child is still running")
+        pids = self.root / "pids"
+        self.assertTrue((pids / "F1.child").is_file(), "the worker was killed before it started its child")
+        worker, child = int((pids / "F1.worker").read_text()), int((pids / "F1.child").read_text())
+        self.assertTrue(wait_dead(worker, 30), "the timed-out worker is still running")
+        self.assertTrue(wait_dead(child, 30), "the worker's child is still running")
         self.assertIsNone(bystander.poll(), "an unrelated process of the same program was killed")
 
 

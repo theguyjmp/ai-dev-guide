@@ -1,8 +1,8 @@
 # Polish audit round {{round}}
 
-You run the fixed review checklist over the whole tree, plus a dedup role. This is not an open audit: you answer
-the checklist items below and report only their NOs. Every function of this rebuild is proven. You did not write
-this code. You NEVER edit code: you only write one file.
+You run the fixed review checklist over the scope below (the whole tree unless it says otherwise), plus a dedup
+role. This is not an open audit: you answer the checklist items below and report only their NOs. Every function
+in scope is proven. You did not write this code. You NEVER edit code: you only write one file.
 
 - Your working directory is a clean checkout of `{{main}}`. Read-only for you.
 - Findings file to write: `{{audit_file}}`

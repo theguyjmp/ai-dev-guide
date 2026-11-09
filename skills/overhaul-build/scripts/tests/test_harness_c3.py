@@ -58,12 +58,16 @@ class DriveDeferred(Toy):
         self.assertIn("deferred", drv.plan_problem(drv.fns["F2"]))
         self.assertEqual(drv.plan_problem(drv.fns["F1"]), "")
 
-    def test_polish_waits_for_the_deferred_rows(self):
+    def test_polish_does_not_wait_for_the_deferred_rows(self):  # C4 ruling: deferred rows are out of the plan
         drv = self.driver(DEFERRED3)
         for fid in drv.fns:
             drv.st["functions"][fid]["status"] = "proven"
-        drv.polish_rounds = 1
-        self.assertFalse(drv.polish_step())
+        drv.polish_rounds, drv.probe_on, drv.phase_polish = 1, False, False
+        calls = []
+        drv.start_gap_pass = lambda: False
+        drv.start_polish_audit = lambda rnd: calls.append(rnd) or True
+        self.assertTrue(drv.polish_step())
+        self.assertEqual(calls, [1])
 
     def test_only_deferred_rows_is_a_plan_error(self):
         only = DEFERRED3.replace("| planned |", "| deferred |")
