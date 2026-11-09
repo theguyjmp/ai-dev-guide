@@ -70,6 +70,14 @@ class MainGuard(unittest.TestCase):
         run(self.r, "add", ".")
         self.assertNotEqual(run(self.r, "commit", "-qm", "wire it").returncode, 0)
 
+    def test_plan_may_reshape_a_pure_plan_stub_only(self):
+        (self.r / "crates" / "stub.rs").write_text("pub struct P { a: u8 }\npub fn f() { todo!() }\n")
+        run(self.r, "add", ".")
+        self.assertEqual(run(self.r, "commit", "-qm", "plan: S98 stub").returncode, 0)
+        (self.r / "crates" / "stub.rs").write_text("pub use crate::shared::P;\npub fn f() { todo!() }\n")
+        self.assertEqual(run(self.r, "commit", "-qam", "plan: dedupe stub params").returncode, 0)
+        self.assertEqual(subject(self.r), "plan: dedupe stub params")
+
     def test_code_reaches_main_only_through_the_harness(self):
         (self.r / "crates" / "x.rs").write_text("x\ny\n")
         self.assertNotEqual(run(self.r, "commit", "-qam", "code").returncode, 0)

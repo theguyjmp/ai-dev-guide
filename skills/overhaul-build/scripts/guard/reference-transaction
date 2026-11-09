@@ -5,7 +5,8 @@
 # - Anyone else (the main chat, a manager, a planner, a side agent): main may only move forward, and each new commit may
 #   change only plan data and configuration: spec/, tests/acceptance/, tests/property/, overhaul.toml,
 #   .github/workflows/, dash/. A plan commit (subject starting "plan" or "m0") may also ADD code (new files, added
-#   lines: stubs, skeletons, wiring of a new module), never change or delete an existing line of code.
+#   lines: stubs, skeletons, wiring of a new module), never change or delete an existing line of code, except in a file
+#   that only plan or m0 commits ever touched (a pure plan stub).
 [ "$1" = "prepared" ] || exit 0
 [ -n "$OVERHAUL_HARNESS" ] && exit 0
 zero=0000000000000000000000000000000000000000
@@ -28,6 +29,8 @@ while read -r old new ref; do
     bad=$(git diff --numstat "$c^1" "$c" 2>/dev/null | while IFS='	' read -r a d p; do
       echo "$p" | grep -q -E "$plan_paths" && continue
       if [ "$plan" = 1 ] && [ "$d" = "0" ]; then continue; fi
+      # a plan commit may reshape a file that only plan commits ever touched (a pure plan stub, never landed code)
+      if [ "$plan" = 1 ] && [ -z "$(git log --format=%s "$c^1" -- "$p" 2>/dev/null | grep -v -E '^(plan|m0)')" ]; then continue; fi
       echo "$p (+$a -$d)"
     done)
     if [ -n "$bad" ]; then
