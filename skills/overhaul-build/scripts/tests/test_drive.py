@@ -1378,3 +1378,167 @@ class TestScale(Toy):
         ev = [(e["event"], e["fn"]) for e in self.events(repo)]
         self.assertIn(("dep_fix", "depfix-flake-F2"), ev)
         self.assertEqual(ev.count(("main_flake", "F2")), 2)
+
+
+class TestResume(Toy):
+    """A restart keeps the work on fn/<id> (pilot2026-11-09: 87 of 324 builds never ended, every restart reset
+    their branches to main)."""
+
+    def seed(self, repo: Path, status: str, commit: bool = True) -> str:
+        """fn/F1 with one builder commit (or none), and state.json saying F1 was at status when the drive died."""
+        git(repo, "branch", "fn/F1", "main")
+        if commit:
+            git(repo, "checkout", "-q", "fn/F1")
+            put(repo / "src" / "alpha" / "kept.py", "KEPT = 1\n")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-q", "-m", "keep me")
+            git(repo, "checkout", "-q", "main")
+        put(repo / ".overhaul" / "state.json", json.dumps({"cycle": 3, "proven_history": [], "functions": {
+            "F1": {"status": status, "attempts": 0, "conflicts": 1, "last_reason": "", "branch": "fn/F1"}}}))
+        return git(repo, "rev-parse", "fn/F1").strip()
+
+    def test_building_restarts_the_builder_on_its_own_branch(self):
+        repo = self.make_repo()
+        tip = self.seed(repo, "building")
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        rec = drv.st["functions"]["F1"]
+        self.assertEqual((rec["status"], rec.get("resume")), ("planned", "building"))
+        with mock.patch.object(drive, "spawn"):
+            self.assertTrue(drv.launch())
+        wt = repo / ".overhaul" / "wt" / "F1"
+        self.assertEqual(git(wt, "rev-parse", "HEAD").strip(), tip)  # never `-B` to main
+        self.assertEqual(git(repo, "rev-parse", "fn/F1").strip(), tip)
+        self.assertTrue((wt / "src" / "alpha" / "kept.py").is_file())
+        rec = drv.st["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["conflicts"], rec.get("resume")), ("building", 1, None))
+        brief = (repo / ".overhaul" / "briefs" / "F1.md").read_text(encoding="utf-8")
+        self.assertIn("Resumed: the drive stopped while this attempt ran. fn/F1 keeps its 1 commits", brief)
+        ev = [(e["event"], e["detail"]) for e in self.events(repo) if e["fn"] == "F1"]
+        self.assertIn(("resume", "building when the last drive stopped; fn/F1 keeps 1 commits: resumes at building"),
+                      ev)
+        self.assertTrue(any(e == "build_start" and d.endswith(" resumed") for e, d in ev), ev)
+
+    def test_building_with_uncommitted_work_keeps_it(self):
+        repo = self.make_repo()
+        self.seed(repo, "building", commit=False)
+        wt = repo / ".overhaul" / "wt" / "F1"
+        git(repo, "worktree", "add", "-q", str(wt), "fn/F1")
+        put(wt / "src" / "alpha" / "half.py", "HALF = 1\n")  # the builder was killed before it committed
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        self.assertEqual(drv.st["functions"]["F1"].get("resume"), "building")
+        self.assertIn("src/alpha/half.py", git(repo, "show", "--name-only", "fn/F1"))
+
+    def test_a_branch_with_no_commits_starts_over(self):
+        repo = self.make_repo()
+        self.seed(repo, "building", commit=False)
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        rec = drv.st["functions"]["F1"]
+        self.assertEqual((rec["status"], rec.get("resume")), ("planned", None))
+        self.assertIn("has no commits ahead of main: starts over", self.events(repo)[-1]["detail"])
+
+    def test_review_goes_straight_back_to_review(self):
+        repo = self.make_repo()
+        self.seed(repo, "review")
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        self.assertEqual(drv.st["functions"]["F1"]["status"], "review")
+        with mock.patch.object(drv, "start_review") as sr, mock.patch.object(drv, "start_build") as sb:
+            drv.resume_step()
+            drv.launch()
+        sr.assert_called_once_with("F1", 1)
+        sb.assert_not_called()  # F1 is not planned; F2 waits on F1
+        self.assertTrue((repo / ".overhaul" / "wt" / "F1" / "src" / "alpha" / "kept.py").is_file())
+
+    def test_landing_lands_without_a_rebuild_end_to_end(self):
+        repo = self.make_repo()
+        self.seed(repo, "landing")
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "proven")
+        ev = [(e["event"], e["fn"]) for e in self.events(repo)]
+        self.assertNotIn(("build_start", "F1"), ev)
+        self.assertIn(("resume", "F1"), ev)
+        self.assertIn("keep me", git(repo, "log", "--format=%s", "main"))
+
+    def test_abort_marks_in_flight_work_for_the_next_drive(self):
+        repo = self.make_repo()
+        self.seed(repo, "planned")
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        drv.set("F1", status="landing")
+        drv.land_queue.append("F1")
+        drv.abort()
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual((rec["status"], rec.get("resume")), ("planned", "landing"))
+        drv2 = drive.Driver(repo, drive.load_config(repo))
+        drv2.load()
+        self.assertEqual(drv2.st["functions"]["F1"]["status"], "landing")
+
+
+class TestDiskGuard(Toy):
+    """[limits] min_free_gb (pilot2026-11-09: 20 slot target dirs of ~10 GB filled Z: and ENOSPC killed drive)."""
+
+    def setup_dirs(self, repo: Path) -> list[Path]:
+        dirs = []
+        for i, sub in enumerate(("slot-0/debug/incremental/a", "slot-1/debug/incremental/b",
+                                 "land-0/release/incremental/c")):
+            d = repo / ".overhaul" / "target" / sub
+            put(d / "dep-graph.bin", "x" * 10)
+            os.utime(d, (1000 + i, 1000 + i))  # a oldest, c newest
+            dirs.append(d)
+        return dirs
+
+    def driver(self, repo: Path, dirs: list[Path], base: float) -> drive.Driver:
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        drv.free_gb = lambda: base + 20.0 * sum(not d.exists() for d in dirs)  # each dir frees 20 GB
+        return drv
+
+    def test_prunes_oldest_incremental_dirs_until_above_the_floor(self):
+        repo = self.make_repo()
+        dirs = self.setup_dirs(repo)
+        drv = self.driver(repo, dirs, 10.0)
+        self.assertTrue(drv.disk_guard("cycle"))
+        self.assertEqual([d.exists() for d in dirs], [False, False, True])
+        ev = [e for e in self.events(repo) if e["event"] == "disk_pruned"]
+        self.assertEqual(ev[-1]["detail"], "freed 40.0 GB from 2 incremental dirs (cycle); free 50.0 GB")
+        self.assertNotIn("disk_low", drv.st)
+
+    def test_still_low_starts_no_build_and_logs_disk_low(self):
+        repo = self.make_repo()
+        dirs = self.setup_dirs(repo)
+        drv = self.driver(repo, dirs, -50.0)  # 10 GB once all three are gone
+        with mock.patch.object(drv, "start_build") as sb:
+            self.assertFalse(drv.launch())
+        sb.assert_not_called()
+        self.assertFalse(any(d.exists() for d in dirs))
+        low = [e["detail"] for e in self.events(repo) if e["event"] == "disk_low"]
+        self.assertTrue(low and low[-1].startswith("disk low: 10.0 GB free < min_free_gb 40"), low)
+        self.assertEqual(self.state(repo)["disk_low"]["free_gb"], 10.0)
+        drv.free_gb = lambda: 100.0  # space came back
+        with mock.patch.object(drv, "start_build") as sb:
+            self.assertTrue(drv.launch())
+        sb.assert_called()
+        self.assertNotIn("disk_low", self.state(repo))
+        self.assertIn("disk_ok", [e["event"] for e in self.events(repo)])
+
+    def test_a_running_jobs_slot_is_not_pruned(self):
+        repo = self.make_repo()
+        dirs = self.setup_dirs(repo)
+        drv = self.driver(repo, dirs, -100.0)
+        drv.slots["F1"] = 0
+        drv.jobs["F1"] = SimpleNamespace()
+        self.assertFalse(drv.disk_guard("build start"))
+        self.assertEqual([d.exists() for d in dirs], [True, False, False])
+
+    def test_min_free_gb_zero_turns_it_off(self):
+        repo = self.make_repo()
+        put(repo / "overhaul.toml", (repo / "overhaul.toml").read_text(encoding="utf-8").replace(
+            "[limits]\n", "[limits]\nmin_free_gb = 0\n"))
+        dirs = self.setup_dirs(repo)
+        drv = self.driver(repo, dirs, 0.0)
+        self.assertTrue(drv.disk_guard("cycle"))
+        self.assertTrue(all(d.exists() for d in dirs))
