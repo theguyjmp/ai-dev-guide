@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from datetime import datetime
 from pathlib import Path
 
@@ -62,8 +63,99 @@ class Dog(unittest.TestCase):
         self.now += 300
         self.assertEqual(self.dog.check(), [])  # persists: repeats at most every 30 min
         self.state(width={"ready": 0, "free": 3})
+        for p in (self.ov / "requests").iterdir():
+            p.unlink()  # drive applied the reload
         self.now += 2000
         self.assertEqual(self.dog.check(), [])  # cleared
+
+    # ---- pass G: what should be happening is happening ----
+    def plan(self, phases: dict[int, list[str]]) -> None:
+        rows = [f"| {fid} | {n} | m{n} | - | `toy {fid}` | tests/acceptance/test_{fid}.py::t | planned |"
+                for n, ids in phases.items() for fid in ids]
+        (self.repo / "spec").mkdir(exist_ok=True)
+        (self.repo / "spec" / "FUNCTIONS.md").write_text(
+            "# Functions\n\n| id | phase | module | deps | entry | acceptance | status |\n"
+            "|----|-------|--------|------|-------|------------|--------|\n" + "\n".join(rows) + "\n", encoding="utf-8")
+
+    def test_a_phase_finished_20_min_ago_with_no_audit_gets_one_requested(self):
+        self.plan({1: ["A1"], 2: ["B1"], 3: ["C1", "C2"], 4: ["D1"]})
+        self.log((NOW - 3 * 3600, "land_ok", "main -> A1"), (NOW - 1500, "land_ok", "main -> C1"),
+                 (NOW - 1200, "land_ok", "main -> C2"))
+        with open(self.ov / "log.jsonl", "r+", encoding="utf-8") as f:  # land_ok events carry their fn
+            lines = [json.loads(x) for x in f.read().splitlines()]
+            for ev in lines:
+                ev["fn"] = ev["detail"].split("-> ")[1]
+            f.seek(0)
+            f.truncate()
+            f.write("".join(json.dumps(ev) + "\n" for ev in lines))
+        proven = {"status": "proven"}
+        self.state(functions={"A1": proven, "B1": proven, "C1": proven, "C2": proven, "D1": {"status": "planned"}},
+                   phase_polish={"1": {"round": 1, "status": "done"}, "2": {"round": 2, "status": "fix"}})
+        self.assertEqual(self.dog.check(), ["phase_audit"])
+        self.assertTrue((self.ov / "requests" / "audit-phase-3").exists())
+        self.assertFalse((self.ov / "requests" / "audit-phase-2").exists())  # running
+        self.assertFalse((self.ov / "requests" / "audit-phase-4").exists())  # not finished
+        self.assertIn("phase_audit: phase 3 all proven 20 min ago, no audit; alert: requested audit-phase-3",
+                      self.watchdog_events()[0])
+        self.assertIn("audit-phase-3", self.alerts())
+        # drive applied it and the audit started: nothing more to do, even after the refire window
+        (self.ov / "requests" / "audit-phase-3").unlink()
+        self.log((NOW + 30, "request_applied", "audit-phase-3"), (NOW + 40, "phase_audit", "phase 3 round 1 start"))
+        self.now += 31 * 60
+        self.assertNotIn("phase_audit", self.dog.check())
+
+    def test_a_phase_finished_10_min_ago_is_not_due_yet(self):
+        self.plan({1: ["A1"], 2: ["B1"]})
+        self.log((NOW - 600, "land_ok", "main -> A1"))
+        self.state(functions={"A1": {"status": "proven"}, "B1": {"status": "planned"}})
+        self.assertEqual(self.dog.check(), [])
+
+    def test_an_overdue_arch_sweep_is_requested(self):
+        recs = {f"R{i}": {"status": "proven" if i < 30 else "planned"} for i in range(40)}
+        self.state(functions=recs, arch_sweep={"at": 0, "status": "idle", "history": []})
+        self.assertEqual(self.dog.check(), [])  # due from now: 15 min to start on its own
+        self.now += 16 * 60
+        self.assertEqual(self.dog.check(), ["arch_sweep"])
+        self.assertTrue((self.ov / "requests" / "arch-sweep").exists())
+        self.assertIn("arch_sweep: 30 proven since the last sweep (at 0, every 25)", self.alerts())
+
+    def test_a_red_gate_with_no_bisect_is_re_armed_and_a_broken_gate_goes_to_the_owner(self):
+        self.log((NOW - 900, "periodic_red", "gpu run at abc exit 1: s14_first_sort over"),
+                 (NOW - 900, "periodic_red", "linux run at abc exit 127: bash: C:\\x: No such file or directory"))
+        self.state(periodic={"red": {"gpu": {"sha": "a", "reason": "exit 1: s14", "culprit": "F7"},
+                                     "linux": {"sha": "a", "reason": "exit 127: bash: No such file or directory",
+                                               "culprit": "a (no earlier green)"}}, "bisect": None})
+        self.assertEqual(self.dog.check(), ["periodic"])
+        self.assertTrue((self.ov / "requests" / "periodic-gpu").exists())
+        self.assertFalse((self.ov / "requests" / "periodic-linux").exists())
+        self.assertIn("owner: linux gate command broken", self.alerts())
+
+    def test_a_red_gate_already_bisecting_is_fine(self):
+        self.log((NOW - 900, "periodic_red", "gpu run at abc exit 1"), (NOW - 890, "periodic_start", "gpu bisect at d"))
+        self.state(periodic={"red": {"gpu": {"sha": "a", "reason": "exit 1", "culprit": ""}}, "bisect": None})
+        self.assertEqual(self.dog.check(), [])
+
+    def test_waiting_requests_needs_plan_rows_and_a_stale_dashboard_alert(self):
+        req = self.ov / "requests"
+        req.mkdir()
+        (req / "reset-R9").write_text("x", encoding="utf-8")
+        self.state(functions={"R9": {"status": "needs-plan"}})
+        page = self.repo / "dash" / "index.html"
+        page.parent.mkdir()
+        page.write_text("old", encoding="utf-8")
+        os.utime(page, (NOW - 7200, NOW - 7200))
+        self.log((NOW - 60, "build_start", "x"))
+        with mock.patch.object(watchdog.subprocess, "run") as run:
+            self.assertEqual(self.dog.check(), ["dashboard"])
+            run.assert_called_once()
+        self.assertIn("dashboard: dash/index.html 120 min old", self.alerts())  # dash.py wrote nothing
+        self.now += 31 * 60
+        self.log((self.now - 60, "build_start", "y"))
+        with mock.patch.object(watchdog.subprocess, "run"):
+            fired = self.dog.check()
+        self.assertEqual(sorted(fired), ["dashboard", "needs_plan", "reload"])
+        self.assertIn("reload: 1 plan requests waiting over 10 min (reset-R9); drive not running?", self.alerts())
+        self.assertIn("needs_plan: 1 needs-plan rows (R9) and no plan round", self.alerts())
 
     def test_no_land_for_45_min_with_landing_rows_removes_a_stale_lock(self):
         self.log((NOW - 50 * 60, "land_ok", "main -> a"))

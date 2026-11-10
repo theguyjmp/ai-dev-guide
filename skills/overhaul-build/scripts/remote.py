@@ -17,7 +17,8 @@ slot left on the host (`python -` with a kill job: the pid file of the slot, its
 dir the laptop pushes to), git (the laptop's remote name or URL for it, default name), work (host dir for worktrees,
 briefs, slot targets and pid files, default <repo>.work), python (default "py -3"), claude (default "claude"),
 ssh (command list), env (table), path_prefix (dirs put before PATH), path_map (laptop -> host path prefixes for the
-brief), offline_min (default 10), remote_idle_min (default 5), heartbeat_s (default 30).
+brief), offline_min (default 10), remote_idle_min (default 5), heartbeat_s (default 30), timeout_min (default 45:
+drive's deadline for a remote build instead of builder_timeout_min; the host shares its CPUs with heavy tests).
 
 Host log and heartbeat: the host program appends its notes and one line per builder event to <work>/logs/<id>.log,
 writes <work>/logs/<id>.hb every heartbeat_s and prints a `remote-hb` line on stderr; the builder's events go to stdout
@@ -58,6 +59,7 @@ NO_ACCOUNT = re.compile(r"hit your (?:\w+ )?limit|usage limit|Invalid API key|Pl
 SHIP_SKIP = ("tests", "legacy", "__pycache__")
 HB_S = 30.0  # host heartbeat interval
 IDLE_MIN = 5.0  # no line from the host for this long: the host hung
+TIMEOUT_MIN = 45.0  # [harness.remote] timeout_min: a remote build's deadline (remote-hang-report: rows ran 23-30 min)
 HB_TAG = "remote-hb"
 LOG_FETCH_S = 60
 HOST_LOG = []  # host side: the job's log path, once known
@@ -299,6 +301,7 @@ class Pool:
         self.offline_s = float(conf.get("offline_min", OFFLINE_MIN)) * 60
         self.idle_s = float(conf.get("remote_idle_min", IDLE_MIN)) * 60
         self.hb_s = float(conf.get("heartbeat_s", HB_S))
+        self.timeout_s = float(conf.get("timeout_min", TIMEOUT_MIN)) * 60  # drive's deadline for a remote build
         self.offline_until = 0.0
         self.busy: dict[int, str] = {}  # slot -> fid
         self.killers: list[subprocess.Popen] = []
@@ -393,8 +396,8 @@ class Pool:
 
     # ---- finish ----
     def after(self, fid, code, timed_out, err_path, now=None, silent=False):
-        """Free fid's slot. True when the host was unusable (exit OFFLINE, or `silent`: timed out without one turn of
-        output, the pilot project 2026-11-10 04:05-04:35, 14 of 22 desk builds, which the router had sent to plan fix as
+        """Free fid's slot. True when the host was unusable (exit OFFLINE, or `silent`: timed out with a zero-byte
+        stream, which with line forwarding means a dead host; the pilot project 2026-11-10 04:05-04:35, 14 of 22 desk builds, which the router had sent to plan fix as
         oversized): the host goes offline for offline_min, its slot is cleaned on the host, and drive requeues fid
         without counting an attempt."""
         k = self.slot_of(fid)
