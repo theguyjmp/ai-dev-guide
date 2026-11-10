@@ -3355,7 +3355,8 @@ class Driver(mainred.MainRed):
         forced = bool(sw.get("forced"))  # watchdog arch-sweep: due whatever the count and the final polish say
         if (not forced and (proven - sw["at"] < self.arch_every or proven == len(self.order)
                             or final.get("status", "idle") not in ("idle", "done"))
-                or self.polish_phase() is not None or self.polish_queue or self.local_jobs() >= self.max_parallel):
+                or self.polish_phase() is not None or self.polish_queue):
+            # (no free-slot condition: with every slot busy the sweep never started; it is one audit job beside them)
             return False
         sw.pop("forced", None)
         sw.update(at=proven, status="audit")
