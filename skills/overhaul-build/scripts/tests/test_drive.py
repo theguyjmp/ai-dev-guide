@@ -339,8 +339,7 @@ phase_audit = {str(phase_audit).lower()}
 
     def drive_cli(self, repo: Path, *args: str) -> tuple[int, str]:
         p = subprocess.run([sys.executable, str(DRIVE), "--repo", str(repo), *args], capture_output=True,
-                           text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
-                           timeout=float(os.environ.get("DRIVE_TEST_TIMEOUT", "180")))  # raise on a loaded machine
+                           text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=int(os.environ.get("DRIVE_CLI_TIMEOUT", "180")))
         return p.returncode, p.stdout + p.stderr
 
     @staticmethod
