@@ -16,7 +16,12 @@ was alive). They overwrote each other's .overhaul/state.json (manager resets "di
   slot. A slot whose marker names another live drive is never handed out; a job whose slot marker names another job
   rebuilds before its acceptance runs, and a red whose binary came from another dir or whose slot changed hands during
   the run is a rebuild, never a red.
-The process table and kill are module functions (proc_start, processes, kill_pid) so tests swap in a fake table.
+- Detached jobs: a local builder runs outside drive's kill-on-close job (worker.py's launcher) and has a pid file
+  .overhaul/jobs/<id>.json (pid, start, kind, out, rc, started, slot, attempt, model). A new drive re-adopts a live one
+  as a running job (Adopted: a Popen-like handle on a pid it did not start) instead of killing it; kill_orphans keeps
+  every adopted tree. Only the owner's stop (`drive.py --stop`, Ctrl-C) kills them.
+The process table and kill are module functions (proc_start, processes, parents, kill_pid) so tests swap in a fake
+table.
 """
 from __future__ import annotations
 
@@ -109,10 +114,53 @@ def processes() -> list[tuple[int, str]]:
     return out
 
 
-def kill_pid(pid: int) -> bool:
-    """Kill pid and its children, by pid, never by name."""
+def parents() -> dict[int, int]:
+    """pid -> parent pid of every running process: psutil when installed, else CIM (Windows) or /proc."""
+    try:
+        import psutil
+        return {p.info["pid"]: p.info.get("ppid") or 0 for p in psutil.process_iter(["pid", "ppid"])}
+    except ImportError:
+        pass
     if os.name == "nt":
-        return subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], stdin=subprocess.DEVNULL,
+        ps = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress"
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=120, check=False)
+        try:
+            rows = json.loads(r.stdout or "[]")
+        except ValueError:
+            return {}
+        rows = rows if isinstance(rows, list) else [rows]
+        return {int(x["ProcessId"]): int(x.get("ParentProcessId") or 0) for x in rows}
+    out = {}
+    for d in Path("/proc").glob("[0-9]*"):
+        try:
+            out[int(d.name)] = int((d / "stat").read_text().rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            pass
+    return out
+
+
+def descendants(roots: set[int], table: dict[int, int] | None = None) -> set[int]:
+    """roots and every process under them (by parent pid)."""
+    if not roots:
+        return set()
+    table = parents() if table is None else table
+    kids: dict[int, list[int]] = {}
+    for pid, ppid in table.items():
+        kids.setdefault(ppid, []).append(pid)
+    seen, todo = set(), list(roots)
+    while todo:
+        pid = todo.pop()
+        if pid not in seen:
+            seen.add(pid)
+            todo += kids.get(pid, [])
+    return seen
+
+
+def kill_pid(pid: int, tree: bool = True) -> bool:
+    """Kill pid and (tree) its children, by pid, never by name."""
+    if os.name == "nt":
+        return subprocess.run(["taskkill", "/PID", str(pid), *(["/T"] if tree else []), "/F"], stdin=subprocess.DEVNULL,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
     try:
         os.kill(pid, 9)
@@ -241,12 +289,13 @@ def orphan_pattern(repo: Path) -> re.Pattern:
     return re.compile(re.escape(root) + r"(?:wt|target)(?![\w.-])")
 
 
-def kill_orphans(repo: Path, log=lambda pid, cmd: None) -> list[int]:
+def kill_orphans(repo: Path, log=lambda pid, cmd: None, adopted: set[int] | None = None) -> list[int]:
     """Kill leftover processes whose command line names this repo's .overhaul/wt or .overhaul/target, except this
-    process and the lock holder. Call only while holding the lock: every such process then belongs to a dead drive."""
+    process, the lock holder and the trees of adopted jobs (pids this drive re-adopted from .overhaul/jobs). Call only
+    while holding the lock: every other such process then belongs to a dead drive."""
     pat = orphan_pattern(repo)
     rec = holder(repo) or {}
-    keep = {os.getpid(), os.getppid(), int(rec.get("pid") or 0)}
+    keep = {os.getpid(), os.getppid(), int(rec.get("pid") or 0)} | descendants(set(adopted or ()))
     killed = []
     for pid, cmd in processes():
         if pid in keep or not cmd or not pat.search(_norm(cmd)):
@@ -322,3 +371,74 @@ def foreign_binaries(output: str, slot_dir: Path, wt: Path) -> list[str]:
         if (os.path.isabs(path.strip()) or re.match(r"^[a-z]:/", p)) and not any(p.startswith(r) for r in roots):
             bad.append(path.strip())
     return bad
+
+
+# ---- detached jobs ----------------------------------------------------------------------------------------------------
+
+JOBS = "jobs"  # .overhaul/jobs/<id>.json: a detached builder's pid file
+
+
+def jobs_dir(ov: Path) -> Path:
+    return Path(ov) / JOBS
+
+
+def write_job(ov: Path, fid: str, rec: dict) -> None:
+    d = jobs_dir(ov)
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / f"{fid}.json.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps(rec), encoding="utf-8")
+    os.replace(tmp, d / f"{fid}.json")
+
+
+def read_jobs(ov: Path) -> dict[str, dict]:
+    """fid -> pid file record of every detached job a drive left."""
+    out = {}
+    for path in sorted(jobs_dir(ov).glob("*.json")):
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            rec = None
+        if isinstance(rec, dict) and str(rec.get("pid", "")).isdigit():
+            out[path.stem] = rec
+        else:
+            path.unlink(missing_ok=True)
+    return out
+
+
+def drop_job(ov: Path, fid: str) -> None:
+    (jobs_dir(ov) / f"{fid}.json").unlink(missing_ok=True)
+
+
+def job_live(rec: dict) -> bool:
+    return live(int(rec.get("pid") or 0), str(rec.get("start") or ""))
+
+
+class Adopted:
+    """A Popen-like handle on a detached job's pid that this drive did not start: poll() is None while it runs; at
+    its end returncode is what the launcher wrote to rec['rc'] (-1 when it was killed before writing one)."""
+
+    def __init__(self, rec: dict):
+        self.pid = int(rec["pid"])
+        self.start = str(rec.get("start") or "")
+        self.rc_path = Path(rec["rc"]) if rec.get("rc") else None
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        if self.returncode is None and not live(self.pid, self.start):
+            self.returncode = -1
+            try:
+                self.returncode = int(self.rc_path.read_text(encoding="utf-8").strip()) if self.rc_path else -1
+            except (OSError, ValueError):
+                pass
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        end = None if timeout is None else time.monotonic() + timeout
+        while self.poll() is None:
+            if end is not None and time.monotonic() > end:
+                raise subprocess.TimeoutExpired(f"pid {self.pid}", timeout)
+            time.sleep(0.1)
+        return self.returncode
+
+    def kill(self) -> None:
+        kill_pid(self.pid)

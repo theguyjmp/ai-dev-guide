@@ -11,12 +11,19 @@ lines as they arrive and keeps the age of the last event, the turn count, the to
 drive.py writes them to .overhaul/runs/<run>.progress and kills a worker with no event for [harness]
 worker_idle_min minutes (default 10). The last line of the stream is the same `result` object `--output-format
 json` writes, so drive.read_result reads both.
+
+Detached launch. `py -3 worker.py --mem GB --rc FILE -- cmd...` is how drive.py starts a local builder outside its own
+kill-on-close job: the launcher puts itself in a new job with the same per-process memory cap (memcap.cap_self, kill on
+close, so killing the launcher's pid kills its builder tree), runs cmd with the inherited stdout and stderr, writes
+cmd's exit code to FILE and exits with it. A drive that restarts reads FILE for a builder it re-adopted (the pilot project
+2026-11-09: 73 of 248 builds were killed by drive restarts).
 """
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime
 from functools import cache
@@ -167,3 +174,44 @@ class Stream:
             return ""
         return (f"no worker event for {self.idle_s(now) / 60:.0f} min (worker_idle_min {idle_min:g}); "
                 f"last tool {self.last_tool or 'none'}")
+
+
+def launch_cmd(cmd: list[str], mem_gb: float, rc: Path) -> list[str]:
+    """cmd wrapped in the detached launcher (this file's main)."""
+    return [sys.executable, str(Path(__file__).resolve()), "--mem", f"{float(mem_gb or 0):g}", "--rc", str(rc),
+            "--", *cmd]
+
+
+def main(argv: list[str]) -> int:
+    """--mem GB --rc FILE -- cmd...: run cmd in a fresh job with the cap, write its exit code to FILE."""
+    try:
+        cut = argv.index("--")
+        opts, cmd = dict(zip(argv[:cut:2], argv[1:cut:2])), argv[cut + 1:]
+        gb, rc = float(opts.get("--mem") or 0), Path(opts["--rc"])
+    except (ValueError, KeyError):
+        print("usage: worker.py --mem GB --rc FILE -- cmd [args...]", file=sys.stderr)
+        return 2
+    if not cmd:
+        print("usage: worker.py --mem GB --rc FILE -- cmd [args...]", file=sys.stderr)
+        return 2
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import memcap
+    note = memcap.cap_self(gb, kill_on_close=True)
+    if note.startswith("process memory cap not set"):
+        print(f"worker.py: {note}", file=sys.stderr, flush=True)
+    try:
+        code = subprocess.call(cmd, stdin=subprocess.DEVNULL)
+    except OSError as e:
+        print(f"worker.py: cannot start {cmd[0]}: {e}", file=sys.stderr, flush=True)
+        code = 127
+    tmp = rc.with_name(rc.name + ".tmp")
+    try:
+        tmp.write_text(str(code), encoding="utf-8")
+        os.replace(tmp, rc)
+    except OSError:
+        pass
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
