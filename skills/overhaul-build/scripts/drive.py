@@ -3065,8 +3065,8 @@ class Driver(mainred.MainRed):
         proven = sum(1 for f in self.order if recs[f.id]["status"] == "proven")
         final = self.st.get("polish") or {}
         if (proven - sw["at"] < self.arch_every or proven == len(self.order) or self.polish_phase() is not None
-                or self.polish_queue or final.get("status", "idle") not in ("idle", "done")  # a past polish: still sweep
-                or self.local_jobs() >= self.max_parallel):
+                or self.polish_queue or final.get("status", "idle") not in ("idle", "done")):  # a past polish: still sweep
+            # (no free-slot condition: with every slot busy the sweep never started; it is one audit job beside them)
             return False
         sw.update(at=proven, status="audit")
         self.start_arch_audit(SWEEP_FID, None, self.ov / "polish" / f"arch-sweep-{proven}.json")
