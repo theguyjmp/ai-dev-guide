@@ -57,7 +57,7 @@ if _brief.startswith("# Architecture audit "):
 '''
 DUP = {"module": "beta", "id": "A01", "answer": "no", "file": "src/beta/parse.py", "line": 3,
        "other": "src/alpha/parse.py:7", "evidence": "both parse the toy header: same bytes in, same tuple out"}
-BUILD = SimpleNamespace(kind="build")
+BUILD = SimpleNamespace(kind="build", host="")  # a local job (remote-builders: local_jobs counts host == "")
 
 
 class Base(Toy):
@@ -141,7 +141,7 @@ class Units(Base):
         drv = self.driver()
         drv.st["functions"]["F1"]["status"] = "proven"
         with mock.patch.object(drv, "start_polish_job") as job, mock.patch.object(drv, "prepare_worktree"):
-            drv.jobs[drive.ARCH_FID] = SimpleNamespace(model="opus")
+            drv.jobs[drive.ARCH_FID] = SimpleNamespace(model="opus", host="")
             drv.start_arch_audit(drive.ARCH_FID, 1, drv.polish_dir() / "arch-1.json")
         brief = Path(job.call_args.args[3]).read_text(encoding="utf-8")
         self.assertTrue(brief.startswith("# Architecture audit arch-audit arch-1"))

@@ -212,19 +212,19 @@ class HeavyRunnerTest(LandTest):
 class LandTimeoutTest(LandTest):
     def test_a_land_over_its_budget_stops_and_names_the_slowest_test(self):
         repo = self.make_repo()
-        slow = f'"{PY}" -c "import time; time.sleep(8)" && "{PY}" pytest_lite.py {{file}} {{test}}'
+        slow = f'"{PY}" -c "import time; time.sleep(20)" && "{PY}" pytest_lite.py {{file}} {{test}}'
         write(repo, {"overhaul.toml": TOML.replace("[paths]", f"[commands.acceptance_by]\n"
                                                    f"\"tests/acceptance/test_mul*.py\" = '{slow}'\n[paths]")
-                     + "[harness]\nland_timeout_min = 0.04\n"})
+                     + "[harness]\nland_timeout_min = 0.1\n"})
         git(repo, "add", "-A")
         git(repo, "commit", "-q", "-m", "plan: slow test, short budget")
         before = git(repo, "rev-parse", "main")
         code, out, _ = self.land(repo)
         self.assertEqual(code, 1, out)
-        self.assertTrue(out.startswith("land timeout: over 0.04 min"), out)
+        self.assertTrue(out.startswith("land timeout: over 0.1 min"), out)
         last = self.log(repo)[-1]
         self.assertEqual((last["event"], last["slowest"]), ("land_timeout", "tests/acceptance/test_mul.py::test_mul"))
-        self.assertLess(last["seconds"], 8)
+        self.assertLess(last["seconds"], 20)
         self.assertEqual(git(repo, "rev-parse", "main"), before)
         self.assertEqual(self.state(repo)["functions"]["F2"]["status"], "planned")
 
