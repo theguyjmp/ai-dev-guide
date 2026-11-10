@@ -12,6 +12,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import tests  # noqa: E402,F401  tests/__init__.py drops an inherited GIT_DIR & co (git hook, rebase -x, bisect run)
+
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CYCLES = os.path.join(SCRIPTS, "check_cycles.py")
 ENTRY = os.path.join(SCRIPTS, "entry_lint.py")
