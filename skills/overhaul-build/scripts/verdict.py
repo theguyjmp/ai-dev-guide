@@ -479,8 +479,8 @@ def judge(p, prev, t_now, checks, events):
             bar = f"floor {floor:g}/h" if under_floor else f"half of expected {tp['expected']:.1f}/h"
             reds.append((1, "rate", f"rate red: {tp['landed_60m']}/h < {bar}; top stage {tp['top_stage']} "
                          f"(~{tp['top_cost']:.1f}/h lost)", RATE_FIX[tp["top_stage"]]))
-    odir = os.path.dirname(p["log"])
-    fails = router.failures(events, t_now, builder=lambda fid: router.builder_text(Path(odir), fid))
+    odir = os.path.dirname(p["log"]) if p.get("log") else ""  # no log path: classify from the reason alone
+    fails = router.failures(events, t_now, builder=lambda fid: router.builder_text(Path(odir), fid) if odir else "")
     if fails["red"]:  # one cause over 30% of the last hour's failures: the manager's bottleneck, in words
         reds.append((1, "failures", fails["words"], fails["action"]))
     nits = pol.get("nits") if pol else None

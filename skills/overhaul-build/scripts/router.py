@@ -115,6 +115,8 @@ def classify(detail: str, builder: str = "", cell: tuple[str, ...] | list[str] =
         return "load_flake"
     if MAIN.search(d):
         return "main_flake"
+    if d.startswith("review FAIL"):  # the reviewer's NOs are about the builder's diff: a retry, not a plan fix
+        return "review_quality"
     if CONTRACT.search(d):
         return "contract_defect"
     if FILES.search(d):
