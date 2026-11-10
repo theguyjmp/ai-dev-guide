@@ -170,7 +170,7 @@ REQUESTS_DIR = "requests"
 # watchdog.py requests drive honours at the same cycle boundary (owner 2026-11-10: the heartbeat must start what is
 # due and not happening): audit-phase-<N> runs phase N's polish + arch audit now (again if it already ran), arch-sweep
 # runs the whole-tree sweep now, periodic-<gate> re-arms a red gate's bisect and one more depfix (PERIODIC_REARMS).
-HARNESS_REQUESTS = ("audit-phase-", "arch-sweep", "periodic-")
+HARNESS_REQUESTS = ("audit-phase-", "arch-sweep", "periodic-", "release-audit-locks")
 PERIODIC_REARMS = 2
 LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py's lock
 # [limits] min_free_gb: under it, cargo's incremental dirs under .overhaul/target are pruned and no build starts
@@ -1216,7 +1216,7 @@ class Driver(mainred.MainRed):
     def startable(self, busy: set[str]) -> list[Fn]:
         """Planned rows that may build now, resumed builds first, then critical-path order (rank): every blocking
         dep proven (or, with [harness] stacked_starts, its branch reviewed and waiting to land), not in flight,
-        retries left, not held on a fix, its module not audit-locked and not past the phase barrier. File claims are
+        retries left, not held on a fix, no file overlap with an audit fix (fix_locks) and not past the phase barrier. File claims are
         left to ready(), so a resumed build claims its files before a fresh one."""
         recs = self.st["functions"]
         proven = {fid for fid, r in recs.items() if r["status"] == "proven"}
@@ -1224,9 +1224,9 @@ class Driver(mainred.MainRed):
         open_phase = min((phase_key(f)[0] for f in self.order if f.id not in proven), default=0)
         if self.barrier and self.phase_polish and (polishing := self.polish_phase()) is not None:
             open_phase = min(open_phase, polishing)  # ... and phase N+1 waits for phase N's polish and probes
-        locked = self.audit_locked()
+        locks = self.fix_locks()
         out = [f for f in self.order
-               if not (recs[f.id]["status"] != "planned" or f.id in busy or f.module in locked
+               if not (recs[f.id]["status"] != "planned" or f.id in busy or self.fix_holds(f, locks)
                        or recs[f.id].get("blocked_on") or (self.barrier and phase_key(f)[0] > open_phase)
                        or not stack.deps_ok(self, f, proven)
                        or recs[f.id]["attempts"] > self.budget(f.id))]  # budget() walks the graph: last
@@ -2766,13 +2766,13 @@ class Driver(mainred.MainRed):
         n = self.polish_phase()  # deferred rows are out of the plan: polish never waits for them
         if n is None and any(self.st["functions"][fid]["status"] != "proven" for fid in self.fns):
             return False
-        if n is not None and "locked" not in pol:  # what audit_locked holds from now until this polish ends
+        if n is not None and "locked" not in pol:  # the audit's scope (its re-check filter); it locks nothing
             mine = set() if pol.get("why") == "lands" else {f.module for f in self.phase_fns(n)}
             pol["locked"] = sorted(mine | set(self.gap_modules(self.scope_gaps())))
             pol["at"] = sum(1 for f in self.phase_fns(n) if self.st["functions"][f.id]["status"] == "proven")
-            locks = ", ".join(pol["locked"]) or "-"
+            scope = ", ".join(pol["locked"]) or "-"
             self.log(None, "phase_audit", f"phase {n} start ({pol.get('why', 'complete')}): {pol['at']} of "
-                                          f"{len(self.phase_fns(n))} rows proven, locks {locks}")
+                                          f"{len(self.phase_fns(n))} rows proven, scope {scope}, locks nothing")
         started = self.pump_polish_land()
         if self.probe_waiting(n) or self.sweep_state()["status"] != "idle":
             return started
@@ -2843,8 +2843,8 @@ class Driver(mainred.MainRed):
                 break
             if queued & set(self.polish_after.get(item[0], [])):
                 continue  # owner-first: an owner's own fix starts (and lands) before its caller's
-            if self.builds_in(item[0].split(", ") + self.polish_owners.get(item[0], [])):
-                continue  # phase audit beside builds: a build in flight there lands first (no races)
+            if self.builds_on(self.fix_claims(*item)):
+                continue  # phase audit beside builds: a build in flight on its files lands first (no races)
             mine = self.polish_claims(item[0])
             if not any(paths_overlap(mine, other) for other in taken):
                 taken.append(mine)
@@ -3299,10 +3299,15 @@ class Driver(mainred.MainRed):
 
     # ---- phase audit (owner 2026-11-09): phase polish beside the builds, the arch audit, and the sweep ----
     # [harness] phase_audit runs each phase's polish (above) whatever phase_barrier says. Without the barrier holding
-    # later phases it runs beside their builds: the modules it covers start no new build until it ends, and a fix
-    # waits for builds in flight in its modules. Round 1 also runs the arch audit (templates/arch-audit.md); its
-    # blocking NOs join the checklist's, verified and fixed the same way. Every arch_audit_every_lands lands the arch
-    # audit runs over the whole tree on its own (the sweep, state arch_sweep), never beside a phase polish.
+    # later phases it runs beside their builds. An audit (checklist, arch, sweep) and its verify lock nothing: they
+    # read main while builds go on (pilot2026-11-10 17:02-17:34: a lands audit held 10 modules for 30+ min, 0
+    # builds ran, and the manager turned phase_audit off). Only a fix pass locks, from queued until it lands, and only
+    # the files its verified findings name (fix_claims): a row overlapping them waits, any other row of the module
+    # builds; the fix waits for builds in flight on those files. Round 1 also runs the arch audit
+    # (templates/arch-audit.md); its blocking NOs join the checklist's, verified and fixed the same way. Every
+    # arch_audit_every_lands lands the arch audit runs over the whole tree on its own (the sweep, state arch_sweep),
+    # never beside a phase polish. A lock held over 20 min is the watchdog's audit_lock breach; its
+    # release-audit-locks request drops the locks of fixes still queued (st fix_released).
     def phase_audit_on(self) -> bool:
         return (self.barrier and self.phase_polish) or self.phase_audit
 
@@ -3315,33 +3320,74 @@ class Driver(mainred.MainRed):
         mods, probes = set(modules), self.probe_modules()
         return any((self.fns[fid].module if fid in self.fns else probes.get(fid)) in mods for fid in self.busy())
 
+    def builds_on(self, paths: list[str]) -> bool:
+        """True if a function in flight claims one of these paths (a probe: any file of its module)."""
+        probes = self.probe_modules()
+        for fid in self.busy():
+            if fid in self.fns:
+                mine = self.claims(self.fns[fid])
+            elif fid in probes:
+                mine = module_paths(module_section(self.arch, probes[fid]), probes[fid])
+            else:
+                continue
+            if paths_overlap(mine, paths):
+                return True
+        return False
+
     def polish_busy(self) -> bool:
         """What a polish step waits for before it starts: all work in flight, or, beside the builds, only other
-        fix passes and the builds in the modules it locks."""
+        fix passes (an audit locks nothing, so it never waits for builds)."""
         if self.polish_phase() is None or not self.beside_builds():
             return bool(self.busy())
         probes = self.probe_modules()
-        fixes = {fid for fid in self.busy() - {"periodic"} if fid not in self.fns and fid not in probes}
-        return bool(fixes) or self.builds_in(self.audit_locked())
+        return any(fid not in self.fns and fid not in probes for fid in self.busy() - {"periodic"})
 
     def fix_open(self, fid: str) -> bool:
         return fid in self.jobs or fid in self.polish_lands or bool(self.land_job and self.land_job.fn == fid)
 
-    def audit_locked(self) -> set[str]:
-        """Modules that start no new build beside a phase audit: those of the phase polish due now (its phase's and
-        its plan gaps'), and every module a queued or running polish or arch fix edits, until that fix lands."""
-        if not self.beside_builds():
-            return set()
-        n, out = self.polish_phase(), set()
-        if n is not None:  # due: its phase's modules at once, then what polish_step records (plus its plan gaps)
-            pol = self.polish_state()  # a lands audit (open rows still to build) locks only what its fixes edit
-            mine = set() if pol.get("why") == "lands" else {f.module for f in self.phase_fns(n)}
-            out = set(pol["locked"]) if "locked" in pol else mine
-        fixes = [m for m, _ in self.polish_queue] + [m for fid, (m, _) in self.polish_meta.items()
-                                                    if fid.startswith(("polish-", "arch-")) and self.fix_open(fid)]
-        for m in fixes:
-            out |= set(m.split(", ")) | set(self.polish_owners.get(m, []))
+    def fix_claims(self, module: str, issues) -> list[str]:
+        """The files an audit fix edits: every file its verified findings name (and the existing item a duplicate
+        reuses), plus its owner modules' paths (visibility edits); a finding without a file means the module's
+        paths (polish_claims)."""
+        items = issues if isinstance(issues, list) else []
+        files = [str(n.get("file") or "") for n in items if isinstance(n, dict)]
+        if not items or len(files) < len(items) or any(f in ("", "?", "-") for f in files):
+            return self.polish_claims(module)
+        files += [str(n["other"]).rsplit(":", 1)[0] for n in items if n.get("other")]
+        for m in self.polish_owners.get(module, []):
+            files += module_paths(module_section(self.arch, m), m)
+        return list(dict.fromkeys(files))
+
+    def fix_locks(self) -> list[tuple[set[str], list[str]]]:
+        """(modules, files) of every audit fix (polish-, arch- or the gaps pass) queued or in flight, until it
+        lands; a queued one the watchdog released (st fix_released) holds nothing until it starts. Empty when
+        the barrier holds later phases instead. Records st audit_locks {module: since} for the watchdog."""
+        out: list[tuple[set[str], list[str]]] = []
+        if self.beside_builds():
+            released = set(self.st.get("fix_released") or [])
+            items = [(m, i) for m, i in self.polish_queue if m not in released]
+            items += [(m, i) for fid, (m, i) in self.polish_meta.items()
+                      if fid.startswith(("polish-", "arch-")) and self.fix_open(fid)]
+            out = [(set(m.split(", ")) | set(self.polish_owners.get(m, [])), self.fix_claims(m, i)) for m, i in items]
+        mods = set().union(*(m for m, _ in out)) if out else set()
+        prev, now = self.st.get("audit_locks") or {}, round(time.time(), 1)
+        cur = {m: prev.get(m, now) for m in sorted(mods)}
+        if cur != prev:
+            self.st["audit_locks"] = cur
+        if not {m for m, _ in self.polish_queue} & set(self.st.get("fix_released") or []):
+            self.st.pop("fix_released", None)  # every released fix started or left the queue
         return out
+
+    def fix_holds(self, f: Fn, locks: list[tuple[set[str], list[str]]]) -> bool:
+        """True if a fix lock holds f: its files overlap a queued or running fix's files."""
+        if not locks:
+            return False
+        mine = self.claims(f)
+        return any(paths_overlap(mine, files) for _, files in locks)
+
+    def audit_locked(self) -> set[str]:
+        """Modules an audit fix holds files of (fix_locks); an audit itself locks none."""
+        return set().union(*(m for m, _ in self.fix_locks())) if self.beside_builds() else set()
 
     def start_arch_audit(self, fid: str, n: int | None, out: Path) -> None:
         """One blind reviewer (audit_model) reads ARCHITECTURE.md, every module's public API and the code in scope:
@@ -3847,6 +3893,15 @@ class Driver(mainred.MainRed):
                 self.st["phase_polish"][str(n)] = {"round": 0, "status": "idle", "issues": None, "history": [],
                                                    "audits": int(pol.get("audits", 1)) + 1, "gaps": pol.get("gaps")}
             force[:] = [x for x in force if x != n] + [n]
+            return ""
+        if name == "release-audit-locks":  # watchdog audit_lock: a lock held over 20 min
+            queued = sorted({m for m, _ in self.polish_queue} - set(self.st.get("fix_released") or []))
+            running = sorted({m for fid, (m, _) in self.polish_meta.items()
+                              if fid.startswith(("polish-", "arch-")) and self.fix_open(fid)})
+            self.st["fix_released"] = sorted(set(self.st.get("fix_released") or []) | set(queued))
+            self.fix_locks()
+            if not queued and running:
+                return f"only running fixes hold locks ({', '.join(running)}); they release when they land"
             return ""
         if name == "arch-sweep":
             if not self.phase_audit or self.arch_every < 1:

@@ -52,6 +52,16 @@ class Dog(unittest.TestCase):
         self.assertEqual(self.dog.check(), [])
         self.assertEqual(self.alerts(), "")
 
+    def test_a_module_audit_locked_over_20_min_alerts_and_requests_a_release(self):
+        self.log((NOW - 60, "build_start", "x"))
+        self.state(audit_locks={"geom": NOW - 10 * 60, "mesh": NOW - 5 * 60})
+        self.assertEqual(self.dog.check(), [])  # 10 min: fine
+        self.state(audit_locks={"geom": NOW - 25 * 60, "mesh": NOW - 5 * 60})
+        self.assertEqual(self.dog.check(), ["audit_lock"])
+        self.assertTrue((self.ov / "requests" / "release-audit-locks").is_file())
+        self.assertIn("audit_lock: 1 module(s) audit-locked over 20 min (longest 25 min): geom; alert: requested "
+                      "release-audit-locks", self.alerts())
+
     def test_ready_rows_beside_free_slots_for_10_min_request_a_reload_once(self):
         self.log((NOW - 3600, "build_start", "x"))
         self.state(width={"ready": 4, "free": 3})

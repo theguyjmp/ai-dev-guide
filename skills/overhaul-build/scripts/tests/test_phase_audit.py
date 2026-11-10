@@ -1,5 +1,6 @@
-"""Phase audit (owner 2026-11-09): each phase's polish runs beside the builds without the barrier, the modules it
-covers take no new build until it ends, an arch audit joins its round 1, a sweep audits the whole tree every N lands,
+"""Phase audit (owner 2026-11-09): each phase's polish runs beside the builds without the barrier and locks
+nothing; only an audit fix holds the files its findings name until it lands (2026-11-10), an arch audit joins its
+round 1, a sweep audits the whole tree every N lands,
 and the verdict holds a phase until its audit has 0 verified P0/P1.
 
 Run from the scripts dir:  py -3 -m unittest tests.test_phase_audit
@@ -81,16 +82,13 @@ class Base(Toy):
 
 
 class Units(Base):
-    def test_phase_audit_is_due_without_the_barrier_and_holds_only_its_modules(self):
+    def test_phase_audit_is_due_without_the_barrier_and_locks_nothing(self):
         drv = self.driver()
         self.assertEqual((drv.phase_audit, drv.arch_every), (True, 25))
         drv.st["functions"]["F1"]["status"] = "proven"
         self.assertEqual(drv.polish_phase(), 1)
-        self.assertEqual(drv.audit_locked(), {"alpha"})  # from the moment phase 1 is proven
-        self.assertEqual([f.id for f in drv.ready()], ["F2"])  # F3 is alpha: it waits for the phase 1 polish
-        drv.st["phase_polish"]["1"]["status"] = "done"
-        self.assertEqual(drv.audit_locked(), set())
-        self.assertEqual([f.id for f in drv.ready()], ["F2", "F3"])
+        self.assertEqual(drv.audit_locked(), set())  # the audit itself never locks
+        self.assertEqual([f.id for f in drv.ready()], ["F2", "F3"])  # F3 (alpha) builds beside the phase 1 audit
 
     def test_with_phase_audit_off_and_no_barrier_no_phase_polish(self):
         drv = self.driver()
@@ -105,15 +103,13 @@ class Units(Base):
         self.assertEqual(drv.ready(), [])
         self.assertFalse(drv.beside_builds())
 
-    def test_polish_waits_only_for_builds_in_its_modules(self):
+    def test_the_audit_waits_for_no_build_only_for_fix_passes(self):
         drv = self.driver()
         drv.st["functions"]["F1"]["status"] = "proven"
-        drv.jobs["F2"] = BUILD  # beta: the phase 1 polish starts beside it
+        drv.jobs["F2"] = BUILD  # beta
+        drv.jobs["F3"] = BUILD  # alpha, the audited module: the audit starts beside it too
         self.assertFalse(drv.polish_busy())
-        drv.jobs["F3"] = BUILD  # alpha (launched before the lock): the polish waits for it
-        self.assertTrue(drv.polish_busy())
-        del drv.jobs["F3"]
-        drv.jobs["depfix-F9"] = BUILD  # another fix pass in flight: it waits too
+        drv.jobs["depfix-F9"] = BUILD  # another fix pass in flight: it waits
         self.assertTrue(drv.polish_busy())
 
     def test_a_fix_waits_for_a_build_in_its_module_and_locks_it(self):
@@ -203,6 +199,69 @@ class Units(Base):
         self.assertEqual(drv.sweep_state()["status"], "idle")
 
 
+EIGHT = """# Functions
+| id | phase | module | deps | entry | acceptance | files | status |
+|----|-------|--------|------|-------|------------|-------|--------|
+| P1 | 1 | alpha | - | `toy add 1 2` | tests/acceptance/test_f1.py::test_add | src/alpha/p1.py | planned |
+| P2 | 1 | beta | - | `toy double 4` | tests/acceptance/test_f2.py::test_double | src/beta/p2.py | planned |
+""" + "".join(f"| F{k} | 2 | {'alpha' if k <= 4 else 'beta'} | P1 | `toy triple {k}` | "
+              f"tests/acceptance/test_f3.py::test_triple | src/{'alpha' if k <= 4 else 'beta'}/f{k}.py | planned |\n"
+              for k in range(1, 9))
+
+
+class AuditLocksOnlyFixFiles(Base):
+    """the pilot project 2026-11-10 17:02-17:34: a phase-3 lands audit locked 10 modules for 30+ min, every deps-proven row
+    waited (Q09: 80 rows), 0 builds ran, and the manager set phase_audit = false. An audit locks nothing now; a fix
+    holds only the files its verified findings name, only until it lands."""
+
+    def running_audit(self) -> drive.Driver:
+        drv = self.driver(functions=EIGHT, phase_polish=False, max_parallel=8, extra="phase_audit_every = 1\n")
+        for fid in ("P1", "P2"):
+            drv.st["functions"][fid]["status"] = "proven"
+        self.assertEqual(drv.polish_phase(), 1)
+        drv.polish_state().update(status="audit", round=1, locked=["alpha", "beta"], at=2)  # the audit is running
+        drv.jobs["polish-audit-p1"] = SimpleNamespace(kind="polish_audit", host="")
+        return drv
+
+    def test_eight_ready_rows_in_audited_modules_start_beside_a_running_audit(self):
+        drv = self.running_audit()
+        self.assertEqual(drv.audit_locked(), set())
+        self.assertEqual([f.id for f in drv.ready()], [f"F{k}" for k in range(1, 9)])
+
+    def test_a_fix_holds_only_the_rows_on_its_files_and_only_until_it_lands(self):
+        drv = self.running_audit()
+        fix = {"module": "alpha", "id": "C03", "answer": "no", "file": "src/alpha/f2.py", "line": 4,
+               "evidence": "dead branch"}
+        drv.polish_queue = [("alpha", [fix])]  # queued: holds src/alpha/f2.py so it cannot starve
+        self.assertEqual(drv.audit_locked(), {"alpha"})
+        self.assertEqual([f.id for f in drv.ready()], ["F1", "F3", "F4", "F5", "F6", "F7", "F8"])
+        drv.jobs["F2"] = BUILD  # launched before the fix was queued: the fix waits for it
+        self.assertEqual(drv.polish_ready(), [])
+        del drv.jobs["F2"]
+        drv.jobs["F1"] = BUILD  # another alpha file: the fix does not wait for it
+        self.assertEqual(drv.polish_ready(), [("alpha", [fix])])
+        drv.polish_queue = []
+        drv.polish_meta["polish-p1-r1-alpha"] = ("alpha", [fix])
+        drv.jobs["polish-p1-r1-alpha"] = SimpleNamespace(kind="polish_fix", host="")  # running: still holds
+        self.assertNotIn("F2", [f.id for f in drv.ready()])
+        del drv.jobs["polish-p1-r1-alpha"]  # landed
+        self.assertEqual(drv.audit_locked(), set())
+        self.assertIn("F2", [f.id for f in drv.ready()])
+
+    def test_lock_age_is_recorded_and_a_release_request_frees_queued_fixes(self):
+        drv = self.running_audit()
+        drv.polish_queue = [("beta", [{**DUP, "file": "src/beta/f5.py"}])]
+        drv.audit_locked()
+        since = drv.st["audit_locks"]["beta"]
+        drv.audit_locked()
+        self.assertEqual(drv.st["audit_locks"], {"beta": since})  # the first-seen time stays
+        self.assertNotIn("F5", [f.id for f in drv.ready()])
+        self.assertEqual(drv.harness_request("release-audit-locks"), "")
+        self.assertEqual(drv.audit_locked(), set())
+        self.assertEqual(drv.st["audit_locks"], {})
+        self.assertIn("F5", [f.id for f in drv.ready()])
+
+
 class AppSettings(Base):
     """pf-F item 1: the pilot project (phase_barrier false, phase_polish false, phase_audit true) logged 0 phase audits in 3
     days: its final polish had ended (status done) before the plan grew, and phase 3 waits on needs-plan rows."""
@@ -269,7 +328,7 @@ class Runs(Base):
         f2 = ev.index(next(e for e in ev if e[:2] == ("F2", "build_start")))
         f3 = ev.index(next(e for e in ev if e[:2] == ("F3", "build_start")))
         self.assertLess(f2, done[0])  # beta builds while phase 1 is polished
-        self.assertGreater(f3, done[0])  # alpha waits for it
+        self.assertLess(f3, done[0])  # so does alpha, the audited module: an audit locks nothing
         arch = [e[2] for e in ev if e[1] == "arch_audit"]
         self.assertTrue(any(d.startswith("start arch-audit: phase 1") for d in arch), arch)
         st = self.state(repo)

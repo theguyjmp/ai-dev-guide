@@ -6,7 +6,7 @@
 supervise.py runs it as a thread (start()); by hand, --once checks once. Reads .overhaul/log.jsonl (its tail),
 .overhaul/state.json, overhaul.toml and the plan's FUNCTIONS.md, never git. Two kinds of invariant, one table
 (INVARIANTS: name, when it is due, the evidence that it is happening, the action when it is not):
-- something is wrong (starved, no_land, disk, stop, host_offline);
+- something is wrong (starved, no_land, disk, stop, host_offline, audit_lock);
 - something that should be happening is not (phase_audit, arch_sweep, periodic, progress, reload, needs_plan,
   proof_check, dashboard): owner 2026-11-10, "if a phase has gone from unfinished to finished, check that the
   appropriate checkers have audited or are auditing, if not trigger them" (the per-phase audit and the arch sweep
@@ -55,6 +55,7 @@ RELOAD_S = 10 * 60.0  # drive applies a reset/reload request within this
 PLAN_ROUND_S = 30 * 60.0  # needs-plan rows: a plan round in flight or finished within this
 PROOF_DUE_S = 60 * 60.0  # a proof-check after a phase end
 DASH_S = 60 * 60.0  # the dashboard is rewritten within this while the build is live
+AUDIT_LOCK_S = 20 * 60.0  # a module held by an audit fix (st audit_locks) longer than this (pilot2026-11-10: 30+ min)
 TAIL_BYTES = 4 << 20
 INCREMENTAL = ("*/debug/incremental/*", "*/release/incremental/*")
 PROGRESS = ("build_start", "build_end", "verdict", "review_pass", "review_fail", "review_nos", "verify_fail",
@@ -72,6 +73,8 @@ INVARIANTS = (
      "quiet incremental dirs pruned, alert when still under"),
     ("stop", "a `stop` event since the last check", "-", "alert with its line"),
     ("host_offline", "one remote host offline twice in 30 min", "-", "host held offline 30 min + alert"),
+    ("audit_lock", "a module in st audit_locks (held by an audit fix)", "held under 20 min",
+     "request release-audit-locks + alert"),
     ("phase_audit", "phase N all proven 15 min ago, or [harness] phase_audit_every lands of phase N since its last "
      "audit", "st phase_polish[N] started or finished, or a phase_audit event for N",
      "request audit-phase-<N> + alert"),
@@ -193,7 +196,7 @@ class Watchdog:
         checks = {
             "starved": lambda: self.starved(now, mem, evs, st), "no_land": lambda: self.no_land(now, evs, st),
             "disk": self.disk, "stop": lambda: self.stopped(evs, since),
-            "host_offline": lambda: self.host_offline(now, evs),
+            "host_offline": lambda: self.host_offline(now, evs), "audit_lock": lambda: self.audit_lock(now, st),
             "phase_audit": lambda: self.phase_audit(now, evs, st), "arch_sweep": lambda: self.arch_sweep(now, mem, st),
             "periodic": lambda: self.periodic(now, evs, st), "progress": lambda: self.progress(now, mem, evs, st),
             "reload": lambda: self.reload(now, mem, evs), "needs_plan": lambda: self.needs_plan(now, mem, evs, st),
@@ -276,6 +279,16 @@ class Watchdog:
                 lambda: self.hold(twice))
 
     # ---- something that should be happening is not ----
+    def audit_lock(self, now, st):
+        """No module stays locked by an audit fix over 20 min (drive's st audit_locks {module: since})."""
+        locks = st.get("audit_locks") or {}
+        old = sorted(m for m, t in locks.items() if isinstance(t, (int, float)) and now - float(t) > AUDIT_LOCK_S)
+        if not old:
+            return None
+        mins = (now - min(float(locks[m]) for m in old)) / 60
+        return (f"{len(old)} module(s) audit-locked over {AUDIT_LOCK_S / 60:.0f} min (longest {mins:.0f} min): "
+                f"{' '.join(old[:8])}", lambda: self.request("release-audit-locks"))
+
     def phase_audit_on(self) -> bool:
         har = self.harness()
         polish = int(self.limits().get("polish_rounds", 1) or 0) >= 1

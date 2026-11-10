@@ -1,5 +1,20 @@
 # overhaul-build changelog
 
+## Audits lock nothing; a fix holds only its files, 2026-11-10
+- the pilot project 17:02-17:34: a phase-3 lands audit locked 10 modules (its scope plus plan-gap modules) for 30+ min; every
+  deps-proven row waited (Q09: 80), 0 builds ran, and the manager set phase_audit = false (pilot01487f4).
+- drive.py: an audit (checklist, arch, sweep) and its verify lock no module and wait for no build (polish_busy waits
+  only for fix passes). fix_locks(): a polish/arch/gaps fix, queued or in flight until it lands, holds the files its
+  verified findings name (fix_claims: file, the reused `other`, owner modules' paths; a finding without a file means
+  the module's paths). startable() holds a row only on a file overlap with one (fix_holds); polish_ready waits only
+  for builds in flight on the fix's files (builds_on). pol["locked"] stays as the audit's scope for the re-check
+  filter; the start event says "scope ..., locks nothing".
+- State `audit_locks` {module: first held}; watchdog invariant audit_lock: a module held over 20 min -> event, alert
+  and request `release-audit-locks`, which drive applies by releasing the queued fixes' locks (st fix_released) and
+  refuses (named) when only running fixes hold them.
+- Tests: test_phase_audit AuditLocksOnlyFixFiles (8 ready rows in audited modules start beside a running audit; a fix
+  holds only its file's row until it lands; lock age and release), old lock tests rewritten; test_watchdog audit_lock.
+
 ## Integration of passes A-D and live-retry, 2026-11-10
 - Passes A (feasibility) and B (router files_gap) both grew a row's claim through state `files_extra`. One field, one
   reader (drive.extra, used by claims() and allowed_lists()) and one writer (router.add_files, which also logs
