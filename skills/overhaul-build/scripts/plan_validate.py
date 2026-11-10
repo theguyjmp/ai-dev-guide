@@ -1,9 +1,14 @@
 """plan_validate.py: the plan gate of overhaul v2. A plan is not done, and drive.py must not start, until this passes.
 
-  py -3 plan_validate.py --repo R [--run] [--timeout 600]
+  py -3 plan_validate.py --repo R [--run] [--timeout 600] [--feasibility [ids]]
+
+--feasibility (planners, on the plan branch before it lands): feasibility.py asks one cheap agent per planned row
+whether it is buildable against the code at HEAD; a MISSING capability, a file outside its module and deps, a row too
+big for one builder or a file its `files` cell lacks is a problem line. Answers are cached in .overhaul/feasibility/.
 
 Reads R/overhaul.toml, spec/FUNCTIONS.md and spec/ARCHITECTURE.md (paths from [paths], else those defaults) and prints one
-line per problem, then `PLAN OK n functions` (exit 0) or `PLAN FAIL k problems` (exit 1). Exit 2 is bad usage. It writes nothing.
+line per problem, then `PLAN OK n functions` (exit 0) or `PLAN FAIL k problems` (exit 1). Exit 2 is bad usage. It writes
+nothing but the --feasibility cache.
 
 FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status | files | needs |`
   phase = integer from 1; deps = comma-separated ids or `-`; entry = the public CLI command, route or UI action;
@@ -1426,17 +1431,52 @@ def settle_flaky(template, proven, res, runner):
     return flaky
 
 
+def feasibility_rows(repo, ids=None):
+    """feasibility.Row for every planned row (or the ids given) of the plan in repo's working tree, the code at HEAD."""
+    import feasibility  # beside this script; only --feasibility needs it
+    cfg = drive.load_config(repo)
+    frel, arel = cfg["paths"]["functions"], cfg["paths"]["architecture"]
+    fns = drive.parse_functions((repo / frel).read_text(encoding="utf-8"))
+    arch = (repo / arel).read_text(encoding="utf-8") if (repo / arel).is_file() else ""
+    prot = {"tests/acceptance/", "overhaul.toml", frel, arel}
+    prot |= {f"{Path(p).parent.as_posix()}/" for p in [frel, arel]}
+    unit = drive.unit_dirs(cfg["commands"].get("test", "")) or ["tests/unit/"]
+    plan = {f.id: (f.module, f.status, f.entry) for f in fns}
+    rows = []
+    for f in fns:
+        if (ids and f.id not in ids) or (not ids and f.status != "planned"):
+            continue
+        section = drive.module_section(arch, f.module)
+        own = drive.module_paths(section, f.module)
+        cell = list(dict.fromkeys(f.files + drive.module_shared(section) if f.files else own))
+        deps = dict.fromkeys(d for d in drive.module_deps(arch, f.module) if d != f.module)
+        dep_paths = list(dict.fromkeys(p for d in deps for p in drive.module_paths(drive.module_section(arch, d), d)))
+        files = list(dict.fromkeys(drive.acc_file(a) for a in f.acceptance))
+        accept = "\n\n".join(f"`{x}`\n" + ((repo / x).read_text(encoding="utf-8", errors="replace")
+                                            if (repo / x).is_file() else "(missing)") for x in files)
+        table = f"{f.header}\n|{'---|' * len(drive.cells(f.header))}\n{f.row}"
+        rows.append(feasibility.Row(f.id, f.module, list(f.deps), table, accept, section, cell, own, dep_paths,
+                                    tuple(sorted(prot)), unit, list(dict.fromkeys(cell + files)), plan))
+    return feasibility.plan_problems(repo, rows, cfg["harness"], "HEAD", drive.paths_overlap) if rows else []
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="overhaul v2 plan validator")
     ap.add_argument("--repo", required=True, help="the rebuild repo root")
     ap.add_argument("--run", action="store_true", help="also run every acceptance test: non-proven must fail, proven must pass")
     ap.add_argument("--timeout", type=int, default=600, help="seconds allowed per command (default 600)")
+    ap.add_argument("--feasibility", nargs="?", const="all", default="",
+                    help="also ask feasibility.py whether each planned row (or the comma-separated ids) is buildable "
+                         "against the code at HEAD: one cheap agent call per row, cached in .overhaul/feasibility/")
     a = ap.parse_args(argv)
     if not Path(a.repo).is_dir():
         print(f"plan_validate: --repo {a.repo} is not a directory", file=sys.stderr)
         return 2
     notes = []
     problems, n = validate(a.repo, a.run, a.timeout, notes)
+    if a.feasibility and not problems:  # a malformed plan first; the agent calls only on a plan that parses
+        ids = set() if a.feasibility == "all" else {x.strip() for x in a.feasibility.split(",") if x.strip()}
+        problems += feasibility_rows(Path(a.repo), ids)
     for note in notes:
         print(note, file=sys.stderr)  # stderr: stdout stays problem lines plus the PLAN line
     for p in problems:

@@ -107,6 +107,15 @@ REVIEW = re.compile(r"verified blocking NO", re.I)
 THIN = re.compile(r"no committed change|acceptance (?:still )?red|builder exited|BLOCKED-BY", re.I)
 BLOCKED = re.compile(r"BLOCKED-BY:\s*`?([^\s`:]+)")
 DEPFIX = re.compile(r"^depfix-(?:flake-)?")
+# infeasible: feasibility.py proved the row unbuildable BEFORE any build (a MISSING capability, a provider row neither
+# proven nor a dep, a file outside its module and its deps, or too big for one builder); parked with its evidence
+CLASSES += ("infeasible",)
+PLAN_CLASSES += ("infeasible",)
+PRIORITY += ("infeasible",)
+WORDS["infeasible"] = "the feasibility check found rows unbuildable before a build"
+FIX["infeasible"] = "plan fix: add the missing capability's row first, add the module dep, or split the row"
+HINT["infeasible"] = ("add a row for each MISSING capability in its owning module before this one, add the module "
+                      "dep a needed file belongs to, or split the row if it does not fit one builder")
 
 
 # ---- classification --------------------------------------------------------------------------------------------------

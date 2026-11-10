@@ -55,6 +55,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import drivelock  # noqa: E402  beside this script: one drive per repo, orphans, slot markers
+import feasibility  # noqa: E402  beside this script: a row is checked buildable before its first build
 import land as land_mod  # noqa: E402  the lock protocol is land.py's
 import mainred  # noqa: E402  beside this script: main red, systemic failures, dead depfixes
 import memcap  # noqa: E402  beside this script: [limits] proc_mem_gb
@@ -775,6 +776,7 @@ class Driver(mainred.MainRed):
         self.wait_cache: tuple[object, dict[str, int]] = (None, {})
         self.remote = remote.Pool.from_harness(har, self.log, self.say)  # slots on top of max_parallel
         self.stacked = bool(har.get("stacked_starts", False))  # rows start on deps' reviewed branches (stack.py)
+        self.feas = feasibility.Gate(self)  # [harness] feasibility: checked before a row's first build
 
     # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
@@ -1094,7 +1096,7 @@ class Driver(mainred.MainRed):
         """In flight: jobs, the land queue, lands, and functions waiting at landing on a main-flake fix."""
         waiting = {fid for fid, r in self.st["functions"].items()
                    if (r["status"] == "landing" and r.get("blocked_on")) or r.get("blocked_on") == mainred.MAIN_RED}
-        gates = {"periodic"} if self.periodic.busy() else set()
+        gates = ({"periodic"} if self.periodic.busy() else set()) | self.feas.busy()  # a feasibility check runs
         return (set(self.jobs) | set(self.gating) | set(self.land_queue) | {j.fn for j in self.land_jobs()} | waiting
                 | gates)
 
@@ -1107,7 +1109,11 @@ class Driver(mainred.MainRed):
         The module's `shared:` files are left out: a clash there goes to the conflict-fix pass."""
         section = module_section(self.arch, f.module)
         shared = set(module_shared(section))
-        return [p for p in (f.files or module_paths(section, f.module)) if p not in shared]
+        return [p for p in (f.files or module_paths(section, f.module)) + self.files_extra(f.id) if p not in shared]
+
+    def files_extra(self, fid: str) -> list[str]:
+        """Files the claim grew by without a planning round (feasibility.py `files_widened`)."""
+        return list((self.st["functions"].get(fid) or {}).get("files_extra") or [])
 
     def waiters(self) -> dict[str, int]:
         """fid -> how many not-proven rows wait on it through `blocking` deps, directly or through others: the
@@ -1214,7 +1220,10 @@ class Driver(mainred.MainRed):
         if self.red_hold():  # main red, or stopping for the manager
             return False
         local_ok: bool | None = None  # the disk guard, checked once, and only before a build on this machine
-        for f in self.ready():  # resumed work first, then critical-path order (startable)
+        self.feas.collect()
+        rows = self.ready()
+        self.feas.prefetch(rows)  # the next rows' feasibility checks run while slots are busy
+        for f in rows:  # resumed work first, then critical-path order (startable)
             if self.local_jobs() < self.max_parallel and local_ok is None:
                 local_ok = self.disk_guard("build start")
             if self.local_jobs() < self.max_parallel and local_ok:
@@ -1372,7 +1381,7 @@ class Driver(mainred.MainRed):
     def allowed_lists(self, f: Fn) -> tuple[list[str], list[str]]:
         section = module_section(self.arch, f.module)
         paths = f.files + module_shared(section) if f.files else module_paths(section, f.module)
-        return list(dict.fromkeys(paths)), unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
+        return list(dict.fromkeys(paths + self.files_extra(f.id))), unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
 
     def dep_paths(self, modules: list[str]) -> list[str]:
         """The paths of the modules these modules depend on (ARCHITECTURE.md `Depends on:`), themselves excluded."""
@@ -1605,6 +1614,8 @@ class Driver(mainred.MainRed):
         return f"{f.header}\n|{'---|' * len(cells(f.header))}\n{f.row}"
 
     def start_build(self, f: Fn, rslot: int | None = None) -> None:
+        if not self.feas.ok(f):  # its check runs, it was parked infeasible, or its widened claim must wait
+            return
         rec = self.st["functions"][f.id]
         attempt = rec["attempts"] + 1
         resume = rec.get("resume") == "building"
@@ -3360,6 +3371,7 @@ class Driver(mainred.MainRed):
         """Kill every worker tree this run started; their functions go back to planned, marked to resume at their
         stage when the next drive starts (resume_mark)."""
         self.periodic.stop()
+        self.feas.stop()  # feasibility checks in flight
         if self.remote:
             self.remote.abort()  # what remote slots run on their host
         jobs = [*self.jobs.values(), *self.land_jobs()]
