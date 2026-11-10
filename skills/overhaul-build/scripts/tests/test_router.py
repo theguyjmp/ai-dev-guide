@@ -31,8 +31,7 @@ class Classify(unittest.TestCase):
 
     def test_review_fail_naming_a_stub_or_a_stray_path_is_review_quality(self):
         for nos in ("[K2 P1] `src/alpha/f1.py:1` stub left in f1.py", "src/beta/f1_stray.py is outside the allowed paths"):
-            self.assertEqual(router.classify(f"review FAIL: 1 verified blocking NOs; fix every one:
-- {nos}"),
+            self.assertEqual(router.classify(f"review FAIL: 1 verified blocking NOs; fix every one:\n- {nos}"),
                              "review_quality")
 
     def test_thin_reason_without_builder_text_is_other(self):
