@@ -60,6 +60,7 @@ import memcap  # noqa: E402  beside this script: [limits] proc_mem_gb
 import periodic  # noqa: E402  beside this script: [gates.periodic]
 import priority  # noqa: E402  beside this script: Windows process priority classes
 import router  # noqa: E402  beside this script: failure classes routed to their fix
+import worker  # noqa: E402  beside this script: lean claude launch, stream-json watch
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 os.environ.setdefault("OVERHAUL_HARNESS", "drive")  # the main guard (guard/reference-transaction) lets only the harness move main's code
@@ -229,6 +230,8 @@ class Job:
     base: str = ""  # a conflict pass: the sha of main when it started (the branch must contain it)
     model: str = ""  # the --model a claude worker got; "custom" for a worker_cmd without one
     slot: int = -1  # a land: k of its CARGO_TARGET_DIR .overhaul/target/land-<k>
+    stream: worker.Stream | None = None  # a stream-json worker's live events (worker.py)
+    idle: str = ""  # why the no-event watchdog killed it
 
 
 def now_iso() -> str:
@@ -467,15 +470,21 @@ def supports_max_turns(exe: str) -> bool:
 
 
 def read_result(path: Path) -> tuple[int | None, int | None, str]:
-    """(tokens, turns, final text) from a `claude -p --output-format json` result."""
+    """(tokens, turns, final text) from a `claude -p --output-format json` result, or the last `result` event of
+    a stream-json run (None, None, "" when a killed stream never sent one)."""
     raw = read_text(path)
     data: object = None
     for chunk in (raw, *reversed(raw.splitlines())):
         try:
             data = json.loads(chunk)
-            break
         except ValueError:
             continue
+        if not (isinstance(data, dict) and data.get("type") not in (None, "result")):
+            break
+    if isinstance(data, dict) and data.get("type") not in (None, "result"):  # a stream killed before its result
+        live = worker.Stream(path, 0.0)
+        live.poll(0.0)
+        return live.tokens or None, live.turns or None, ""
     if isinstance(data, list):
         data = next((d for d in reversed(data) if isinstance(d, dict) and d.get("type") == "result"), None)
     if not isinstance(data, dict):
@@ -699,6 +708,7 @@ class Driver(mainred.MainRed):
         self.conflict_retries = max(0, int(lim["conflict_retries"]))
         self.timeout_s = float(lim["builder_timeout_min"]) * 60
         self.heartbeat_s = float(har.get("heartbeat_min", 10)) * 60
+        self.idle_min = float(har.get("worker_idle_min", worker.IDLE_MIN))  # 0: no no-event watchdog
         self.main = str(har.get("main_branch", "main"))
         self.builder_model = str(har.get("builder_model") or "")  # also used by conflict passes
         self.review_model = str(har.get("review_model") or "")
@@ -1197,10 +1207,13 @@ class Driver(mainred.MainRed):
         now, done = time.monotonic(), False
         for job in [*self.jobs.values(), *self.land_jobs()]:
             if job.proc.poll() is None:
-                if now < job.deadline:
+                if now < job.deadline and not self.stalled(job, now):
                     continue
                 kill_tree(job.proc)
                 job.timed_out = True
+            if job.stream is not None:  # its last progress line, finished or killed
+                job.stream.poll(now)
+                job.stream.write_progress(now, force=True)
             done = True
             if job.kind in POLISH_KINDS:
                 self.reap_polish(job)
@@ -1217,6 +1230,24 @@ class Driver(mainred.MainRed):
                  "verify": self.after_verify}.get(job.kind, self.after_review)(job)
         return done
 
+    def stalled(self, job: Job, now: float) -> bool:
+        """Read a stream-json worker's new events into <run>.progress; True when it has sent none for
+        worker_idle_min (logged as a timeout naming the last tool it ran)."""
+        if job.stream is None:
+            return False
+        job.stream.poll(now)
+        job.idle = job.stream.stalled(now, self.idle_min)
+        job.stream.write_progress(now, force=bool(job.idle))
+        if job.idle:
+            self.log(job.fn, "timeout", f"{job.kind}: {job.idle}", now - job.started, job.stream.tokens or None)
+        return bool(job.idle)
+
+    def watch(self, job: Job, cmd: list[str]) -> Job:
+        """Give a stream-json worker its event reader."""
+        if "stream-json" in cmd:
+            job.stream = worker.Stream(job.out, job.started)
+        return job
+
     # ---- build ----
     def custom_cmd(self, kind: str) -> list[str]:
         har = self.cfg["harness"]
@@ -1225,14 +1256,15 @@ class Driver(mainred.MainRed):
             return []
         return [str(c) for c in custom] if isinstance(custom, list) else shlex.split(custom)
 
-    def worker_cmd(self, kind: str) -> list[str]:
-        """The worker command for kind build | conflict | review, without the prompt."""
+    def worker_cmd(self, kind: str, role: str = "") -> list[str]:
+        """The worker command for kind build | conflict | review, without the prompt; role (default kind) picks
+        its tools (worker.READ_ROLES get no Edit or Write)."""
         if custom := self.custom_cmd(kind):
             return custom
         exe = shutil.which("claude")
         if not exe:
             raise DriveError("claude CLI not on PATH")
-        cmd = [exe, "-p", "--dangerously-skip-permissions", "--output-format", "json"]
+        cmd = [exe, "-p", "--dangerously-skip-permissions", *worker.STREAM, *worker.lean_flags(exe, role or kind)]
         if supports_max_turns(exe):
             cmd += ["--max-turns", str(REVIEW_MAX_CALLS if kind in ("review", "verify") else self.max_calls)]
         model = {"review": self.review_model, "verify": self.verify_model}.get(kind, self.builder_model)
@@ -1243,13 +1275,14 @@ class Driver(mainred.MainRed):
         base = self.worker_cmd(kind)
         cmd = [*base, f"Read and do {brief.as_posix()}"]
         try:
-            proc = spawn(cmd, cwd, out, self.slot_env(fid))
+            proc = spawn(cmd, cwd, out, worker.env(cmd, self.slot_env(fid)))
         except OSError as e:
             raise DriveError(f"cannot start the {kind} worker {cmd[0]}: {e}") from e
         model = base[base.index("--model") + 1] if "--model" in base[:-1] else (
             "custom" if self.custom_cmd(kind) else "default")
         start = time.monotonic()
-        self.jobs[fid] = Job(fid, kind, proc, out, start, start + self.timeout_s, attempt, model=model)
+        self.jobs[fid] = self.watch(Job(fid, kind, proc, out, start, start + self.timeout_s, attempt, model=model),
+                                    cmd)
 
     def prepare_worktree(self, fid: str) -> Path:
         """A clean worktree on fn/<id> at main (reset on a retry)."""
@@ -1768,8 +1801,9 @@ class Driver(mainred.MainRed):
     def build_problem(self, job: Job, text: str) -> str:
         """Why this build cannot go to review, or ''. Commits leftover changes first."""
         if job.timed_out:
-            return (f"builder timed out after {self.timeout_s / 60:g} min and was killed; "
-                    "work in smaller steps and commit as you go")
+            return (f"builder killed: {job.idle}; never run a command that can hang (ssh, a server, a watch) "
+                    "without a timeout" if job.idle else f"builder timed out after {self.timeout_s / 60:g} min and "
+                    "was killed; work in smaller steps and commit as you go")
         if job.proc.returncode != 0:
             why = last_line(text) or last_line(read_text(job.out.with_suffix(".err"))) or "no output"
             return memcap.note(text, f"builder exited rc={job.proc.returncode}: {why}")
@@ -2361,7 +2395,7 @@ class Driver(mainred.MainRed):
                                  else "build")
         if custom:
             return custom, "custom"
-        base = self.worker_cmd({"polish_review": "review", "polish_verify": "verify"}.get(kind, "build"))
+        base = self.worker_cmd({"polish_review": "review", "polish_verify": "verify"}.get(kind, "build"), kind)
         if kind in ("polish_audit", "arch_audit") and self.audit_model:
             base = (base[:base.index("--model")] if "--model" in base else base) + ["--model", self.audit_model]
         return base, base[base.index("--model") + 1] if "--model" in base[:-1] else "default"
@@ -2370,11 +2404,11 @@ class Driver(mainred.MainRed):
         base, model = self.polish_cmd(kind)
         out = self.ov / "runs" / f"{fid}-r{rnd}-{kind}.json"
         try:
-            proc = spawn([*base, f"Read and do {brief.as_posix()}"], cwd, out, self.slot_env(fid))
+            proc = spawn([*base, f"Read and do {brief.as_posix()}"], cwd, out, worker.env(base, self.slot_env(fid)))
         except OSError as e:
             raise DriveError(f"cannot start the {kind} worker {base[0]}: {e}") from e
         start = time.monotonic()
-        self.jobs[fid] = Job(fid, kind, proc, out, start, start + self.timeout_s, rnd, model=model)
+        self.jobs[fid] = self.watch(Job(fid, kind, proc, out, start, start + self.timeout_s, rnd, model=model), base)
 
     def polish_commands(self) -> str:
         lines = [f"- {name}: `{cmd}`" for name, cmd in self.cfg["commands"].items() if "{test}" not in cmd]
