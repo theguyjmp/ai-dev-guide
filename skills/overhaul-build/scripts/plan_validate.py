@@ -1275,7 +1275,7 @@ def check_property_rust(rows, repo, problems, flabel):
             r["property"] = rel
 
 
-def validate(repo, run=False, timeout=600, notes=None):
+def validate(repo, run=False, timeout=600, notes=None, lint=True):
     """Returns (problems, n functions). `repo` is the rebuild repo root."""
     repo, problems = Path(repo), []
     cfg, paths, toml_ok = {}, dict(DEFAULT_PATHS), False
@@ -1359,7 +1359,7 @@ def validate(repo, run=False, timeout=600, notes=None):
         before = len(problems)
         check_ruff(repo, cmd["lint"], problems)
         check_clippy(cmd["lint"], problems)
-        if len(problems) == before:  # a lax lint config is the problem to fix first
+        if len(problems) == before and lint:  # a lax lint config is the problem to fix first
             check_lint_green(repo, cmd["lint"], problems)
 
     accepted = [bare(x).split("::")[0] for r in rows for x in r["acceptance"].split(";") if bare(x)]
@@ -1431,12 +1431,14 @@ def main(argv=None):
     ap.add_argument("--repo", required=True, help="the rebuild repo root")
     ap.add_argument("--run", action="store_true", help="also run every acceptance test: non-proven must fail, proven must pass")
     ap.add_argument("--timeout", type=int, default=600, help="seconds allowed per command (default 600)")
+    ap.add_argument("--no-lint", action="store_true", help="skip running the lint command (drive's live plan reload: "
+                    "a whole-tree clippy timed out at 300 s under build load; lint gates every land and plan land)")
     a = ap.parse_args(argv)
     if not Path(a.repo).is_dir():
         print(f"plan_validate: --repo {a.repo} is not a directory", file=sys.stderr)
         return 2
     notes = []
-    problems, n = validate(a.repo, a.run, a.timeout, notes)
+    problems, n = validate(a.repo, a.run, a.timeout, notes, lint=not a.no_lint)
     for note in notes:
         print(note, file=sys.stderr)  # stderr: stdout stays problem lines plus the PLAN line
     for p in problems:
