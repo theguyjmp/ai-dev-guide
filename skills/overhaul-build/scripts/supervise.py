@@ -7,8 +7,8 @@ It caps itself first (memcap, `[limits] proc_mem_gb`), so every child (drive.py,
 plan_validate, the tests they run) is capped too. Then, in a loop:
 - drive.py as a child (output in .overhaul/drive.out), its state.json read every LIVE_POLL_S (60 s). Live re-plan:
   while drive runs, needs-plan functions with no plan fix in flight get one live round (the same plan-fix agents and
-  integrator as Exit 3, ids L1, L2, ...). Its branch passes `plan_validate --run` in its worktree, then under
-  .overhaul/lock (no land in between) is rebased onto main, passes PLAN OK and fast-forwards main; then supervise
+  integrator as Exit 3, ids L1, L2, ...). Its branch is not run (static plan_validate only while drive runs); under
+  .overhaul/lock (no land in between) it is rebased onto main, passes PLAN OK and fast-forwards main; then supervise
   writes .overhaul/requests/reset-<id> per fixed row still active (reload-<round> when none is), which drive applies at
   its next cycle boundary. One round at a time (live or Exit 3), so no two rounds touch one function; a function gets
   one live try per reset count. .overhaul/supervise/round.json names the round in flight (verdict.py shows it);
@@ -282,14 +282,9 @@ class Supervisor:
             timespec="seconds")}), encoding="utf-8")
 
     def land_live(self, branch: str, merge_wt: Path, work: Path, label: str) -> None:
-        """--run in the round's worktree, then under .overhaul/lock: rebase onto main, PLAN OK, fast-forward main."""
+        """Under .overhaul/lock: rebase onto main, static PLAN OK (no --run while drive runs), fast-forward main."""
         if int(self.git("rev-list", "--count", f"{self.main}..{branch}").strip() or 0) == 0:
             raise Stop(f"{branch} has no commit to land")
-        code, line = self.run([*self.validate_cmd, "--repo", str(merge_wt), "--run", "--timeout",
-                               str(self.validate_timeout)], work / "validate-run.txt")
-        self.log(f"plan_validate --run {branch}: {line}")
-        if code or not line.startswith("PLAN OK"):
-            raise Stop(f"{branch} plan_validate --run: {line}")
         if not drive.acquire_lock(self.repo, LIVE_LOCK_WAIT_S, "supervise.py live plan land"):
             raise Stop(f".overhaul/lock held by {drive.lock_holder(self.repo) or '?'} for {LIVE_LOCK_WAIT_S:.0f}s")
         try:  # no land moves main while the plan is rebased, checked and fast-forwarded

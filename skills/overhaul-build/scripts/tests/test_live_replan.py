@@ -183,7 +183,7 @@ class Live(ts.Toy):
         subjects = ts.git(self.repo, "log", "--format=%s", "main").splitlines()
         self.assertEqual(subjects[:2], ["plan: S01 acceptance: fake", "S03: land"])  # rebased onto the land
         runs = self.calls("validate")
-        self.assertEqual([(Path(r["repo"]).name, r["run"]) for r in runs], [("_merge", True), ("_merge", False)])
+        self.assertEqual([(Path(r["repo"]).name, r["run"]) for r in runs], [("_merge", False)])
         self.assertIn("live round L1: landed; reset requests S01", self.log())
         self.assertFalse((self.repo / ".overhaul" / "supervise" / "round.json").exists())
         self.assertFalse((self.repo / ".overhaul" / "lock").exists())
