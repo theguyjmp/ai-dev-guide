@@ -472,7 +472,8 @@ class Supervisor:
         for fid in fixing:
             ahead = int(self.git("rev-list", "--count", f"{self.main}..plan/fix-{fid}").strip() or 0)
             line1 = first_line(drive.read_text(work / f"plan-fix-{fid}.md"))
-            (fixed if ahead and "PLAN OK" in line1 else skipped).append(fid)
+            split = router.split_ok(router.oversized_reason(recs[fid].get("last_reason") or ""), line1)
+            (fixed if ahead and "PLAN OK" in line1 and split else skipped).append(fid)
             self.log(f"plan-fix {fid}: {ahead} commit(s); {line1 or 'no report'}")
         if not fixed:
             self.drop_worktrees(work)

@@ -327,6 +327,17 @@ def want_plan_fix(d, fid: str, cls: str, evidence: str) -> str:
     return "plan fix" + (" (split)" if cls == "oversized" else "")
 
 
+def split_ok(oversized: bool, line1: str) -> bool:
+    """An oversized function's plan fix counts only as a split (owner 2026-11-10): `PLAN-FIX <id> split PLAN OK`."""
+    words = line1.split()
+    return not oversized or (len(words) > 2 and words[2].lower() == "split")
+
+
+def oversized_reason(reason: str) -> bool:
+    """drive's park reason of a function the router classed oversized (`router oversized: ...`)."""
+    return str(reason or "").startswith("router oversized")
+
+
 def gap_files(reason: str, builder: str = "") -> list[str]:
     """The files a files_gap names: the visibility check's list, else every repo path in the reason or the
     builder's BLOCKED-BY line (a `path:line` loses its line)."""
@@ -581,7 +592,7 @@ def round_(sup, label: str, todo: list[dict]) -> None:
         for fid in fixing:
             ahead = int(sup.git("rev-list", "--count", f"{sup.main}..plan/fix-{fid}").strip() or 0)
             line1 = supervise.first_line(drive.read_text(work / f"plan-fix-{fid}.md"))
-            ok = bool(ahead) and "PLAN OK" in line1
+            ok = bool(ahead) and "PLAN OK" in line1 and split_ok(by[fid]["class"] == "oversized", line1)
             (fixed.append(fid) if ok else None)
             sup.log(f"router plan-fix {fid}: {ahead} commit(s); {line1 or 'no report'}")
         if not fixed:

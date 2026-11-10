@@ -32,6 +32,17 @@ the supervisor runs every test once after the merge. The same step fails twice: 
        test through the public entry that fails now, ordered before `{{id}}`, and `{{id}}`'s deps naming it. `{{id}}`
        itself stays as it is.
    {{mode}}
+   Row size (owner 2026-11-10): every row you add or change is one function or one verb behaviour, about 50-150
+   lines in 1-3 files. Its `files` cell names at most 3 files, and its ARCHITECTURE API bullet
+   (a `- ` bullet holding the backticked signature and `[<id>]`) carries a work packet on an indented line under it:
+   `Packet: edit <file> after <symbol>; calls <helpers from spec/index/<module>.md, or -; test <command>`
+   (each file the row edits with the symbol to edit after, the exact signatures on the bullet, the existing helpers
+   to call, the test command). Every capability a row calls exists on `{{main}}` (its spec/index/<module>.md line)
+   or in a dep row; when it does not, add that row first (fix 4). plan_validate fails a new or changed row without
+   them.
+   Oversized: a function parked as `oversized` (the router class, a builder, land or acceptance timeout, or a row
+   too big for one builder) comes back split, fix (1) only, into rows of that size; a report of any other kind is
+   rejected and the function stays needs-plan.
 3. Change nothing else: no other function's row or test, no raised limit or budget, no loosened check. Product code is
    never edited; a new module or wiring a builder cannot reach goes into the row's `files` cell instead. A decision
    record you add takes the next free number on `{{main}}`; the integrator renumbers clashes.

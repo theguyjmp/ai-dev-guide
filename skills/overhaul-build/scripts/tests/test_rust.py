@@ -106,10 +106,14 @@ ARCH = """# Architecture
 ## Module core
 Paths: crates/core/
 Depends on: -
+- `pub fn add(a: i64, b: i64) -> i64` [F01]
+  Packet: edit crates/core/src/lib.rs after `mod tests`; calls -; test cargo test --test add
 
 ## Module app
 Paths: src/
 Depends on: core
+- `fn sum(args: &[String]) -> i64` [F02]
+  Packet: edit src/main.rs after `fn main`; calls shop_core::add; test cargo test --test sum
 
 ## Policies
 Concurrency: app - single-threaded CLI; one process per command

@@ -90,10 +90,16 @@ ARCH = """# Architecture
 ## Module calc
 Paths: src/tiny.py
 Depends on: -
+- `add(a: int, b: int) -> int` [F001]
+  Packet: edit src/tiny.py after `main`; calls -; test pytest tests/acceptance/test_calc.py -k test_add
+- `sub(a: int, b: int) -> int` [F002]
+  Packet: edit src/tiny.py after `add`; calls -; test pytest tests/acceptance/test_calc.py -k test_sub
 
 ## Module report
 Paths: src/report.py
 Depends on: calc
+- `report() -> str` [F003]
+  Packet: edit src/report.py after `report`; calls calc.add, calc.sub; test pytest tests/acceptance/test_report.py
 
 ## Policies
 Concurrency: calc - single-threaded CLI; one process per command
@@ -240,7 +246,7 @@ class StaticChecks(Base):
         cyc = ARCH.replace("Depends on: -", "Depends on: report")
         self.only(self.problems(self.make(arch=cyc)), "module cycle")
         styled = "## Module calc\n- **Paths:** `src/tiny.py`\n- **Depends on:** none\n### API\ntext\n## Module report\nPaths: src/report.py\nDepends on: calc\n"
-        self.assertEqual(self.problems(self.make(arch=styled + POLICIES)), [])
+        self.assertEqual(self.problems(self.make(table(R1), arch=styled + POLICIES)), [])
 
     def test_acceptance_driving_another_rows_entry_must_wait_on_it(self):
         # trial 8, F02: its test ran F05's `stock price`, so no F02 builder could turn it green
@@ -344,7 +350,9 @@ class RunChecks(Base):
 
     def test_every_test_of_a_nonproven_function_must_be_red(self):
         rows = table(r3(i="F009", phase="1", deps="-", acc=f"{REPORT_T}::test_report_a; {CALC_T}::test_add"))
-        self.only(self.problems(self.make(rows), run=True), "F009", f"{CALC_T}::test_add", "already PASSES")
+        arch = ARCH.replace("[F003]", "[F009]")
+        self.only(self.problems(self.make(rows, arch=arch), run=True), "F009", f"{CALC_T}::test_add",
+                  "already PASSES")
 
     def test_proven_whose_acceptance_fails_fails(self):
         rows = table(R1, row("F002", deps="F001", entry="`tiny sub A B`", acc=f"{CALC_T}::test_sub", status="proven"))
@@ -633,3 +641,67 @@ class PhaseSize(unittest.TestCase):
         p = []
         pv.check_phase_size(rows, {"plan": {"max_phase_size": 50}}, p, "F")
         self.assertEqual(p, [])
+
+
+
+F001_PACKET = "  Packet: edit src/tiny.py after `main`; calls -; test pytest tests/acceptance/test_calc.py -k test_add\n"
+F002_PACKET = "  Packet: edit src/tiny.py after `add`; calls -; test pytest tests/acceptance/test_calc.py -k test_sub\n"
+
+
+class WorkPackets(Base):
+    """A row is one function or one verb behaviour in 1-3 files, with a work packet on its ARCHITECTURE bullet."""
+
+    def checked(self, root):
+        notes = []
+        return pv.validate(root, notes=notes)[0], notes
+
+    def git(self, root, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=root, check=True,
+                       capture_output=True)
+
+    def test_planned_row_without_a_packet_fails(self):
+        p, _ = self.checked(self.make(arch=ARCH.replace(F002_PACKET, "")))
+        self.only(p, "F002", "no work packet", "Packet: edit <file> after <symbol>")
+
+    def test_proven_row_without_a_packet_only_warns(self):
+        p, notes = self.checked(self.make(arch=ARCH.replace(F001_PACKET, "")))
+        self.assertEqual(p, [])
+        self.assertTrue(any("F001" in n and "no work packet" in n and "(warning)" in n for n in notes), notes)
+
+    def test_packet_needs_edit_calls_test_and_stays_in_the_files_cell(self):
+        no_test = ARCH.replace("calls -; test pytest tests/acceptance/test_calc.py -k test_sub", "calls -")
+        self.only(self.checked(self.make(arch=no_test))[0], "F002", "lacks test")
+        no_after = ARCH.replace("edit src/tiny.py after `add`;", "edit src/tiny.py;")
+        self.only(self.checked(self.make(arch=no_after))[0], "F002", "lacks edit <file> after <symbol>")
+        stray = ARCH.replace("edit src/tiny.py after `add`", "edit src/report.py after `report`")
+        self.only(self.checked(self.make(arch=stray))[0], "F002", "outside its files cell (src/report.py)")
+        untagged = ARCH.replace("[F002]", "[F099]")
+        self.only(self.checked(self.make(arch=untagged))[0], "F002", "no ARCHITECTURE API bullet tagged [F002]")
+
+    def test_shared_bullet_takes_one_packet_per_row(self):
+        shared = ARCH.replace("[F002]\n  Packet:", "[F002, F003]\n  Packet F002:")
+        shared = shared.replace("- `report() -> str` [F003]\n", "- `report() -> str` [F099]\n")
+        self.only(self.checked(self.make(arch=shared))[0], "F003", "no work packet")
+
+    def test_more_than_three_files_fails_unless_work_packets_is_off(self):
+        root = self.make(table(R1, R2, r3(files="src/report.py, src/r2.py, src/r3.py, src/r4.py")))
+        for name in ("r2", "r3", "r4"):
+            (root / "src" / f"{name}.py").write_text(REPORT_STUB, encoding="utf-8")
+        self.assertTrue(self.has(self.checked(root)[0], "F003", "files cell names 4 files (max 3)"))
+        (root / "overhaul.toml").write_text(toml() + "[plan]\nwork_packets = false\n", encoding="utf-8")
+        p, notes = self.checked(root)
+        self.assertFalse(self.has(p, "names 4 files"), p)
+        self.assertTrue(any("names 4 files" in n and "(warning)" in n for n in notes), notes)
+
+    def test_rows_unchanged_since_main_only_warn_and_a_changed_row_fails(self):
+        root = self.make(arch=ARCH.replace(F002_PACKET, ""))
+        self.git(root, "init", "-q", "-b", "main")
+        self.git(root, "add", "-A")
+        self.git(root, "commit", "-qm", "plan")
+        p, notes = self.checked(root)  # F001 is proven: a live build, so main is the baseline
+        self.assertEqual(p, [])
+        self.assertTrue(any("F002" in n and "(warning)" in n for n in notes), notes)
+        fun = root / "spec" / "FUNCTIONS.md"
+        fun.write_text(fun.read_text(encoding="utf-8").replace(R2, R2.replace("| stub |", "| F001:behaviour |")),
+                       encoding="utf-8")
+        self.only(self.checked(root)[0], "F002", "no work packet")

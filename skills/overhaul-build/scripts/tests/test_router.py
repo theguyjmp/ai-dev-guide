@@ -371,5 +371,15 @@ class VerdictLine(unittest.TestCase):
         self.assertEqual(red["what"], "most failures: builders cannot edit a needed file (5 of 9)")
 
 
+class SplitRule(unittest.TestCase):
+    def test_an_oversized_function_counts_as_fixed_only_by_a_split(self):
+        self.assertTrue(router.split_ok(True, "PLAN-FIX F04 split PLAN OK"))
+        self.assertFalse(router.split_ok(True, "PLAN-FIX F04 acceptance PLAN OK"))
+        self.assertFalse(router.split_ok(True, ""))
+        self.assertTrue(router.split_ok(False, "PLAN-FIX F04 architecture PLAN OK"))
+        self.assertTrue(router.oversized_reason("router oversized: rows are too big (timeouts, 1M fixtures); split"))
+        self.assertFalse(router.oversized_reason("router files_gap: a builder cannot edit a needed file"))
+
+
 if __name__ == "__main__":
     unittest.main()

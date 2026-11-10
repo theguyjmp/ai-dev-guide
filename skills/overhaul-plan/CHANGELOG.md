@@ -1,5 +1,15 @@
 # overhaul-plan changelog
 
+## Small rows with work packets, 2026-11-10
+Owner: agents are slow when rows are big; an audit found 38 of 75 the pilot project needs-plan rows still too big, because the
+plan-fix agents supervise.py and router.py start (and the planner rules) did not carry the size rule. A row is now one
+function or one verb behaviour, about 50-150 lines in 1-3 files, and its ARCHITECTURE API bullet carries a work packet
+(`Packet: edit <file> after <symbol>; calls <helpers from spec/index>; test <command>`); every capability it calls
+exists on main or in a dep row. plan_validate fails a new or changed unproven row over 3 files or without a packet
+([plan] work_packets, default true; work_packets_since sets the baseline, else main when rows are proven) and warns
+for proven or unchanged rows. The plan-fix brief carries the rule, and a function parked oversized counts as fixed
+only when its plan fix is a split (router.split_ok, in router and Exit-3 rounds).
+
 ## Rust plans, 2026-11-08
 Step 6 gives the Rust command set and layout (acceptance in tests/acceptance/<f>.rs as root `[[test]]` targets
 named by stem, `{stem}` in the commands, `todo!()` stubs, in-crate unit tests, proptest property files, no

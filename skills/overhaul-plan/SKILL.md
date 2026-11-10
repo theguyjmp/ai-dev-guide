@@ -34,7 +34,7 @@ plan_validate.py checks the table in exactly this form:
 FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status | files | needs |`
   phase = integer from 1; deps = comma-separated ids or `-`; entry = the public CLI command, route or UI action;
   acceptance = `tests/acceptance/<f>.py::<test>` (Rust: `<f>.rs`), `;`-separated; status = planned|building|review|landing|proven|needs-plan.
-  files = the function's own files (its stub), comma-separated, inside its module's Paths. REQUIRED.
+  files = the function's own files (its stub), comma-separated, at most 3, inside its module's Paths. REQUIRED.
   needs = `stub` (default), `behaviour`, or `F03:behaviour, F04:stub` per dep. REQUIRED.
 ```
 - files: give each function its own file(s) (`src/shop/cart/add.py`); siblings build at once only when their files do
@@ -51,8 +51,9 @@ FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status 
 - acceptance: `tests/acceptance/<file>.py::test_<id>_<what>`, the id in lower case so `-k` picks only it.
 - status: write `planned`; only land.py writes `proven`, in its land commit.
 
-A function is one user-visible behaviour a builder can finish in about 300 lines or fewer, unit tests included;
-split bigger ones by sub-behaviour (`report --csv`, `report --pdf`). Helpers, refactors and infrastructure are never
+A row is one function or one verb behaviour a builder finishes in about 50-150 lines in 1-3 files, unit tests
+included; split bigger ones by sub-behaviour (`report --csv`, `report --pdf`). Every capability a row calls exists on main (its line in the generated `spec/index/<module>.md`) or
+in a dep row; when it does not, add that row first, in the module that owns it. Helpers, refactors and infrastructure are never
 rows of their own: F01, the smallest entry that proves the product starts (`shop --help` exits 0, or `GET /healthz`
 answers 200), is the foundation and builds the shared types, store, errors and entry dispatch; if that is too big, the
 first data behaviour (`shop product add`) carries the domain types as a second foundation. Every function reaches a
@@ -84,9 +85,14 @@ Depends on: app, catalog
 Public: shop.cart.add_line, shop.cart.lines, shop.cart.register
 Owns: the cart table.
 - `add_line(sku: str, qty: int) -> Line` [F04]
+  Packet: edit src/shop/cart/add.py after `class Line`; calls catalog.find_sku, money.cents; test py -3 -m pytest tests/acceptance/test_cart.py -k test_f04_cart_add
 - `lines() -> list[Line]` [F03]
+  Packet: edit src/shop/cart/show.py after `def _fmt`; calls -; test py -3 -m pytest tests/acceptance/test_cart.py -k test_f03_cart_show
 - `register(sub)` adds the `cart` commands [F03, F04]
 ```
+- Work packet [by plan_validate.py]: each row's API bullet (exact signature, `[<id>]`) has an indented `Packet:` line
+  (`Packet F04:` on a shared bullet): `edit <file> after <symbol>` per file (only its `files` cell), `calls` the helpers
+  it reuses as `spec/index/<module>.md` names them (`-` none), `test` its acceptance command. Proven rows only warn.
 - One `## Policies` section [by plan_validate.py], each line `<owner module> - <policy>`: `Concurrency:` (server
   model, what locks), `Persistence:` (the ONE module that reads and writes stored state; every non-temp write, exports
   too, is atomic: unique temp file then replace), `Errors:` (typed errors, how the entry reports them, what is logged),
@@ -175,7 +181,9 @@ path, `PLAN OK, N functions, M modules`, and next: run overhaul-build (its dash.
 One numbered line per decision, no ceremony: `D3: drop export-xml; nothing reaches it.` One for every dropped old
 entry, deliberate behaviour change, dependency added after the plan, and acceptance test changed after the plan.
 ## Re-plan a needs-plan function (drive.py exited 3)
-Read only its row, `.overhaul/reviews/<id>.txt` and its `.overhaul/log.jsonl` lines, never the diff. Do one, add one
+Read only its row, `.overhaul/reviews/<id>.txt` and its `.overhaul/log.jsonl` lines, never the diff. A row parked
+oversized (a builder, land or acceptance timeout, or too big for one builder) comes back split (1), never tweaked;
+every row you add or change keeps the row size and carries its work packet (Step 4). Do one, add one
 DECISIONS line, pass Step 7, make a plan commit on a branch (only spec/, tests/, new stubs, overhaul.toml), move main
 to it only at PLAN LAND OK (rule below), then run `drive.py --repo <rebuild> --reset <id>` and restart drive.py:
 1. Split it: new ids with one new failing test each; update deps and OLD-ENTRIES lines naming it; drop its row and test.
@@ -209,6 +217,7 @@ Good: only public commands of F04 and its deps, its own data dir, what the user 
 `-k test_f04_cart_add` runs exactly it. Bad: importing `shop.cart`, a mocked store, or checking only the exit code.
 ## Rules
 - The plan is done only at PLAN OK: every function has a public entry, an acceptance test that exists and fails now, and deps in the same or an earlier phase [by plan_validate.py --run].
+- Every row is one function or one verb behaviour in at most 3 files, and its ARCHITECTURE bullet carries a work packet (files with the symbol to edit after, exact signature, helpers to call from spec/index, test command); every capability it calls exists on main or in a dep row [by plan_validate.py].
 - Acceptance tests reach the product only through `_entry.py`: no product imports, mocks or fakes [by entry_lint.py].
 - The module graph is acyclic and modules import each other only through `Public:` names [by check_cycles.py].
 - Each cross-cutting policy has one owner, each domain rule one function, every concurrent writer a concurrent test and every boundary a negative test [by plan_validate.py].

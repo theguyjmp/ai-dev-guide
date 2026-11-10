@@ -13,7 +13,7 @@ nothing but the --feasibility cache.
 FUNCTIONS.md table: `| id | phase | module | deps | entry | acceptance | status | files | needs |`
   phase = integer from 1; deps = comma-separated ids or `-`; entry = the public CLI command, route or UI action;
   acceptance = `tests/acceptance/<f>.py::<test>` (Rust: `<f>.rs`), `;`-separated; status = planned|building|review|landing|proven|needs-plan.
-  files = the function's own files (its stub), comma-separated, inside its module's Paths. REQUIRED.
+  files = the function's own files (its stub), comma-separated, at most 3, inside its module's Paths. REQUIRED.
   needs = `stub` (default), `behaviour`, or `F03:behaviour, F04:stub` per dep. REQUIRED.
 ARCHITECTURE.md: `## Module <name>` sections, each with `Paths:` and `Depends on:` (`-` or `none` = none), and one
   `## Policies` section: `Concurrency:`, `Persistence:`, `Errors:`, `Untrusted input:` and `Retries:` lines, each
@@ -57,6 +57,11 @@ Problems (each is one line):
     inside `proptest!`; [probe] property_tests = false turns this off. With --run and a [commands].property template
     ({file} = the property file, {stem} its stem), a non-proven function's property file must FAIL and a proven one
     must PASS. Planned tests are anchors: land.py rejects a branch that modifies one (anchors.py).
+  - row size and work packet (owner 2026-11-10): a row's files cell names more than 3 files, or its ARCHITECTURE API
+    bullet (`- <signature> [F04]`) has no `Packet: edit <file> after <symbol>; calls <helpers or ->; test <command>` line
+    (edits only inside its files cell). An error for a new or changed unproven row while [plan] work_packets = true
+    (default); a stderr warning for a proven row, work_packets = false, or a row unchanged since the baseline
+    ([plan] work_packets_since, else the main branch when the plan has proven rows);
   - optional `rules` column (P07, S18; X12/X14): a cited id not defined in the [paths] patterns or standards file; with
     [paths] patterns, a `ui:` row or a row whose entry names a [plan] interactive_verbs word that cites no pattern id,
     or a cited pattern id missing from its acceptance test's name and comments. [commands.acceptance_by] templates
@@ -120,6 +125,12 @@ for name in sys.argv[1:]:
 print("\\n".join(bad))
 """
 DEFAULT_PATHS = {"functions": "spec/FUNCTIONS.md", "architecture": "spec/ARCHITECTURE.md"}
+MAX_ROW_FILES = 3  # owner 2026-11-10: a row is one function or one verb behaviour, ~50-150 lines in 1-3 files
+API_TAG = re.compile(r"\[([^\]]*)\]")
+PACKET = re.compile(r"\bpacket(?:\s+([A-Za-z0-9][\w.-]*))?\s*:\s*(.*)$", re.I)
+PACKET_EDIT = re.compile(r"\bedit\s+`?([^\s`;]+)`?\s+after\s+\S", re.I)
+PACKET_FIELDS = (("calls", re.compile(r"(?:^|;)\s*calls\s+\S", re.I)),
+                 ("test", re.compile(r"(?:^|;)\s*test\s+\S", re.I)))
 
 
 def load_toml(path):
@@ -1280,6 +1291,98 @@ def check_property_rust(rows, repo, problems, flabel):
             r["property"] = rel
 
 
+def row_files(r):
+    return [bare(x) for x in re.split(r"[,;]", r.get("files", "")) if bare(x) and bare(x) not in NO_ENTRY]
+
+
+def api_packets(text):
+    """{row id: [(line, signature bullet, packet text or '')]} from the ARCHITECTURE API bullets (`- \`sig\` [F04]`)
+    and their `Packet:` / `Packet F04:` line (on the bullet or an indented line under it)."""
+    out, cur = {}, None
+    for n, line in enumerate(text.splitlines(), 1):
+        if re.match(r"^\s*[-*]\s+`", line) and not (cur and line[:1].isspace() and PACKET.search(line)):
+            ids = [x.strip() for tag in API_TAG.findall(line) for x in re.split(r"[,;\s]+", tag) if x.strip()]
+            cur = {"line": n, "ids": ids, "sig": line.strip(), "packets": []}
+            for fid in ids:
+                out.setdefault(fid, []).append(cur)
+        elif cur is not None and line.strip() and not line[:1].isspace():
+            cur = None
+        if cur is not None and (m := PACKET.search(line)):
+            cur["packets"].append((m.group(1), m.group(2).strip()))
+    return out
+
+
+def packet_gaps(fid, bullets, files):
+    """What the row's work packet lacks ('' = complete)."""
+    if not bullets:
+        return f"no ARCHITECTURE API bullet tagged [{fid}] (a `- ` bullet with its backticked signature and [{fid}])"
+    texts = [t for b in bullets for who, t in b["packets"] if who in (None, fid)]
+    if not texts:
+        return (f"its ARCHITECTURE bullet (line {bullets[0]['line']}) has no work packet: add `Packet: edit <file> after "
+                "<symbol>; calls <helpers from spec/index/<module>.md, or ->; test <command>`")
+    text = " ; ".join(texts)
+    lacks = [] if PACKET_EDIT.search(text) else ["edit <file> after <symbol>"]
+    lacks += [f"{name} ..." for name, rx in PACKET_FIELDS if not rx.search(text)]
+    edits = PACKET_EDIT.findall(text)
+    stray = [f for f in edits if files and f not in files]
+    if stray:
+        lacks.append(f"edits outside its files cell ({', '.join(stray)})")
+    if not any("(" in b["sig"] for b in bullets):
+        lacks.append("an exact signature on the bullet")
+    return f"its work packet lacks {'; '.join(lacks)}" if lacks else ""
+
+
+def baseline_rows(repo, ref, flabel):
+    """{id: row} of FUNCTIONS.md at git `ref`, or None when it cannot be read."""
+    try:
+        p = subprocess.run(["git", "show", f"{ref}:{flabel}"], cwd=str(repo), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode:
+        return None
+    return {bare(r["id"]): r for r in parse_functions(p.stdout, [], flabel)}
+
+
+def same_row(a, b):
+    """The two rows hold the same table cells, status aside."""
+    keys = [k for k in (*COLUMNS, *STUB_COLUMNS, *OPTIONAL_COLUMNS) if k != "status"]
+    return all(bare(str(a.get(k, ""))) == bare(str(b.get(k, ""))) for k in keys)
+
+
+def check_packets(rows, arch_text, cfg, repo, problems, notes, flabel):
+    """Row size and work packets (owner 2026-11-10). Every row's files cell names at most 3 files and its ARCHITECTURE
+    bullet carries a work packet. An error for a new or changed unproven row while [plan] work_packets is on (default);
+    a stderr warning for a proven row, an unproven row unchanged since the baseline, or work_packets = false. The
+    baseline is [plan] work_packets_since, else (a plan with proven rows: a live build) the main branch."""
+    plan = cfg.get("plan") or {}
+    on = plan.get("work_packets", True) is not False
+    ref = plan.get("work_packets_since") or (
+        (cfg.get("harness") or {}).get("main_branch", "main") if any(r.get("st") == "proven" for r in rows) else "")
+    old = baseline_rows(repo, str(ref), flabel) if ref else None
+    if not arch_text.strip():
+        return  # ARCHITECTURE is missing: that is the problem to fix first
+    bullets, seen = api_packets(arch_text), set()
+    for r in rows:
+        fid, st = r.get("rid") or bare(r["id"]), r.get("st") or bare(r["status"]).lower()
+        if st == DEFERRED or fid in seen or not ID.match(fid):  # check_rows reports a bad or duplicate id
+            continue
+        seen.add(fid)
+        files, why = row_files(r), []
+        if len(files) > MAX_ROW_FILES:
+            why.append(f"files cell names {len(files)} files (max {MAX_ROW_FILES}): split it into rows of one "
+                       "function or one verb behaviour each")
+        if gap := packet_gaps(fid, bullets.get(fid, []), files):
+            why.append(gap)
+        if not why:
+            continue
+        kept = old is not None and fid in old and same_row(old[fid], r)
+        hard = on and st != "proven" and not kept
+        for w in why:
+            line = f"{flabel}:{r['line']} {fid}: {w}" + ("" if hard else " (warning)")
+            (problems if hard else notes).append(line)
+
+
 def validate(repo, run=False, timeout=600, notes=None, lint=True):
     """Returns (problems, n functions). `repo` is the rebuild repo root."""
     repo, problems = Path(repo), []
@@ -1348,6 +1451,8 @@ def validate(repo, run=False, timeout=600, notes=None, lint=True):
         problems += entry_match.cross_problems(repo, rows, paths["functions"], waits_on_fn(rows))
         check_stubs(rows, repo, problems, paths["functions"])
         check_property(rows, cfg, repo, problems, paths["functions"])
+        check_packets(rows, arch_file.read_text(encoding="utf-8", errors="replace") if arch_file.is_file() else "",
+                      cfg, repo, problems, notes if notes is not None else [], paths["functions"])
         if "ui_verb" in checks:
             check_ui_verb(rows, problems, paths["functions"])
         depth, width, _ = check_depth(rows, cfg, problems, paths["functions"])

@@ -48,5 +48,19 @@ class TestSkillText(unittest.TestCase):
         self.assertTrue((SKILLS / "overhaul-build" / "references" / "proof-check.md").is_file())
 
 
+class TestRowSizeText(unittest.TestCase):
+    def test_plan_fix_brief_carries_the_row_size_and_split_rule(self):
+        text = (SCRIPTS / "templates" / "plan-fix-brief.md").read_text(encoding="utf-8")
+        for needle in ("50-150", "at most 3 files", "`Packet: edit <file> after <symbol>; calls", "spec/index/<module>.md",
+                       "or in a dep row", "comes back split, fix (1) only", "rejected"):
+            self.assertIn(needle, text)
+
+    def test_plan_skill_carries_the_row_size_and_packet_rule(self):
+        text = (SKILLS / "overhaul-plan" / "SKILL.md").read_text(encoding="utf-8")
+        for needle in ("50-150 lines in 1-3 files", "Packet: edit src/shop/cart/add.py after", "comes back split",
+                       "at most 3 files", "exists on main or in a dep row"):
+            self.assertIn(needle, text)
+
+
 if __name__ == "__main__":
     unittest.main()
