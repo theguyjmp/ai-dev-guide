@@ -70,6 +70,7 @@ import worker  # noqa: E402
 PROOF_BRIEF = HERE.parent / "references" / "proof-check.md"
 PLAN_SKILL = HERE.parent.parent / "overhaul-plan"
 IDS_PER_FIX = 5
+LIVE_RETRIES = 2  # a live round that did not land is tried again this many times per row
 BG_WAIT = {"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}  # headless claude waits for its own background work
 NUM_ID = re.compile(r"^(.*?)(\d+)$")
 POLL_S = 0.5
@@ -127,6 +128,7 @@ class Supervisor:
         self.live_n = 0
         self.live_landed = False  # a live round landed on main during this drive run
         self.live_tried: dict[str, int] = {}  # fid -> its resets count at its last live try
+        self.live_fails: dict[str, int] = {}  # fid -> live rounds that did not land (live_retry)
 
     # ---- plumbing ----
     def log(self, msg: str) -> None:
@@ -274,6 +276,19 @@ class Supervisor:
         self.live = threading.Thread(target=self.live_round, args=(f"L{self.live_n}", fixing), daemon=True)
         self.live.start()
 
+    def live_retry(self, fixing: list[str]) -> list[str]:
+        """A live round that did not land (main moved, a dirty checkout, a refused fast-forward) leaves its rows
+        untried, so the next poll starts them again, up to LIVE_RETRIES times per row (pilot2026-11-10 07:18: one
+        failed land left 36 rows needs-plan with no round for the rest of the run)."""
+        out = []
+        for fid in fixing:
+            n = self.live_fails.get(fid, 0) + 1
+            self.live_fails[fid] = n
+            if n <= LIVE_RETRIES:
+                self.live_tried.pop(fid, None)
+                out.append(fid)
+        return out
+
     def live_round(self, label: str, fixing: list[str]) -> None:
         """One live round while drive runs; a failure is logged and the functions stay needs-plan for Exit 3."""
         work = self.ov / "supervise" / f"{datetime.now():%Y%m%d-%H%M%S}-{label}"
@@ -297,7 +312,9 @@ class Supervisor:
                      + (f"; new rows {' '.join(new)}" if new else "")
                      + "".join(f"; {fid}: replaced" for fid in fixed if fid not in active))
         except Stop as e:
-            self.log(f"live round {label}: {e}; still needs-plan for an Exit-3 round")
+            retry = self.live_retry(fixing)
+            self.log(f"live round {label}: {e}; " + (f"retried next poll: {' '.join(retry)}" if retry
+                                                     else "still needs-plan for an Exit-3 round"))
         except Exception as e:  # never kill the supervisor from the side thread
             self.log(f"live round {label}: error: {type(e).__name__}: {e}")
         finally:

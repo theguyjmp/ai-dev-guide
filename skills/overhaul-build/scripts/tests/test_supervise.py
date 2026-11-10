@@ -417,3 +417,15 @@ class PlanLandGate(Toy):
         self.assertEqual(self.sup().supervise(), 0, self.log())
         self.assertRegex(self.log(), r"plan_land plan/fixes-r1: PLAN LAND OK: plan/fixes-r1: 1 proven rows in the "
                                      r"footprint, no \[commands\] acceptance to run\n(.*\n)?.*main -> plan/fixes-r1")
+
+
+class LiveRetry(unittest.TestCase):
+    def test_a_round_that_did_not_land_is_retried_twice_then_left(self):
+        sup = mock.Mock(live_tried={"R1": 0, "R2": 0}, live_fails={})
+        self.assertEqual(supervise.Supervisor.live_retry(sup, ["R1", "R2"]), ["R1", "R2"])
+        self.assertEqual(sup.live_tried, {})
+        sup.live_tried = {"R1": 0}
+        supervise.Supervisor.live_retry(sup, ["R1"])
+        sup.live_tried = {"R1": 0}
+        self.assertEqual(supervise.Supervisor.live_retry(sup, ["R1"]), [])
+        self.assertEqual(sup.live_tried, {"R1": 0})
