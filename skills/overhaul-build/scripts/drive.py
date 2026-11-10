@@ -3659,7 +3659,9 @@ class Driver(mainred.MainRed):
         pv = pv if pv.is_file() else HERE / "plan_validate.py"
         where = land_mod.checked_out_at(str(self.repo), self.main) or str(self.repo)
         try:
-            r = run([sys.executable, str(pv), "--repo", where], self.repo, timeout=300)
+            # --no-lint: the whole-tree clippy timed out at 300 s under build load and refused phases 11-12 (the pilot project
+            # 2026-11-10 08:16, 08:33); lint gates every land and every plan land already
+            r = run([sys.executable, str(pv), "--repo", where, "--no-lint"], self.repo, timeout=300)
         except subprocess.TimeoutExpired:
             return "plan_validate timed out after 300s"
         line = next((ln.strip() for ln in r.stdout.splitlines() if ln.startswith("PLAN ")), "")
