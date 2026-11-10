@@ -473,3 +473,13 @@ class IndexRebase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveRetryOnCrash(unittest.TestCase):
+    def test_a_crashed_live_round_retries_its_rows(self):
+        sup = mock.Mock(live_tried={"R1": 0}, live_fails={}, ov=Path(tempfile.mkdtemp()))
+        sup.live_retry.side_effect = lambda f: supervise.Supervisor.live_retry(sup, f)
+        sup.rows.side_effect = OSError("[WinError 8] Not enough memory resources")
+        supervise.Supervisor.live_round(sup, "L1", ["R1"])
+        self.assertEqual(sup.live_tried, {})
+        self.assertIn("retried next poll: R1", sup.log.call_args_list[-1].args[0])

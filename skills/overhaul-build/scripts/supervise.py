@@ -317,7 +317,9 @@ class Supervisor:
             self.log(f"live round {label}: {e}; " + (f"retried next poll: {' '.join(retry)}" if retry
                                                      else "still needs-plan for an Exit-3 round"))
         except Exception as e:  # never kill the supervisor from the side thread
-            self.log(f"live round {label}: error: {type(e).__name__}: {e}")
+            retry = self.live_retry(fixing)  # a crash (WinError 8, the pilot project 2026-11-10 13:43) retries like a failed land
+            self.log(f"live round {label}: error: {type(e).__name__}: {e}"
+                     + (f"; retried next poll: {' '.join(retry)}" if retry else ""))
         finally:
             self.drop_worktrees(work)
             self.round_file()
