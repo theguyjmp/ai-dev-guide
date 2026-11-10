@@ -370,6 +370,7 @@ class Supervisor:
         jobs = []
         for fid in fixing:
             wt, branch = work / "wt" / fid, f"plan/fix-{fid}"
+            self.free_branch(branch)
             self.git("worktree", "add", "-q", "-f", "-B", branch, str(wt), self.main)
             report = work / f"plan-fix-{fid}.md"
             mode = ("This function already had two plan fixes and is never reset again: replace it. Split it into new "
@@ -399,6 +400,7 @@ class Supervisor:
         merge_wt = work / "wt" / "_merge"
         # one fix: nothing to integrate, its own branch already passed PLAN OK (main may have moved since: a live
         # round's lands; land_live rebases it)
+        self.free_branch(branch)
         self.git("worktree", "add", "-q", "-f", "-B", branch, str(merge_wt),
                  f"plan/fix-{fixed[0]}" if len(fixed) == 1 else self.main)
         if len(fixed) > 1:
@@ -439,6 +441,20 @@ class Supervisor:
                 elif proc.returncode:
                     self.log(f"agent {tag}: exit {proc.returncode}")
                 running.remove(job)
+
+    def free_branch(self, branch: str) -> None:
+        """Remove any worktree that still has branch checked out: one supervise runs per repo, so it is a killed
+        round's leftover, and `worktree add -B` refuses a branch checked out elsewhere (pilot2026-11-10: every
+        restart left plan/fix-<id> worktrees that failed the next live round for that row)."""
+        listing = self.git("worktree", "list", "--porcelain", check=False) or ""
+        path = ""
+        for line in listing.splitlines():
+            if line.startswith("worktree "):
+                path = line[len("worktree "):]
+            elif line == f"branch refs/heads/{branch}" and path:
+                self.git("worktree", "remove", "--force", path, check=False)
+                self.log(f"removed stale worktree {path} holding {branch}")
+        self.git("worktree", "prune", check=False)
 
     def land_plan(self, branch: str, merge_wt: Path, work: Path, rnd: int) -> None:
         """Check PLAN OK on the merged branch, fast-forward main to it, then plan_validate --run once on main."""

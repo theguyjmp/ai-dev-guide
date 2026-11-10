@@ -368,3 +368,27 @@ class PlanMergeStaticGates(unittest.TestCase):
 
     def test_a_clean_branch_passes_and_an_empty_command_is_skipped(self):
         self.assertEqual(self.gates(0), ["dup plan/fixes-rL1: exit 0"])
+
+
+class FreeBranch(unittest.TestCase):
+    """A killed round's worktree holding plan/fix-<id> is removed before the next `worktree add -B`."""
+
+    def test_a_stale_worktree_holding_the_branch_is_removed(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d) / "r"
+            repo.mkdir()
+
+            def git(*args, cwd=None, check=True):
+                p = subprocess.run(["git", *args], cwd=cwd or repo, capture_output=True, text=True)
+                if check and p.returncode:
+                    raise AssertionError(p.stderr)
+                return p.stdout
+            git("init", "-q", "-b", "main")
+            git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "0")
+            git("worktree", "add", "-q", "-b", "plan/fix-X", str(Path(d) / "old"), "main")
+            logs = []
+            sup = mock.Mock(git=git, log=logs.append)
+            supervise.Supervisor.free_branch(sup, "plan/fix-X")
+            git("worktree", "add", "-q", "-f", "-B", "plan/fix-X", str(Path(d) / "new"), "main")
+            self.assertTrue(any("removed stale worktree" in x for x in logs))
+            self.assertFalse((Path(d) / "old").exists())
