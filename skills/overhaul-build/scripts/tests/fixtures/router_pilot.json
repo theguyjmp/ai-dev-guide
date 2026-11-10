@@ -141,7 +141,7 @@
   "fn": "R0408",
   "detail": "acceptance red in the worktree after merging main, before review: tests/acceptance/r0408_revolve.rs::test_r0408_revolve_360_pappus_volume_area_bbox (exit 101): assertion `left == right` failed: {\"code\":\"eval-failed\",\"field\":\"recipe\",\"message\":\"the shape recipe does not describe a buildable solid\",\"reason\":\"bad_recipe\"} / left: 7 / right: 0 / note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace / failures: / test_r0408_revolve_360_pappus_volume_area_bbox / test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.50s / error: test failed, to rerun pass `--test r0408_revolve` (full output: <repo>/",
   "builder": "BLOCKED R0408 5841475\nI wrote `solid.revolve`: it parses the axis, checks the profile doesn't cross the axis, and records the solid, with 4 unit tests passing, but the engine can't build a revolve, so the acceptance tests still fail with exit 7 `bad_recipe`.\nBLOCKED-BY: crates/kernel/src/engine.rs:53 input `solid.revolve` with profile [[1,0],[3,0],[3,2],[1,2]] about the Y axis: wrong result is exit 7 `bad_recipe`, because `engine::Solid`, the shim's `build()` (crates/kernel/shim/occt_shim.cpp:78) and `solid_box::solid_of` (solid_box.rs:93) have no revolve kind; right result is a revolve recipe built with OCCT's BRepPrimAPI_MakeRevol, giving volume 16π.",
-  "class": "missing_dep"
+  "class": "missing_capability"
  },
  {
   "t": "2026-11-09T15:48:22-06:00",

@@ -201,6 +201,12 @@ if mode == "slow":  # a build that takes long enough for parallel builds to over
 if mode == "blockedtest":  # the contract is wrong: name the planned test
     finish("BLOCKED " + fid + chr(10) + "the test is wrong" + chr(10)
            + "BLOCKED-BY: tests/acceptance/test_f1.py:3 the pattern holds a backspace byte")
+if mode == "blockedcap":  # a capability alpha lacks, not a wrong result: a plan fix, never a depfix
+    finish("BLOCKED " + fid + chr(10) + "alpha lacks it" + chr(10)
+           + "BLOCKED-BY: src/alpha/f1.py:1 alpha can only add two numbers, so double has no way to reuse it")
+if mode == "blockedtwice":  # the same dependency bug after its fix too: routed, never "no committed change"
+    finish("BLOCKED " + fid + chr(10) + "alpha add is wrong" + chr(10)
+           + "BLOCKED-BY: src/alpha/f1.py:1 add 1 2 prints 0, want 3")
 if mode == "blockedby" and (seen / (fid + "-blocked")).exists():  # the rebuild after its dependency fix
     mode = "ok"
 if mode == "blockedby":  # a landed dependency's bug outside the allowed paths: commit nothing, name it
@@ -220,6 +226,13 @@ if mode == "cycle":  # a change the cycles check fails, as F09 of trial 3 did
     p.write_text("# CYCLE" + chr(10), encoding="utf-8")
     git("add", "-A")
     git("commit", "-q", "-m", f"{fid}: build {n}")
+if mode == "sibling" and (Path("src") / "alpha" / (fid.lower() + "_extra.py")).exists():
+    finish("DONE")  # resumed after its claim was widened: the work is already on the branch
+if mode == "sibling":  # also adds a file of its own module outside its files cell
+    p = Path("src") / "alpha" / (fid.lower() + "_extra.py")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("EXTRA = 2" + chr(10), encoding="utf-8")
+    mode = "ok"
 if mode in ("ok", "stray"):
     p = Path("src") / field("- Module:") / (fid.lower() + ".py")
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -452,6 +465,43 @@ class TestRetries(Toy):
         self.assertEqual(rec["status"], "needs-plan")
         self.assertIn("contract defect reported by the builder in tests/acceptance/test_f1.py:3", rec["last_reason"])
         self.assertEqual(len([e for e in self.events(repo) if e["event"] == "build_start"]), 1)
+
+    def builds(self, repo, fid):
+        return len([e for e in self.events(repo) if e["event"] == "build_start" and e["fn"] == fid])
+
+    def test_blocked_by_a_missing_capability_is_a_plan_fix_not_a_depfix(self):  # pass B: the pilot project R1002, R0801
+        repo = self.make_repo({"F2": {"build": ["blockedcap"]}}, retries=3)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 3, out)
+        rec = self.state(repo)["functions"]["F2"]
+        self.assertEqual((rec["status"], rec["attempts"]), ("needs-plan", 0))
+        self.assertTrue(rec["last_reason"].startswith("router missing_capability"), rec["last_reason"])
+        route = json.loads((repo / ".overhaul" / "router" / "routes" / "F2.json").read_text(encoding="utf-8"))
+        self.assertEqual(route["class"], "missing_capability")
+        self.assertFalse(any(e["fn"] == "depfix-F2" for e in self.events(repo)))
+        self.assertEqual(self.builds(repo, "F2"), 1)
+
+    def test_a_file_of_its_own_module_outside_its_cell_widens_the_claim_and_resumes(self):  # pass B: 16 files_gap
+        one = CHAIN.split("| F2 |")[0]
+        repo = self.make_repo({"F1": {"build": ["sibling"]}}, retries=0, functions=one)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        rec = self.state(repo)["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["attempts"], rec["files_extra"]), ("proven", 0, ["src/alpha/f1_extra.py"]))
+        ev = [e for e in self.events(repo) if e["fn"] == "F1"]
+        self.assertTrue(any(e["event"] == "files_widened" for e in ev), ev)
+        self.assertEqual([e["detail"].endswith("resumed") for e in ev if e["event"] == "build_start"], [False, True])
+        self.assertIn("Retried at once: its files cell now also holds src/alpha/f1_extra.py", self.seen("F1-build-1.md"))
+
+    def test_a_second_blocked_by_is_routed_not_no_committed_change(self):  # pass B: the pilot project R0519, R0801
+        repo = self.make_repo({"F2": {"build": ["blockedtwice"]}}, retries=3)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 3, out)
+        rec = self.state(repo)["functions"]["F2"]
+        self.assertEqual((rec["status"], rec["attempts"]), ("needs-plan", 0))
+        self.assertIn("again after its dependency fix", rec["last_reason"])
+        self.assertEqual(self.builds(repo, "F2"), 2)  # one depfix, then a plan fix, no third build
+        self.assertFalse(any("no committed change" in e["detail"] for e in self.events(repo) if e["fn"] == "F2"))
 
     def test_acceptance_already_green_skips_the_retry(self):
         repo = self.make_repo({"F1": {"land": ["green_before"]}}, retries=1)

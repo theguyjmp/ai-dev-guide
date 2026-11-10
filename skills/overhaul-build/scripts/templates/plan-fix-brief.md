@@ -26,14 +26,19 @@ the supervisor runs every test once after the merge. The same step fails twice: 
    (2) fix its acceptance: it cannot go red before and green after through the public entry (already green on main,
        reaches an internal, flaky, wrong fixture);
    (3) fix the plan: ARCHITECTURE.md blocks it (a missing dep, a public API it cannot reach, a file its builder must
-       touch outside its `files` cell: add that file to the cell).
+       touch outside its `files` cell: add that file to the cell);
+   (4) add the missing capability (router class `missing_capability`: a dependency cannot do what this row needs, not
+       a wrong result): one new row, a reserved id, in the module that owns the capability, with its own acceptance
+       test through the public entry that fails now, ordered before `{{id}}`, and `{{id}}`'s deps naming it. `{{id}}`
+       itself stays as it is.
    {{mode}}
 3. Change nothing else: no other function's row or test, no raised limit or budget, no loosened check. Product code is
    never edited; a new module or wiring a builder cannot reach goes into the row's `files` cell instead. A decision
    record you add takes the next free number on `{{main}}`; the integrator renumbers clashes.
 4. `py -3 {{validate}} --repo {{wt}}` (no `--run`) prints PLAN OK. Commit on your branch with the subject
-   `plan: {{id}} split|acceptance|architecture: <why>` (the subject must start with `plan`: main's guard lets only plan
-   commits through). Do not push, do not merge.
+   `plan: {{id}} split|acceptance|architecture|capability: <why>` (the subject must start with `plan`: main's guard
+   lets only plan commits through). Do not push, do not merge.
 
-Write the report: line 1 `PLAN-FIX {{id}} <split|acceptance|architecture|none> <PLAN OK|PLAN FAIL ...>`, then the cause
-in one line, the rows, tests and files changed, the new ids used, and the commit sha. Hand back that line 1 only.
+Write the report: line 1 `PLAN-FIX {{id}} <split|acceptance|architecture|capability|none> <PLAN OK|PLAN FAIL ...>`,
+then the cause in one line, the rows, tests and files changed, the new ids used, and the commit sha.
+Hand back that line 1 only.

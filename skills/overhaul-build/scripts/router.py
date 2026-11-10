@@ -8,6 +8,8 @@ change", "acceptance red ..."), from the builder's own output (its BLOCKED-BY / 
 - files_gap        the builder cannot edit a file it needs: outside its files cell, a visibility refusal, a review
                    PLAN-GAP naming another file, a BLOCKED-BY or "no change" whose output names a file outside its cell
 - missing_dep      blocked by a stub or by behaviour no proven row provides yet
+- missing_capability  a BLOCKED-BY whose line says a capability is missing, not a wrong result ("can only",
+                   "cannot", "no way to", "does not support", "no formula kind", "that adds a new record")
 - contract_defect  the builder reports the acceptance test or the row itself is wrong
 - main_flake       the red test fails on clean main too
 - load_flake       the red test passes when run alone
@@ -16,9 +18,14 @@ change", "acceptance red ..."), from the builder's own output (its BLOCKED-BY / 
 - other            anything else (a regression the branch caused, a protected file touched, ...)
 
 Routes, at once (not at Exit 3):
-- files_gap / missing_dep / contract_defect / oversized: the function is parked needs-plan with the class and the
-  evidence in its reason, and .overhaul/router/routes/<id>.json asks for a plan fix. supervise.py, while drive runs
-  (`with router.watching(sup)`), starts plan-fix agents for the routed functions (template plan-fix-brief.md, the class
+- files_gap for files of the row's own module or a module it depends on (ARCHITECTURE `Depends on:`): the claim
+  widens (state `files_extra`, used by drive's claims() and allowed paths; event `files_widened`) and the build resumes
+  on its branch at once, no attempt charged, once per file. Files of any other module go on to a plan fix.
+- missing_capability: never a depfix; a plan fix adds a row for the owning module before this one. A second BLOCKED-BY
+  (its one depfix spent) is routed the same way (missing_dep when it names no capability), never "no committed change".
+- files_gap / missing_dep / missing_capability / contract_defect / oversized: the function is parked needs-plan
+  with the class and the evidence in its reason, and .overhaul/router/routes/<id>.json asks for a plan fix.
+  supervise.py, while drive runs (`with router.watching(sup)`), starts plan-fix agents for the routed functions (template plan-fix-brief.md, the class
   and evidence in its mode line; oversized means split), one route per function at a time, at most
   [harness] plan_fix_parallel at once, then the integrator (plan-fix-merge.md) when more than one fixed, lands the plan
   under .overhaul/lock and writes .overhaul/requests/reset-<id> (live-replan's request file; drive applies it at its
@@ -52,12 +59,13 @@ import sys
 import threading
 from pathlib import Path
 
-CLASSES = ("files_gap", "missing_dep", "contract_defect", "main_flake", "load_flake", "oversized",
+CLASSES = ("files_gap", "missing_dep", "missing_capability", "contract_defect", "main_flake", "load_flake", "oversized",
            "review_quality", "other")
-PLAN_CLASSES = ("files_gap", "missing_dep", "contract_defect", "oversized")
+PLAN_CLASSES = ("files_gap", "missing_dep", "missing_capability", "contract_defect", "oversized")
 WORDS = {
     "files_gap": "builders cannot edit a needed file",
     "missing_dep": "builders are blocked by a stub or unproven dependency",
+    "missing_capability": "builders need a capability no row provides",
     "contract_defect": "builders report the acceptance test is wrong",
     "main_flake": "tests fail on clean main too",
     "load_flake": "tests fail under load and pass alone",
@@ -68,6 +76,7 @@ WORDS = {
 FIX = {
     "files_gap": "plan fix: add the needed file to the row's files cell (router routes each one at once)",
     "missing_dep": "plan fix: add the dependency row or prove it first",
+    "missing_capability": "plan fix: add a row for the owning module that builds the capability, before this one",
     "contract_defect": "plan fix: correct the acceptance test or the row",
     "main_flake": "fix the flaky test in its owner module (router holds the lands that rerun it)",
     "load_flake": "lower load in the land gate ([harness] max_lands, builders) or move the test to a tier",
@@ -76,6 +85,9 @@ FIX = {
     "other": "read the routed events in log.jsonl and name the cause",
 }
 HINT = {"files_gap": "add the needed file to the files cell", "missing_dep": "add or prove the dependency first",
+        "missing_capability": "add a new row (a reserved id) for the owning module that builds the missing capability "
+                              "through its public entry with its own failing acceptance test, and make this row "
+                              "depend on it; this row is not split and gets no depfix",
         "contract_defect": "correct the test or the row", "oversized": "split this row"}
 WINDOW_MIN = 60
 RED_SHARE = 0.30
@@ -86,7 +98,8 @@ ROUTE_POLL_S = 30.0
 LOCK_WAIT_S = 1800.0
 REQUESTS_DIR = "requests"  # live-replan's .overhaul/requests/reset-<id>
 FAIL_EVENTS = ("needs_plan", "land_fail", "review_fail", "blocked_by", "main_flake")
-PRIORITY = ("main_flake", "load_flake", "contract_defect", "files_gap", "oversized", "missing_dep",
+PRIORITY = ("main_flake", "load_flake", "contract_defect", "files_gap", "oversized", "missing_capability",
+            "missing_dep",
             "review_quality", "other")
 
 LOAD = re.compile(r"passe[sd] alone|flaky under load|fails? under load", re.I)
@@ -106,6 +119,17 @@ DEP = re.compile(r"BLOCKED-BY|\bstub\b|todo!\(|unimplemented|not (?:yet )?proven
 REVIEW = re.compile(r"verified blocking NO", re.I)
 THIN = re.compile(r"no committed change|acceptance (?:still )?red|builder exited|BLOCKED-BY", re.I)
 BLOCKED = re.compile(r"BLOCKED-BY:\s*`?([^\s`:]+)")
+BLOCKED_LINE = re.compile(r"^\s*BLOCKED-BY:.*$", re.M)
+# a BLOCKED-BY line naming a capability its owner lacks (not a wrong result); measured on the pilot project's 55 BLOCKED-BY
+# builds 2026-11-09: 11 hits (R0801 "can only", R0903 "no formula kind", R1002 "that adds a new", ...), no wrong result
+CAPABILITY = re.compile(
+    r"\b(?:only can|can only|cannot|can ?not|can't|no way to|does(?: not|n't) support|not supported|"
+    r"has no (?:way|api|function|method|support|public)|(?:is|are) missing|missing (?:a |an |the )?"
+    r"(?:capability|api|function|method|verb|op|operation|feature|support|kind|variant|write path)\b|"
+    r"needs? (?:a |an )?new|is needed|that adds? (?:a )?new|no \w+ (?:kind|variant|op|operation|api|verb)\b)", re.I)
+STUB = re.compile(r"todo!\(|unimplemented|\bstub\b|not yet implemented|not (?:yet )?proven|unproven", re.I)
+VIS_FILES = re.compile(r"^changed (.+?) beyond visibility")
+PATH = re.compile(r"(?<![\w./-])((?:[\w.-]+/)+[\w-]+\.\w+)")
 DEPFIX = re.compile(r"^depfix-(?:flake-)?")
 
 
@@ -146,7 +170,13 @@ def blocked_class(text: str, cell) -> str:
     if m and cell and not any(m.group(1).startswith(c.rstrip("*")) for c in cell) and re.search(
             r"\b(?:my|its) (?:allowed )?files|files (?:column|cell)|must (?:edit|change)", text, re.I):
         return "files_gap"
-    return "missing_dep"
+    line = BLOCKED_LINE.search(text)
+    return "missing_capability" if line and capability(line.group(0)) else "missing_dep"
+
+
+def capability(text: str) -> bool:
+    """Whether a BLOCKED-BY text names a capability its owner lacks; a stub or unproven row is a wait (missing_dep)."""
+    return bool(CAPABILITY.search(text)) and not STUB.search(text)
 
 
 def builder_text(ov: Path, fid: str) -> str:
@@ -154,11 +184,16 @@ def builder_text(ov: Path, fid: str) -> str:
     runs = sorted((ov / "runs").glob(f"{fid}-a*-build.json"), key=lambda p: p.stat().st_mtime)
     for p in reversed(runs):
         try:
-            doc = json.loads(p.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, ValueError):
+            raw = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
             continue
-        if isinstance(doc, dict) and isinstance(doc.get("result"), str):
-            return doc["result"][-4000:]
+        for chunk in (raw, *reversed(raw.splitlines())):  # one json result, or a stream-json run's last result event
+            try:
+                doc = json.loads(chunk)
+            except ValueError:
+                continue
+            if isinstance(doc, dict) and doc.get("type") in (None, "result") and isinstance(doc.get("result"), str):
+                return doc["result"][-4000:]
     return ""
 
 
@@ -283,6 +318,56 @@ def want_plan_fix(d, fid: str, cls: str, evidence: str) -> str:
     return "plan fix" + (" (split)" if cls == "oversized" else "")
 
 
+def gap_files(reason: str, builder: str = "") -> list[str]:
+    """The files a files_gap names: the visibility check's list, else every repo path in the reason or the
+    builder's BLOCKED-BY line (a `path:line` loses its line)."""
+    m = VIS_FILES.match(reason or "")
+    if m:
+        return [x.strip() for x in m.group(1).split(",") if x.strip()]
+    line = BLOCKED_LINE.search(builder or "")
+    return list(dict.fromkeys(PATH.findall(f"{reason} {line.group(0) if line else ''}")))
+
+
+def widen(d, fid: str, files: list[str], evidence: str, deps: bool = True) -> bool:
+    """A files_gap the row may fix itself: every named file outside its claim lies in its own module (or, with deps,
+    a module its module depends on) and was never widened for it. The claim grows (state `files_extra`, read by
+    drive's claims() and allowed paths), the build resumes on its branch at once, no attempt charged. Once per
+    file: a file already in the claim is not new, so the same gap again goes to a plan fix."""
+    f, rec = d.fns.get(fid), d.st["functions"].get(fid)
+    if f is None or rec is None or not files:
+        return False
+    mod = sys.modules[type(d).__module__]
+    have = [*d.claims(f), *(p for group in d.allowed_lists(f) for p in group)]
+    new = [p for p in dict.fromkeys(files) if not mod.in_paths(p, have)]
+    if not new or not all(mod.in_paths(p, d.widen_scope(f, deps)) for p in new):
+        return False
+    extra = list(dict.fromkeys([*(rec.get("files_extra") or []), *new]))
+    d.set(fid, status="planned", files_extra=extra, resume="building",
+          widened=f"its files cell now also holds {', '.join(new)}, the files it needed: {evidence[:1200]}")
+    d.log(fid, "files_widened", f"{', '.join(new)}: {evidence}"[:600])
+    record(d, fid, "files_gap", f"claim widened to {', '.join(new)}; build resumes at once, no attempt charged",
+           evidence)
+    return True
+
+
+def on_blocked(d, fid: str, path: str, evidence: str, spent: bool) -> bool:
+    """drive.blocked_by hook for a builder's BLOCKED-BY line on `path` (evidence = `path:line in module: why`).
+    A file of the row's own module outside its cell widens the claim (the builder adds what it lacks itself, once
+    per file); a missing capability elsewhere goes to a plan fix (a new row for the owning module), never a depfix;
+    a second BLOCKED-BY (spent: its one depfix used) is a plan fix by the same rule. False: drive's depfix route (a
+    wrong result in another module) or an ordinary failure."""
+    if widen(d, fid, [path], f"BLOCKED-BY {evidence}", deps=False):
+        return True
+    cls = "missing_capability" if capability(evidence) else ""
+    if not cls and not spent:
+        return False
+    cls = cls or "missing_dep"
+    reason = f"BLOCKED-BY {evidence}" + (" (again after its dependency fix)" if spent else "")
+    record(d, fid, cls, want_plan_fix(d, fid, cls, reason), reason)
+    d.park(fid, f"router {cls}: {WORDS[cls]}; {HINT[cls]}: {reason}")
+    return True
+
+
 def on_failure(d, fid: str, reason: str) -> bool:
     """drive.fail hook, before an attempt is charged. True when the router handled the failure."""
     try:
@@ -292,6 +377,8 @@ def on_failure(d, fid: str, reason: str) -> bool:
         return False
     d._router_last = (fid, reason)
     rec = d.st["functions"].get(fid, {})
+    if cls == "files_gap" and widen(d, fid, gap_files(reason, builder_text(ov_of(d), fid)), reason):
+        return True
     if cls in PLAN_CLASSES and fid in d.fns:
         route = want_plan_fix(d, fid, cls, reason)
         record(d, fid, cls, route, reason)
@@ -311,7 +398,8 @@ def on_failure(d, fid: str, reason: str) -> bool:
 
 
 def on_park(d, fid: str, reason: str) -> str:
-    """drive.park hook: count and route a park no fail() routed already. Returns the reason to park with."""
+    """drive.park hook: count and route a park no fail() routed already. Returns the reason to park with, or ''
+    when the park is not needed (a files_gap the router widened: the build resumes at once)."""
     last = getattr(d, "_router_last", None)
     d._router_last = None
     if reason.startswith("router ") or (last and last == (fid, reason)):
@@ -320,6 +408,8 @@ def on_park(d, fid: str, reason: str) -> str:
         cls = classify(reason, builder_text(ov_of(d), fid) if THIN.search(reason) else "", cell_of(d, fid))
     except Exception:  # noqa: BLE001
         return reason
+    if cls == "files_gap" and widen(d, fid, gap_files(reason), reason):
+        return ""
     if cls in PLAN_CLASSES and fid in d.fns:
         record(d, fid, cls, want_plan_fix(d, fid, cls, reason), reason)
         return f"router {cls}: {WORDS[cls]}; {HINT[cls]}: {reason}"

@@ -1,5 +1,27 @@
 # overhaul-build changelog
 
+## Router: files gaps widen the claim, missing capabilities and second BLOCKED-BY go to a plan fix, 2026-11-10
+the pilot project overnight 2026-11-09 22:25 -> 11-10 07:00 (log.jsonl, runs/): of 248 builds, 16 went back to planning for a
+file outside their `files` cell and 13 ended BLOCKED or "no committed change". Measured causes: all 12 visibility
+files_gap and the review PLAN-GAPs named a file of the row's own module or a dep module; router.builder_text read only
+single-JSON results, so on stream-json builds every thin reason ("no committed change", 112 events) was class `other`
+and a charged retry (57 of 134 routed); a second BLOCKED-BY (R0519, R0801) and a BLOCKED-BY in the row's own module
+(R0817, R0526) fell through to "no committed change"; capability gaps (R1002, R1005, R1031, R1033: the store cannot
+add records) went to a one-shot depfix meant for bugs.
+- files_gap for files of the row's own module or a module it depends on (ARCHITECTURE `Depends on:`): router.widen adds
+  them to state `files_extra` (drive claims() and allowed_lists() read it), logs `files_widened` and resumes the build on
+  its branch at once ("Retried at once: its files cell now also holds ..."), no attempt charged, once per file (a file
+  already in the claim goes to a plan fix). Works for the visibility check, a review PLAN-GAP park and a BLOCKED-BY
+  line on an own-module file. Files of any other module still go to a plan fix.
+- New router class `missing_capability` (plan class): a BLOCKED-BY line with "can only", "cannot", "no way to", "does not
+  support", "no <x> kind", "that adds a new", "is needed", ... and no stub marker. 11 of the pilot project's 55 BLOCKED-BY builds
+  match, none a wrong result. Routed at once to a plan fix, never a depfix; plan-fix-brief.md option (4): one new row
+  (a reserved id) for the owning module, its own failing acceptance test, ordered before the row, the row's deps name it.
+- drive.blocked_by asks router.on_blocked first; a second BLOCKED-BY (its depfix spent) is a plan fix (missing_dep,
+  "again after its dependency fix") instead of a charged "no committed change" retry.
+- router.builder_text reads the last `result` event of a stream-json run. Fixture R0408 ("no revolve kind") is now
+  missing_capability. Tests: test_router PermanentRoutes (8), test_drive blocked/widen (3).
+
 ## Stacked starts, 2026-11-09
 Owner 2026-11-09: 40 slots, at least 10 functions/h, prove it. rate_sim.py (overhaul-trial; the pilot project's real dependency
 graph and 58 measured cycles, briefs/rate-proof.md): with only proven deps the rate is width-bound at ~7.5/h whatever
