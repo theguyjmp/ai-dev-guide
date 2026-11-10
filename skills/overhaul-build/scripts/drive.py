@@ -3429,7 +3429,27 @@ class Driver(mainred.MainRed):
                 self.park(fid, problem)
         self.log(None, "plan_reload", f"{len(self.fns)} rows, deferred {len(self.deferred)}"
                  + (f", new {' '.join(new)}" if new else ""))
+        self.reload_slots()
         return ""
+
+    def reload_slots(self) -> None:
+        """Re-read [harness] max_parallel and [harness.remote] slots from overhaul.toml, so the manager moves build
+        load between machines without a restart (pilot2026-11-10: 24 cold laptop slots at 94% CPU, the desktop idle).
+        Running jobs finish where they are; new starts follow the new numbers."""
+        try:
+            har = load_config(self.repo)["harness"]
+        except Exception as e:  # noqa: BLE001 - a bad edit must not stop the run; the old numbers stay
+            self.log(None, "slots_reload_refused", str(e)[:300])
+            return
+        local = max(1, int(har.get("max_parallel") or self.max_parallel))
+        rem = int((har.get("remote") or {}).get("slots", 0) or 0)
+        before = (self.max_parallel, self.remote.slots if self.remote else 0)
+        self.max_parallel = local
+        if self.remote and rem > 0:
+            self.remote.slots = rem
+        after = (self.max_parallel, self.remote.slots if self.remote else 0)
+        if after != before:
+            self.log(None, "slots_reload", f"local {before[0]}->{after[0]} remote {before[1]}->{after[1]}")
 
     def validate_static(self) -> str:
         """plan_validate (static, no --run) on the checkout holding main: '' if PLAN OK, else its line."""
