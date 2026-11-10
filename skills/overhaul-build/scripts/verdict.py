@@ -458,6 +458,11 @@ def judge(p, prev, t_now, checks, events):
         reds.append((1, "owner", f"{gate} gate unavailable: {short(r.get('reason', ''), 80)}",
                      "the owner fixes what stops it running (CI billing, runner) or drops it from [gates.periodic]; "
                      "drive.py never bisects it"))
+    for gate, r in sorted((per.get("config") or {}).items()):  # the command itself cannot run: the owner's config
+        r = r if isinstance(r, dict) else {}
+        reds.append((1, "owner", f"gate_config {gate}: {short(r.get('reason', ''), 80)}",
+                     "the owner fixes its command in [gates.periodic.commands] (exit 126/127, command not found, "
+                     "a Windows path in bash); drive.py never bisects it"))
     mr = state.get("main_red") if isinstance(state.get("main_red"), dict) else None
     if mr:  # drive.py: a whole-tree check fails on clean main too, so every build would fail it
         reds.append((0, "main", f"main red: {mr.get('check', '?')} at {str(mr.get('sha') or '?')[:12]}"

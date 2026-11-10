@@ -81,7 +81,10 @@ run on main in the background every N lands or M minutes and once at the end; `B
 spec/BUDGETS.toml (CI at ci_factor 2x, macOS record-only); each gate keeps its own green, so a red gate bisects to
 its culprit land (one depfix) whatever the other gates do; verdict BAD while red. A gate that cannot run at all
 (`periodic.py ci` exits 75, `ci: unavailable: <reason>`: GitHub billing, spending limit, unsupported runner) is
-unavailable: never bisected, no depfix, not green; the verdict shows it as an owner line.
+unavailable: never bisected, no depfix, not green; the verdict shows it as an owner line. A gate whose command cannot
+run (exit 126/127, `command not found`, a Windows path in bash) is a `gate_config` owner line, never bisected. Every
+red run acts: bisected again unless its depfix is in flight, one depfix per red run up to `depfix_max` (default 3);
+a non-land culprit commit goes to its `F:` function or the module owning its first changed file.
 Per-gate cadence: make `every_lands` or `every_min` a table (`[gates.periodic.every_min] default = 120`,
 `parity = 10080`); such a gate runs only on the keys it names, and at the end only once every function is proven.
 `[limits] proc_mem_gb` (default 12, 0 = off): on Windows drive.py runs in a Job Object that caps every process it
