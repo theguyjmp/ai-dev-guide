@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import plan_land  # noqa: E402
@@ -239,3 +240,13 @@ class FastForward(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaticCheckReadsStdout(unittest.TestCase):
+    """plan_validate prints notes (warnings) to stderr after its PLAN line on stdout; the PLAN line decides
+    (pilot2026-11-10 16:13-17:00: every plan branch refused as 'not PLAN OK: PLAN FAIL' from a stderr note)."""
+
+    def test_plan_ok_on_stdout_with_stderr_notes_passes(self):
+        done = subprocess.CompletedProcess([], 0, "notes\nPLAN OK 3 functions\n", "warning: row X has no packet\n")
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(plan_land.subprocess, "run", return_value=done):
+            self.assertEqual(plan_land.static_check(Path(d), {"commands": {}}, Path(d) / "out"), "")

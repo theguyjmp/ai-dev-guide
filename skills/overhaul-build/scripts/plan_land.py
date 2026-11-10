@@ -108,7 +108,7 @@ def static_check(tree: Path, conf: dict, out_dir: Path) -> str:
     out_dir.mkdir(parents=True, exist_ok=True)
     p = subprocess.run([sys.executable, str(HERE / "plan_validate.py"), "--repo", str(tree)], check=False,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
-    line = _last(p.stdout + p.stderr)
+    line = _last(p.stdout) or _last(p.stderr)  # plan_validate notes go to stderr; the PLAN line ends stdout
     if p.returncode or not line.startswith("PLAN OK"):
         return f"not PLAN OK: {line}"
     for name in STATIC_GATES:
