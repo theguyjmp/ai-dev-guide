@@ -178,6 +178,18 @@ class TestPool(unittest.TestCase):
         self.assertEqual((pool.repo, pool.work, pool.git, pool.python), ("D:/app/v.git", "D:/app/v.git.work",
                                                                          "desk", ["py", "-3"]))
 
+    def test_a_silent_timeout_is_the_host_not_the_row(self):
+        log = mock.Mock()
+        pool = remote.Pool(self.CONF, log)
+        pool.busy = {0: "F1", 1: "F2"}
+        err = Path(tempfile.mkdtemp()) / "x.err"
+        err.write_text("", encoding="utf-8")
+        with mock.patch.object(pool, "kill"):
+            self.assertFalse(pool.after("F1", 1, True, err, now=0.0))  # timed out after real turns: the row's
+            self.assertTrue(pool.after("F2", 1, True, err, now=0.0, silent=True))
+        self.assertIsNone(pool.free_slot(1.0))
+        self.assertIn("no builder output", log.call_args[0][2])
+
     def test_offline_window_and_slots(self):
         log = mock.Mock()
         pool = remote.Pool(self.CONF, log)

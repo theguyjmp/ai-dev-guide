@@ -1657,8 +1657,9 @@ class Driver(mainred.MainRed):
         self.say(f"build {f.id} attempt {attempt}{on_host}" + (f" stacked on {', '.join(on)}" if on else ""))
 
     def after_build(self, job: Job) -> None:
+        silent = job.timed_out and '"assistant"' not in read_text(job.out)  # not one turn: the host, not the row
         if job.host and self.remote and self.remote.after(job.fn, job.proc.returncode, job.timed_out,
-                                                          job.out.with_suffix(".err")):
+                                                          job.out.with_suffix(".err"), silent=silent):
             self.set(job.fn, status="planned", host=None)  # the host was unusable: requeued, no attempt spent
             return
         tokens, turns, text = read_result(job.out)

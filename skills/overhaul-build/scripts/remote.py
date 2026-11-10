@@ -308,19 +308,21 @@ class Pool:
         return proc
 
     # ---- finish ----
-    def after(self, fid, code, timed_out, err_path, now=None):
-        """Free fid's slot. True when the host was unusable (exit OFFLINE): the host goes offline for offline_min,
-        its slot is cleaned on the host, and drive requeues fid without counting an attempt."""
+    def after(self, fid, code, timed_out, err_path, now=None, silent=False):
+        """Free fid's slot. True when the host was unusable (exit OFFLINE, or `silent`: timed out without one turn of
+        output, the pilot project 2026-11-10 04:05-04:35, 14 of 22 desk builds, which the router had sent to plan fix as
+        oversized): the host goes offline for offline_min, its slot is cleaned on the host, and drive requeues fid
+        without counting an attempt."""
         k = self.slot_of(fid)
         if k is not None:
             del self.busy[k]
         if timed_out and k is not None:
             self.kill(k)
-        if timed_out or code != OFFLINE:
+        if not silent and (timed_out or code != OFFLINE):
             return False
         now = now if now is not None else time.monotonic()
         self.offline_until = now + self.offline_s
-        why = last_line(err_path) or "no output"
+        why = "timed out with no builder output (host stalled or throttled)" if silent else             (last_line(err_path) or "no output")
         self.log(fid, "remote_offline", f"host={self.name} for {self.offline_s / 60:g} min: {why}"[:600])
         self.say(f"remote {self.name} offline for {self.offline_s / 60:g} min: {why}; {fid} requeued")
         if k is not None:
