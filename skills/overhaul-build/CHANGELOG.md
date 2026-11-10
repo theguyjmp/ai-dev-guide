@@ -1,5 +1,18 @@
 # overhaul-build changelog
 
+## Retry memory, 2026-11-10
+Gap 22 (overhaul-trial briefs/gaps-vs-owner-orders.md): a retry was a fresh session on a branch reset to main, with
+only the failure reason. Now a retry continues the failed attempt:
+- after_build keeps the builder's final message (state `last_summary`, last 1500 chars).
+- start_build on a retry (attempts > 0, a last_reason, not a resume) puts a `## Retry: attempt N-1 failed` section at
+  the top of the brief (template `{{retry}}`): the exact failure (gate tail or verified review NOs, as last_reason),
+  attempt N-1's final message and `git diff --stat main...fn/<id>` (capped at 30 lines).
+- The builder keeps its branch work: keep_branch commits a killed builder's leftovers, keeps fn/<id> and merges main
+  into it. It starts from main instead (and says why in the brief and the `build_start` event) when the attempt left
+  no commits, changed protected files, was stacked on a dep no longer in the stack, or no longer merges with main.
+- tests/test_drive.py: attempt-2 brief carries attempt 1's failure, summary and diffstat above the function, and the
+  retry commits on top of attempt 1's commit.
+
 ## Stacked starts, 2026-11-09
 Owner 2026-11-09: 40 slots, at least 10 functions/h, prove it. rate_sim.py (overhaul-trial; the pilot project's real dependency
 graph and 58 measured cycles, briefs/rate-proof.md): with only proven deps the rate is width-bound at ~7.5/h whatever
