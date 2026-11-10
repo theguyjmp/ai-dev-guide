@@ -116,10 +116,10 @@ class DriveRequests(td.Toy):
         toml = repo / "overhaul.toml"
         text = toml.read_text(encoding="utf-8")
         self.assertIn("[harness]", text)
-        td.put(toml, text.replace("[harness]", "[harness]\nmax_parallel = 3", 1))
+        td.put(toml, text.replace("[harness]", "[harness]\nmax_parallel = 3\nland_parallel = 5", 1))
         self.request(repo, "reload-slots")
         self.assertTrue(drv.replan_step())
-        self.assertEqual(drv.max_parallel, 3)
+        self.assertEqual((drv.max_parallel, drv.max_lands), (3, 5))
         self.assertIn("slots_reload", self.kinds(repo))
 
     def test_drive_applies_a_pending_request_at_start_and_builds_it(self):

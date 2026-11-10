@@ -3433,7 +3433,7 @@ class Driver(mainred.MainRed):
         return ""
 
     def reload_slots(self) -> None:
-        """Re-read [harness] max_parallel and [harness.remote] slots from overhaul.toml, so the manager moves build
+        """Re-read [harness] max_parallel, land_parallel and [harness.remote] slots from overhaul.toml, so the manager moves build
         load between machines without a restart (pilot2026-11-10: 24 cold laptop slots at 94% CPU, the desktop idle).
         Running jobs finish where they are; new starts follow the new numbers."""
         try:
@@ -3443,13 +3443,15 @@ class Driver(mainred.MainRed):
             return
         local = max(1, int(har.get("max_parallel") or self.max_parallel))
         rem = int((har.get("remote") or {}).get("slots", 0) or 0)
-        before = (self.max_parallel, self.remote.slots if self.remote else 0)
-        self.max_parallel = local
+        lands = max(1, int(har.get("land_parallel") or har.get("max_lands") or self.max_lands))
+        before = (self.max_parallel, self.remote.slots if self.remote else 0, self.max_lands)
+        self.max_parallel, self.max_lands = local, lands
         if self.remote and rem > 0:
             self.remote.slots = rem
-        after = (self.max_parallel, self.remote.slots if self.remote else 0)
+        after = (self.max_parallel, self.remote.slots if self.remote else 0, self.max_lands)
         if after != before:
-            self.log(None, "slots_reload", f"local {before[0]}->{after[0]} remote {before[1]}->{after[1]}")
+            self.log(None, "slots_reload", f"local {before[0]}->{after[0]} remote {before[1]}->{after[1]} "
+                                           f"lands {before[2]}->{after[2]}")
 
     def validate_static(self) -> str:
         """plan_validate (static, no --run) on the checkout holding main: '' if PLAN OK, else its line."""
