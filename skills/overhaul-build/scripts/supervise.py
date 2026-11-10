@@ -448,6 +448,7 @@ class Supervisor:
         self.log(f"plan_validate {branch}: {line}")
         if code or not line.startswith("PLAN OK"):
             raise Stop(f"round {rnd}: {branch} is not PLAN OK: {line}")
+        self.static_gates(branch, merge_wt, work, rnd)
         self.git("merge", "-q", "--ff-only", branch)
         self.log(f"main -> {branch} {self.git('rev-parse', '--short=12', 'HEAD').strip()}")
         out = work / "validate-run.txt"
@@ -461,6 +462,24 @@ class Supervisor:
             problems = [ln for ln in drive.read_text(out).splitlines() if ln.strip() and not ln.startswith("PLAN")]
             raise Stop(f"round {rnd}: plan_validate --run on main: {line}"
                        + (f"; first: {problems[0][:300]}" if problems else ""))
+
+    def static_gates(self, branch: str, merge_wt: Path, work: Path, rnd: int) -> None:
+        """The whole-tree checks that need no build (dup, literals) on the merged plan branch before main moves:
+        a plan stub that repeats landed code turned main red and held every land (pilot2026-11-09 23:08)."""
+        cmds = self.cfg.get("commands") or {}
+        for name in ("dup", "literals"):
+            cmd = cmds.get(name)
+            if not isinstance(cmd, str) or not cmd.strip():
+                continue
+            out = work / f"gate-{name}.txt"
+            with open(out, "wb") as fo:
+                p = subprocess.run(cmd, shell=True, check=False, cwd=merge_wt, stdin=subprocess.DEVNULL, stdout=fo,
+                                   stderr=subprocess.STDOUT)
+            text = drive.read_text(out)
+            self.log(f"{name} {branch}: exit {p.returncode}")
+            if p.returncode:
+                first = next((ln for ln in text.splitlines() if ln.strip()), "")
+                raise Stop(f"round {rnd}: {branch} fails {name} (main would go red): {first[:300]}")
 
     def after_land(self, old_rows: list[drive.Fn], fixing: list[str], fixed: list[str], replace: set[str]) -> None:
         rows = self.rows()

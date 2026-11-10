@@ -344,3 +344,27 @@ class FlakyUnderLoad(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlanMergeStaticGates(unittest.TestCase):
+    """A plan branch that would turn main red on dup or literals never lands (pilot2026-11-09 23:08)."""
+
+    def gates(self, dup_exit: int) -> list[str]:
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            py = sys.executable.replace("\\", "/")
+            sup = mock.Mock(cfg={"commands": {"dup": f'"{py}" -c "import sys; print(\'a.rs:1 repeats b.rs:2\'); '
+                                                      f'sys.exit({dup_exit})"', "literals": ""}},
+                            log=logs.append)
+            supervise.Supervisor.static_gates(sup, "plan/fixes-rL1", work, work, 1)
+        return logs
+
+    def test_a_dup_failure_stops_the_round_before_main_moves(self):
+        with self.assertRaises(supervise.Stop) as e:
+            self.gates(1)
+        self.assertIn("fails dup", str(e.exception))
+        self.assertIn("a.rs:1 repeats b.rs:2", str(e.exception))
+
+    def test_a_clean_branch_passes_and_an_empty_command_is_skipped(self):
+        self.assertEqual(self.gates(0), ["dup plan/fixes-rL1: exit 0"])
