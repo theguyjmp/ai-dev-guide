@@ -229,7 +229,8 @@ class Supervisor:
         with open(out, "wb") as fo:
             try:
                 proc = subprocess.Popen([*self.drive_cmd, "--repo", str(self.repo)], cwd=self.repo,
-                                        stdin=subprocess.DEVNULL, stdout=fo, stderr=subprocess.STDOUT, env=self.env())
+                                        stdin=subprocess.DEVNULL, stdout=fo, stderr=subprocess.STDOUT,
+                                        env=self.child_env(self.drive_cmd))  # drive runs under our lock
             except OSError as e:
                 raise Stop(f"cannot start {self.drive_cmd[0]}: {e}") from e
             try:
