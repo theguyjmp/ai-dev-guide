@@ -53,6 +53,7 @@ from functools import lru_cache
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import drivelock  # noqa: E402  beside this script: one drive per repo, orphans, slot markers
 import land as land_mod  # noqa: E402  the lock protocol is land.py's
 import mainred  # noqa: E402  beside this script: main red, systemic failures, dead depfixes
 import memcap  # noqa: E402  beside this script: [limits] proc_mem_gb
@@ -1317,14 +1318,55 @@ class Driver(mainred.MainRed):
         cold-build: fid keeps its slot while no other running job holds it, else takes the lowest free one. Two
         processes that run at once never share a slot."""
         held = {self.slots[j] for j in self.jobs if j != fid and j in self.slots}
+        me = getattr(self, "drive_id", "")
         k = self.slots.get(fid)
-        if k is None or k in held:
-            k = next(i for i in range(len(held) + 1) if i not in held)
+        if k is None or k in held or drivelock.held_by_other(self.slot_dir(k), me):
+            k = next(i for i in range(len(held) + 64) if i not in held and
+                     not drivelock.held_by_other(self.slot_dir(i), me))
             self.slots[fid] = k
+            if hasattr(self, "st"):  # persisted with the next save; checked at start
+                self.st.setdefault("slots", {})[fid] = k
+        if me and not drivelock.owns(self.slot_dir(k), me, fid):
+            drivelock.claim(self.slot_dir(k), me, fid)
         return k
 
+    def slot_dir(self, k: int) -> Path:
+        return self.ov / "target" / f"slot-{k}"
+
+    def single_start(self) -> None:
+        """One drive per repo, at start (the lock is held): kill a dead drive's leftover workers, then restore the
+        persisted slot map, dropping a slot given twice or held by another live drive."""
+        self.drive_id = drivelock.me()
+        for pid in drivelock.kill_orphans(self.repo, lambda pid, cmd: self.log(None, "orphan_killed",
+                                                                               f"pid {pid}: {cmd[:300]}")):
+            self.say(f"killed orphan pid {pid} (a dead drive's worker)")
+        kept, notes = drivelock.check_slots(self.st.get("slots", {}), self.ov / "target", self.drive_id)
+        for note in notes:
+            self.log(None, "slot_dropped", note)
+        self.slots = dict(kept)
+        self.st["slots"] = dict(kept)
+
+    def slot_mismatch(self, wt: Path, fid: str, output: str) -> str:
+        """Why a red acceptance run may have tested a binary that is not this job's own build, or ''."""
+        d = self.slot_dir(self.slots[fid]) if fid in self.slots else None  # never slot(): it would re-claim
+        if d is None or not getattr(self, "drive_id", ""):
+            return ""
+        if not drivelock.owns(d, self.drive_id, fid):
+            return f"{d.name} changed hands during the run (now {drivelock.read_marker(d) or 'unmarked'})"
+        foreign = drivelock.foreign_binaries(output, d, wt)
+        return f"ran {foreign[0]}, outside {d.as_posix()}" if foreign else ""
+
+    def rebuild_slot(self, wt: Path, fid: str, why: str) -> None:
+        """Claim fid's slot again and rebuild in it ([commands] build when set; the acceptance command's own build
+        otherwise), so the next acceptance run tests this worktree's binary."""
+        self.log(fid, "slot_rebuild", why)
+        drivelock.claim(self.slot_dir(self.slot(fid)), self.drive_id, fid)
+        if self.cfg["commands"].get("build"):
+            self.sh(land_mod.fill(self.cfg["commands"]["build"]), wt, fid)
+
     def slot_env(self, fid: str) -> dict[str, str]:
-        env = {k: v for k, v in os.environ.items() if k != "OVERHAUL_HARNESS"}  # builders never move main (the guard)
+        env = {k: v for k, v in os.environ.items()  # builders never move main (the guard) nor run under the lock
+               if k not in ("OVERHAUL_HARNESS", drivelock.ENV)}
         return {**env, "CARGO_TARGET_DIR": str(self.ov / "target" / f"slot-{self.slot(fid)}")}
 
     def sh(self, cmd: str, wt: Path, fid: str = "") -> subprocess.CompletedProcess[str] | None:
@@ -1368,8 +1410,14 @@ class Driver(mainred.MainRed):
         tmpl = self.cfg.get("acceptance") or self.cfg["commands"].get("acceptance")
         if fid not in self.fns or not tmpl or not self.cfg["harness"].get("pre_review_acceptance", True):
             return ""
+        if getattr(self, "drive_id", "") and fid in self.slots and                 drivelock.read_marker(self.slot_dir(self.slots[fid])).get("fid") not in (None, fid):
+            self.rebuild_slot(wt, fid, f"slot-{self.slots[fid]} was last built by "
+                              f"{drivelock.read_marker(self.slot_dir(self.slots[fid])).get('fid')}")
         for node, cmd in land_mod.acceptance_cmds(tmpl, self.fns[fid].acceptance):
             p = self.sh(cmd, wt, fid)
+            if p is not None and p.returncode != 0 and (why := self.slot_mismatch(wt, fid, p.stdout + p.stderr)):
+                self.rebuild_slot(wt, fid, why)  # another build's binary: rebuild and run again, never a red
+                p = self.sh(cmd, wt, fid)
             if p is None:
                 return f"acceptance {node} timed out in the worktree after merging {self.main}: `{cmd}`"
             if p.returncode != 0:
@@ -3043,7 +3091,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="reset the polish state so the next run audits again with the current checklist, then exit")
     args = ap.parse_args(argv)
     repo = Path(os.path.abspath(args.repo))
+    admin = next((f for f, on in (("--reset", args.reset), ("--mark-proven", args.mark_proven),
+                                  ("--repolish", args.repolish)) if on), "")
+    held = ""
     try:
+        held = take_drive_lock(repo, admin)
         drv = Driver(repo, load_config(repo))
         install_guard(repo)
         drv.load()
@@ -3061,9 +3113,11 @@ def main(argv: list[str] | None = None) -> int:
                 raise DriveError("--mark-proven needs --evidence FILE")
             drv.mark_proven(args.mark_proven, Path(os.path.abspath(args.evidence)))
             return 0
-        cap = memcap.cap_self(float(drv.cfg["limits"].get("proc_mem_gb") or 0))  # every child inherits the cap
+        # every child inherits the cap, and dies with drive (one job, both limits)
+        cap = memcap.cap_self(float(drv.cfg["limits"].get("proc_mem_gb") or 0), kill_on_close=True)
         if cap:
             print(f"drive: {cap}", flush=True)
+        drv.single_start()
         return drv.run()
     except DriveError as e:
         print(f"drive: error: {e}", flush=True)
@@ -3071,7 +3125,22 @@ def main(argv: list[str] | None = None) -> int:
         print("drive: interrupted", flush=True)
     except Exception:  # an unexpected bug: show where
         traceback.print_exc()
+    finally:
+        if held == "taken":
+            drivelock.release(repo)
     return 1
+
+
+def take_drive_lock(repo: Path, admin: str = "") -> str:
+    """One drive per repo (.overhaul/drive.lock): 'taken', or 'inherited' under the supervise.py that started this
+    drive. A second start, or --reset/--mark-proven/--repolish while another drive runs, is a DriveError naming the
+    running pid."""
+    try:
+        return drivelock.acquire(repo, f"drive.py {admin}".strip())
+    except drivelock.Held as e:
+        if admin:
+            raise DriveError(drivelock.refuse_admin(repo, admin, hasattr(Driver, "replan_step"))) from e
+        raise DriveError(f"{e}; this start exits, the running drive keeps going") from e
 
 
 if __name__ == "__main__":
