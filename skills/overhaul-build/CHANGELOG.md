@@ -1,5 +1,24 @@
 # overhaul-build changelog
 
+## Watchdog: what should be happening is happening; remote timeouts, 2026-11-10
+Owner 2026-11-10: "the heartbeat should check to make sure all things that are supposed to be happening are happening
+... if a phase has gone from unfinished to finished, check that the appropriate checkers have audited or are auditing,
+if not trigger them." the pilot project: 0 phase_audit events in two days with phase_audit = true (a finished final polish hid
+every phase audit), the every-25-lands arch sweep never ran (at 0 with 79 proven), 55 periodic_red after the last
+bisect; desk builds "silent" because slow rows timed out at 30 min and were benched as offline without an attempt.
+- watchdog.py: INVARIANTS table (name, due, evidence, action); new phase_audit, arch_sweep, periodic, progress, reload,
+  needs_plan, proof_check, dashboard checks. Acts by request files (audit-phase-<N>, arch-sweep, periodic-<gate>,
+  reload-watchdog-*), dash.py, or an ALERT.txt line; reset/reload requests are aged by first sighting, not mtime.
+- drive.py harness_requests(): applies audit-phase-<N> (st phase_force; polish_phase() returns it ahead of order and of
+  a finished final polish; an audited phase is reset for one more audit), arch-sweep (sweep forced past the count and
+  the final polish), periodic-<gate> (periodic.rearm: culprit cleared, depfix re-armed, at most PERIODIC_REARMS = 2);
+  events request_applied / request_refused. A phase polish audit logs `phase_audit` "phase N round R start".
+- Remote: timeouts with any output spend the attempt (silent = zero-byte run file); [harness.remote] timeout_min
+  (default 45) is a remote build's deadline. Host stdout was already forwarded line by line (pass D).
+- Tests: test_watchdog (phase 3 finished 20 min ago -> request + event; overdue sweep; red gate re-armed, broken gate
+  to the owner; waiting request, needs-plan, stale dashboard), test_harness_g (drive honours the requests),
+  test_remote (the first builder line reaches the laptop while the fake claude sleeps; remote timeout_min).
+
 ## Plan lands gated, remote heartbeat, watchdog, 2026-11-10
 Owner 2026-11-10 07:15: "Fix all of those permanently so those kinds won't happen again." Measured on the pilot project
 (.overhaul/log.jsonl, 2026-11-09/10): a plan commit turned main red twice (23:08 stubs failed dup; the phase-10 stubs
