@@ -1802,6 +1802,20 @@ class Driver(mainred.MainRed):
             self.log(None, "slot_dropped", note)
         self.slots = dict(kept)
         self.st["slots"] = dict(kept)
+        self.clear_git_locks()
+
+    def clear_git_locks(self, min_age_s: float = 60.0) -> None:
+        """Remove git lock files a killed run left (pilot2026-11-10: a restart at 05:24 left .git/packed-refs.lock
+        and ref updates failed for an hour). Safe at start: the drive lock is held and orphan workers are killed."""
+        gdir = self.repo / ".git"
+        for name in ("packed-refs.lock", "index.lock", "HEAD.lock", "config.lock"):
+            path = gdir / name
+            try:
+                if path.is_file() and time.time() - path.stat().st_mtime > min_age_s:
+                    path.unlink()
+                    self.log(None, "git_lock_cleared", name)
+            except OSError:
+                pass
 
     def slot_mismatch(self, wt: Path, fid: str, output: str) -> str:
         """Why a red acceptance run may have tested a binary that is not this job's own build, or ''."""
