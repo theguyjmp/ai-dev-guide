@@ -22,6 +22,13 @@ as busy meanwhile, so the drive loop never waits on it. A failed check (agent er
 `feasibility_error` and the build starts as before. `[harness] feasibility = false` turns it off; a project with a
 custom worker_cmd and no feasibility_cmd has no agent to ask and skips it.
 
+The answer also holds a WORK PACKET: per file the exact symbol or line to edit after, the signatures to implement,
+the existing helpers to call (path::name, signature copied from the code) and the exact test command. drive.py puts it
+under the build brief's title ("start here; do not explore beyond these files unless a test fails") and the first
+attempt of a row with a packet runs with --max-turns [limits] packet_max_calls (default 20); a retry keeps the packet
+and gets the full builder_max_calls. Why (owner 2026-11-10): builders explored, median 24 turns, 18 min and 940k
+tokens per build.
+
 plan_validate.py --feasibility (planners, before a plan commit): the same check for every planned row; a problem or a
 file outside the files cell is a PLAN FAIL line.
 
@@ -54,6 +61,7 @@ MAX_TURNS = 8
 TIMEOUT_S = 300.0
 PARALLEL = 4
 FRESH_S = 60.0  # prefetch looks a row's valid cached answer up again after this long
+PACKET_CALLS = 20  # default [limits] packet_max_calls: a first build that starts from a work packet
 PREFETCH = 8  # rows checked ahead of a free slot, so a launch rarely waits on its check
 MAP_LINES = 300
 SECTION_MAX = 6000
@@ -74,7 +82,12 @@ map of the definitions on main. Read code yourself only where the map is not eno
 Answer with ONE JSON object and nothing else:
 {"files": ["every repo-relative product file the change must create or edit"],
  "needs": {"<capability the row's code must call>": "<row id that provides it | main | MISSING>"},
- "fits": {"ok": true, "why": "<one line>"}}
+ "fits": {"ok": true, "why": "<one line>"},
+ "packet": {"edits": [{"file": "<path>", "after": "<exact symbol or line to edit after, or NEW FILE>",
+                       "what": "<what to add or change there, one line>"}],
+            "implement": ["<exact signature of each function, method or type to write>"],
+            "helpers": [{"ref": "<path>::<name>", "signature": "<its signature copied from the code>"}],
+            "test": "<the exact command that runs the acceptance test>"}}
 
 - files: every file the builder must create or edit, including ones outside the row's files cell (registering a
   verb, extending a shim or a shared store). Not files it only reads, not tests/acceptance or spec files.
@@ -83,6 +96,10 @@ Answer with ONE JSON object and nothing else:
   provides it (for example the store cannot add records yet and no row adds that).
 - fits: ok is false when one builder cannot finish in 30 minutes and ~60 tool calls: several user-visible verbs at
   once, a fixture of ~1M rows, or more than ~6 files of new logic. `why` names the reason in one line.
+- packet: the builder's work packet, so it starts editing instead of exploring. One edit per place in each file
+  (the symbol or line to edit after, as it reads on main), the signatures to implement, every existing helper it
+  should call (path::name with the signature copied from the code, never guessed) and the exact test command from
+  the commands section. Only facts you checked in the map or the code.
 """
 
 
@@ -102,6 +119,7 @@ class Row:
     unit: list[str] = field(default_factory=list)  # unit test dirs, always allowed
     names: list[str] = field(default_factory=list)  # files whose blobs key the cache: cell + acceptance files
     plan: dict[str, tuple[str, str, str]] = field(default_factory=dict)  # id -> (module, status, entry)
+    commands: str = ""  # the exact gate commands (drive.commands_text): the packet's test command comes from here
 
     @property
     def key(self) -> str:
@@ -211,7 +229,54 @@ def normalize(obj: dict) -> dict:
     else:
         val, why = fits, str(obj.get("why") or "")
     ok = val if isinstance(val, bool) else str(val).strip().lower() not in ("no", "false", "0", "")
-    return {"files": list(dict.fromkeys(files)), "needs": needs, "fits": {"ok": ok, "why": why}}
+    return {"files": list(dict.fromkeys(files)), "needs": needs, "fits": {"ok": ok, "why": why},
+            "packet": norm_packet(obj.get("packet"))}
+
+
+def norm_packet(raw: object) -> dict:
+    """The work packet, every part a list of plain strings or dicts; {} when it holds no edit."""
+    if not isinstance(raw, dict):
+        return {}
+    edits = [{"file": clean_path(e.get("file") or ""), "after": str(e.get("after") or "").strip(),
+              "what": str(e.get("what") or "").strip()}
+             for e in (raw.get("edits") or []) if isinstance(e, dict) and e.get("file")]
+    impl = [str(s).strip() for s in (raw.get("implement") or []) if str(s).strip()]
+    helpers = [{"ref": str(h.get("ref") or "").strip(), "signature": str(h.get("signature") or "").strip()}
+               for h in (raw.get("helpers") or []) if isinstance(h, dict) and h.get("ref")]
+    test = str(raw.get("test") or "").strip()
+    return {"edits": edits, "implement": impl, "helpers": helpers, "test": test} if edits else {}
+
+
+def packet_text(doc: dict, budget: int) -> str:
+    """The `## Work packet` section a build brief starts with, or '' when the answer has no packet."""
+    pk = (doc.get("answer") or {}).get("packet") or {}
+    if not pk:
+        return ""
+    lines = ["## Work packet: start here",
+             (f"Checked against main by the feasibility check ({cache_path_rel(doc)}). Start here; do not explore "
+              "beyond these files unless a test fails. Read each file only around the place named. "
+              f"Tool-call budget: {budget}."), "", "Edits:"]
+    lines += [f"- `{e['file']}` after `{e['after'] or 'the end'}`: {e['what']}" for e in pk["edits"]]
+    if pk["implement"]:
+        lines += ["", "Implement:"] + [f"- `{s}`" for s in pk["implement"]]
+    if pk["helpers"]:
+        lines += ["", "Existing helpers to call (do not rewrite them):"]
+        lines += [f"- `{h['ref']}`" + (f": `{h['signature']}`" if h["signature"] else "") for h in pk["helpers"]]
+    if pk["test"]:
+        lines += ["", f"Test: `{pk['test']}`"]
+    return "\n".join(lines) + "\n"
+
+
+def cache_path_rel(doc: dict) -> str:
+    return f".overhaul/{DIR}/{doc.get('id', '?')}.json"
+
+
+def embed(brief: str, packet: str) -> str:
+    """The packet right under the brief's title line."""
+    if not packet:
+        return brief
+    title, sep, rest = brief.partition("\n")
+    return f"{title}\n\n{packet}{sep}{rest}" if sep else f"{packet}\n{brief}"
 
 
 # ---- the prompt ------------------------------------------------------------------------------------------------------
@@ -250,6 +315,7 @@ def prompt(row: Row, repo: Path, ref: str) -> str:
         f"## Acceptance test\n{row.acceptance[:ACCEPT_MAX]}",
         f"## ARCHITECTURE section of module {row.module}\n{row.section[:SECTION_MAX] or '(none)'}",
         f"## Rows it may call (proven, its deps, its module)\n{plan_rows(row)}",
+        f"## Commands (the packet's test command is one of these)\n{row.commands or '(see overhaul.toml)'}",
         f"## Map of {ref} (definitions in its module and the modules it depends on)\n"
         + grep_map(repo, ref, list(dict.fromkeys(row.own + row.dep_paths))),
     ])
@@ -334,6 +400,7 @@ def verdict(ans: dict, row: Row, overlap: Callable[[list[str], list[str]], bool]
 def summary(doc: dict) -> str:
     u = doc.get("usage") or {}
     return (f"{doc.get('seconds', 0)} s, files {len(doc['answer']['files'])}, needs {len(doc['answer']['needs'])}, "
+            f"packet edits {len((doc['answer'].get('packet') or {}).get('edits') or [])}, "
             f"cache_read {u.get('cache_read_input_tokens', 0)}")
 
 
@@ -352,6 +419,8 @@ class Gate:
         self.procs: list[subprocess.Popen] = []
         self.lock = threading.Lock()
         self.fresh: dict[str, tuple[str, float]] = {}  # fid -> (row key, when its cache was last found valid)
+        self.docs: dict[str, dict] = {}  # fid -> the answer ok() just accepted, for packet()
+        self.packet_calls = max(1, int(d.cfg["limits"].get("packet_max_calls") or PACKET_CALLS))
         # drive.py's module (also when it runs as __main__): its path helpers, without importing it twice
         self.dm = sys.modules[type(d).__module__]
 
@@ -377,7 +446,20 @@ class Gate:
                 for g in d.order}
         return Row(f.id, f.module, list(f.deps), d.row_table(f), d.acceptance_text(f), section, paths,
                    dm.module_paths(section, f.module), d.dep_paths([f.module]), tuple(d.protected), unit,
-                   list(dict.fromkeys(paths + accept)), plan)
+                   list(dict.fromkeys(paths + accept)), plan, d.commands_text(f))
+
+    def packet(self, f, attempt: int) -> tuple[str, int]:
+        """(the work packet section for f's build brief, its tool-call budget). The first attempt of a row with a
+        packet gets [limits] packet_max_calls; a retry keeps the packet but gets the full builder_max_calls, since the
+        packet was not enough. No packet: ('', builder_max_calls)."""
+        full = int(self.d.max_calls)
+        if not self.cmd:
+            return "", full
+        doc = self.docs.pop(f.id, None) or cached(self.d.ov, self.row(f), self.d.repo, self.d.main)
+        if not doc or not (doc.get("answer") or {}).get("packet"):
+            return "", full
+        budget = min(full, self.packet_calls) if attempt <= 1 else full
+        return packet_text(doc, budget), budget
 
     def collect(self) -> None:
         with self.lock:
@@ -442,6 +524,7 @@ class Gate:
             d.park(f.id, f"router infeasible: {router.WORDS['infeasible']}; {router.HINT['infeasible']}: {evidence}")
             return False
         d.log(f.id, "feasibility_ok", summary(doc))
+        self.docs[f.id] = doc  # packet() reads it right after, without a second git lookup
         d.set(f.id, feasible=row.key)
         if widen:
             rec = d.st["functions"][f.id]

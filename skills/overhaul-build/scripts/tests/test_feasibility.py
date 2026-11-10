@@ -110,6 +110,13 @@ class FeasToy(Toy):
         self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
         return d
 
+    def drive_cli(self, repo: Path, *args: str) -> tuple[int, str]:
+        """Toy.drive_cli with room for the checks: four drive runs at -n 6 took over Toy's 180 s."""
+        p = subprocess.run([sys.executable, str(SCRIPTS / "drive.py"), "--repo", str(repo), *args],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           stdin=subprocess.DEVNULL, timeout=420)
+        return p.returncode, p.stdout + p.stderr
+
     def calls(self) -> list[str]:
         p = self.agent_dir / "calls.txt"
         return p.read_text(encoding="utf-8").split() if p.is_file() else []
@@ -179,6 +186,62 @@ class TestDriveGate(FeasToy):
         self.assertIsNone(feasibility.agent_cmd({"worker_cmd": ["py", "w.py"]}))
         self.assertIsNone(feasibility.agent_cmd({"feasibility": False, "feasibility_cmd": "x"}))
         self.assertEqual(feasibility.agent_cmd({"worker_cmd": "w", "feasibility_cmd": "py a.py"}), ["py", "a.py"])
+
+
+PACKET = {"files": ["src/alpha/f1.py"], "needs": {"parse": "main"}, "fits": {"ok": True, "why": "one verb"},
+          "packet": {"edits": [{"file": "src/alpha/f1.py", "after": "def main(argv)", "what": "dispatch `add`"}],
+                     "implement": ["def add(a: int, b: int) -> int"],
+                     "helpers": [{"ref": "src/alpha/core.py::parse_int", "signature": "def parse_int(s: str) -> int"}],
+                     "test": "py -3 -m pytest -q tests/acceptance -k test_add"}}
+
+
+class TestWorkPacket(FeasToy):
+    def test_packet_tops_the_brief_and_cuts_the_first_budget(self):
+        repo = self.setup({"F1": PACKET}, functions=FILES4.format(f4="src/alpha/f4.py"))
+        toml = repo / "overhaul.toml"
+        toml.write_text(toml.read_text(encoding="utf-8").replace('fake_worker.py"]', 'fake_worker.py", "--max-turns", "12"]')
+            .replace("[limits]\n", "[limits]\npacket_max_calls = 5\n"), encoding="utf-8")
+        git(repo, "commit", "-qam", "budget")
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        brief = self.seen("F1-build-1.md")
+        title, _, rest = brief.partition("\n")
+        self.assertTrue(title.startswith("# Build F1"))
+        self.assertTrue(rest.lstrip().startswith("## Work packet: start here"))
+        for part in ("do not explore beyond these files unless a test fails", "Tool-call budget: 5",
+                     "`src/alpha/f1.py` after `def main(argv)`: dispatch `add`", "`def add(a: int, b: int) -> int`",
+                     "`src/alpha/core.py::parse_int`: `def parse_int(s: str) -> int`",
+                     "Test: `py -3 -m pytest -q tests/acceptance -k test_add`", "Stop at about 5 tool calls"):
+            self.assertIn(part, brief)
+        self.assertNotIn("Work packet", self.seen("F2-build-1.md"))  # no packet: the brief as before
+        ends = {e["fn"]: e["detail"] for e in self.events(repo) if e["event"] == "build_end"}
+        self.assertIn("/5", ends["F1"].split()[1])  # turns=<n>/5: --max-turns was 5, not 12
+        self.assertIn("/12", ends["F2"].split()[1])
+        self.assertIn("packet", self.kinds(repo, "F1"))
+
+    def test_retry_keeps_packet_with_full_budget_and_no_packet_without_one(self):
+        repo = self.setup({"F1": PACKET})
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        f = drv.fns["F1"]
+        feasibility.check(drv.feas.row(f), drv.feas.cmd, repo, drv.ov, "main")
+        text, calls = drv.feas.packet(f, 1)
+        self.assertEqual(calls, min(drv.max_calls, feasibility.PACKET_CALLS))  # never above builder_max_calls
+        self.assertIn("## Work packet", text)
+        text2, calls2 = drv.feas.packet(f, 2)
+        self.assertEqual(calls2, drv.max_calls)
+        self.assertIn(f"Tool-call budget: {drv.max_calls}", text2)
+        self.assertEqual(drv.feas.packet(drv.fns["F2"], 1), ("", drv.max_calls))  # never checked: no packet
+        self.assertEqual(feasibility.embed("# T\nbody", ""), "# T\nbody")
+        self.assertEqual(feasibility.norm_packet({"edits": [], "test": "x"}), {})  # no edit: no packet
+
+    def test_packet_that_does_not_fit_is_split_before_a_build(self):
+        repo = self.setup({"F2": {**PACKET, "fits": {"ok": False, "why": "three verbs"}}})
+        self.drive_cli(repo)
+        st = self.state(repo)["functions"]["F2"]
+        self.assertEqual(st["status"], "needs-plan")
+        self.assertIn("split", st["last_reason"])
+        self.assertNotIn("build_start", self.kinds(repo, "F2"))
 
 
 class TestCache(FeasToy):

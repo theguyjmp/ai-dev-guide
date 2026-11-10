@@ -237,6 +237,7 @@ class Job:
     stream: worker.Stream | None = None  # a stream-json worker's live events (worker.py)
     idle: str = ""  # why the no-event watchdog killed it
     host: str = ""  # a build on a [harness.remote] slot: the host's name; "" = this machine
+    calls: int = 0  # its --max-turns when not builder_max_calls (a build from a feasibility work packet)
 
 
 def now_iso() -> str:
@@ -1328,9 +1329,11 @@ class Driver(mainred.MainRed):
         return cmd + (["--model", model] if model else [])
 
     def start_job(self, fid: str, kind: str, attempt: int, brief: Path, cwd: Path, tag: str = "",
-                  rslot: int | None = None) -> None:
+                  rslot: int | None = None, max_calls: int | None = None) -> None:
         out = self.ov / "runs" / f"{fid}-a{attempt}-{tag or kind}.json"
         base = self.worker_cmd(kind)
+        if max_calls and "--max-turns" in base[:-1]:  # a build from a work packet: its own, smaller budget
+            base[base.index("--max-turns") + 1] = str(max_calls)
         cmd = [*base, f"Read and do {brief.as_posix()}"]
         try:
             if rslot is not None and self.remote:  # remote.py: push, build on the host, fetch fn/<id> back
@@ -1345,7 +1348,7 @@ class Driver(mainred.MainRed):
         model = base[base.index("--model") + 1] if "--model" in base[:-1] else (
             "custom" if self.custom_cmd(kind) else "default")
         start = time.monotonic()
-        job = Job(fid, kind, proc, out, start, start + self.timeout_s, attempt, model=model,
+        job = Job(fid, kind, proc, out, start, start + self.timeout_s, attempt, model=model, calls=max_calls or 0,
                   host=self.remote.name if rslot is not None and self.remote else "")
         # a remote build's output arrives at its end (remote.py), so only a local one gets the idle watchdog
         self.jobs[fid] = job if job.host else self.watch(job, cmd)
@@ -1629,15 +1632,17 @@ class Driver(mainred.MainRed):
                         f"`git log --oneline {self.main}..HEAD` and continue from that work; do not start over.\n"
                         + (f"Before that, attempt {attempt - 1} failed: {rec['last_reason']}" if rec["last_reason"]
                            else ""))
+        packet, calls = self.feas.packet(f, attempt)  # the feasibility work packet and its tool-call budget
         brief = render("build-brief.md", {
             "id": f.id, "attempt": str(attempt), "branch": f"fn/{f.id}",
             "worktree": (self.ov / "wt" / f.id).as_posix(), "row": self.row_table(f), "entry": f.entry,
             "module": f.module, "module_section": module_section(self.arch, f.module)
             or "(spec/ARCHITECTURE.md has no section naming this module)",
             "allowed_paths": self.allowed(f), "acceptance_source": self.acceptance_text(f),
-            "policies": self.policies(f), "commands": self.commands_text(f), "max_calls": str(self.max_calls),
+            "policies": self.policies(f), "commands": self.commands_text(f), "max_calls": str(calls),
             "footprint": self.footprint_text(f), "dup_check": self.dup_text(),
             "previous": previous + stack.brief_note(on), **self.standard_values(f)})
+        brief = feasibility.embed(brief, packet)  # under the title: the builder starts there
         tokens = len(brief) // 4
         if tokens > self.max_tokens:
             self.park(f.id, f"brief is {tokens} tokens, over brief_max_tokens {self.max_tokens}; "
@@ -1656,7 +1661,9 @@ class Driver(mainred.MainRed):
                 rec["stacked_on"] = shas
         path = self.ov / "briefs" / f"{f.id}.md"
         path.write_text(brief, encoding="utf-8")
-        self.start_job(f.id, "build", attempt, path, wt, rslot=rslot)
+        self.start_job(f.id, "build", attempt, path, wt, rslot=rslot, max_calls=calls)
+        if packet:
+            self.log(f.id, "packet", f"build starts from the work packet, max calls {calls}")
         host = self.jobs[f.id].host
         # a fresh branch from main: a fresh conflict budget; a resumed one keeps its own
         self.set(f.id, status="building", host=host or None, **({} if resume else {"conflicts": 0}))
@@ -1674,9 +1681,10 @@ class Driver(mainred.MainRed):
             self.set(job.fn, status="planned", host=None)  # the host was unusable: requeued, no attempt spent
             return
         tokens, turns, text = read_result(job.out)
-        flags = (" over-budget" if turns is not None and turns > self.max_calls else "") + \
+        cap = job.calls or self.max_calls
+        flags = (" over-budget" if turns is not None and turns > cap else "") + \
                 (" timeout" if job.timed_out else "")
-        self.log(job.fn, "build_end", f"rc={job.proc.returncode} turns={turns}/{self.max_calls}{flags} "
+        self.log(job.fn, "build_end", f"rc={job.proc.returncode} turns={turns}/{cap}{flags} "
                  f"model={job.model}", time.monotonic() - job.started, tokens)
         if self.blocked_by(job.fn, text):
             return
