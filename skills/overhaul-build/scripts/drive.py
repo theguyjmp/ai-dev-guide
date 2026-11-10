@@ -818,10 +818,16 @@ class Driver(mainred.MainRed):
             release_lock(self.repo)
 
     def flush(self) -> None:
-        """Write state.json now, waiting for land.py to release the lock."""
-        if not self.save(LOCK_WAIT_S):
-            raise DriveError(f"cannot write {self.state_path.name}: {lock_path(self.repo).as_posix()} is held by "
-                             f"{lock_holder(self.repo) or '?'} (delete it if that process is gone)")
+        """Write state.json now, waiting for land.py to release the lock. A live land may hold it for minutes (its
+        merged-tree regate with land_parallel lands; the pilot project 2026-11-10 02:15 the old 120 s wait killed the drive
+        twice and stopped the run), so it waits up to a land's own timeout plus 10 min; a dead holder's lock is
+        broken by acquire_lock."""
+        deadline = time.monotonic() + max(LOCK_WAIT_S, getattr(self, "land_timeout_s", 0.0) + 600)
+        while not self.save(LOCK_WAIT_S):
+            if time.monotonic() >= deadline:
+                raise DriveError(f"cannot write {self.state_path.name}: {lock_path(self.repo).as_posix()} is held "
+                                 f"by {lock_holder(self.repo) or '?'} (delete it if that process is gone)")
+            self.log(None, "state_lock_wait", f"{lock_holder(self.repo) or '?'} holds the land lock; still waiting")
 
     def set(self, fid: str, **fields) -> None:
         self.st["functions"][fid].update(fields, updated=now_iso())
