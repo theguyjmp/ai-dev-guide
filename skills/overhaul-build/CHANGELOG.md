@@ -170,6 +170,18 @@ let 4 private copies of app_core helpers through (`invalid` with swapped argumen
   without spending an attempt, then retries with the NO. Retry NOs name the existing item to reuse (`other`).
   Tests: test_drive dedup_verified units, last-attempt dup now fails.
 
+## Periodic gates act again, 2026-11-10
+the pilot project 2026-11-09/10: 55 periodic_red, last bisect 2026-11-09 09:07, nothing since. A culprit, once found, stood while
+the gate stayed red; one depfix per gate was allowed ever (gpu's failed to land on a memory-cap flake, so gpu never got
+another); a culprit commit that was not `land F:` (`S09: use ...`) was the owner's; a gate whose command could not run
+(linux, exit 127, a Windows path handed to bash) was treated as a code red.
+- periodic.py: every red run is bisected again unless its depfix is in flight (or it has no green to bisect against),
+  and the culprit's module gets one depfix per red run (`depfix-periodic-<gate>`, then `-2`, `-3`), up to
+  `[gates.periodic] depfix_max` (default 3) while the gate stays red; then the owner line. The count resets on green.
+- The culprit is the function of a `land F:` or `F: ...` commit, else the module that owns its first changed file.
+- Config reds (exit 126/127, `command not found`, a Windows path in bash): state "periodic" config, a `gate_config`
+  owner line in the verdict, never bisected, no depfix, not green. Unavailable (exit 75) unchanged.
+
 ## Stacked starts, 2026-11-09
 Owner 2026-11-09: 40 slots, at least 10 functions/h, prove it. rate_sim.py (overhaul-trial; the pilot project's real dependency
 graph and 58 measured cycles, briefs/rate-proof.md): with only proven deps the rate is width-bound at ~7.5/h whatever

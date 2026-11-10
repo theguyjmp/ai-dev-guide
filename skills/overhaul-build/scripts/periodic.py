@@ -12,6 +12,7 @@ overhaul.toml (all optional; without [gates.periodic] nothing changes):
   # A gate named in only one of the two tables runs on that one alone.
   timeout_min = 60          # per gate command
   bisect = true             # red: bisect the main commits since that gate's last green; culprit's module, one depfix
+  depfix_max = 3            # depfixes per gate while it stays red (one per red run); then the red is the owner's
   budgets = "spec/BUDGETS.toml"
   [gates.periodic.commands]  # name = command, run in .overhaul/periodic (a detached worktree at {sha})
   parity = "py -3 {scripts}/periodic.py ci --workflow parity.yml --sha {sha}"   # X2: Windows/macOS/Linux matrix
@@ -25,10 +26,15 @@ over budget x (1 on the reference, else ci_factor) fails. Unknown names are reco
 Each gate keeps its own green: a red gate bisects over the lands since ITS last green, so one gate's red never
 blocks another's bisect. A gate whose command exits 75 after printing `ci: unavailable: <reason>` (CI that cannot
 run: billing, spending limit, unsupported runner) is UNAVAILABLE: never bisected, no depfix, not green; the verdict
-shows it as an owner line.
+shows it as an owner line. A gate that fails as a command, not as code (exit 126/127, `command not found`, a Windows
+path in bash) is a CONFIG red: never bisected, no depfix, not green; the verdict shows a `gate_config` owner line.
+Every red run acts: a red gate is bisected again each run (its culprit stands only while its depfix is in flight or it
+has no green to bisect against) and the culprit's module gets one depfix per red run, up to depfix_max. The culprit is
+the function of a `land F:` / `F: ...` commit, else the module that owns the commit's first changed file.
 State: state.json "periodic" {green: {gate: sha}, last_green (every gate green; older states seed green from it),
   lands, last_run (the last run of any gate), since: {gate: lands}, ran: {gate: time}, finish: {gate: functions},
-  red: {gate: {sha, reason, culprit}}, unavailable: {gate: {sha, reason}}, bisect, fixed}.
+  red: {gate: {sha, reason, culprit, depfix, depfixes}}, unavailable: {gate: {sha, reason}},
+  config: {gate: {sha, reason}}, bisect, fixed (every periodic depfix id started)}.
   py -3 periodic.py ci --workflow W --sha S [--timeout-min 90]   push S to overhaul-periodic/<sha12>, run W there, wait,
                                                                 print its BENCH lines; exit 0 only on success, 75 when
                                                                 GitHub never started the jobs (unavailable)
@@ -53,7 +59,13 @@ UNAVAIL_MSG = re.compile(r"^ci: unavailable: (.+)$", re.M)
 # GitHub annotations on jobs that never started: billing, spending limit, a runner label it does not offer
 NOT_STARTED = re.compile(r"The job was not started because [^\n]*?(?:\.(?=\s|$)|$)|"
                          r"The configuration '[^'\n]+' is not supported", re.I | re.M)
-DEFAULTS = {"every_lands": 10, "every_min": 120, "timeout_min": 60, "bisect": True, "budgets": "", "commands": {}}
+# a gate that cannot start as a command: the owner's config, not a code red (exit 126/127 are matched by code)
+CONFIG_RED = re.compile(r"command not found|is not recognized as an internal or external command|"
+                        r"^(?:/usr)?/bin/(?:ba|da)?sh: (?:line \d+: )?[A-Za-z]:[\\/]", re.I | re.M)
+CONFIG_EXIT = (126, 127)
+NO_GREEN = "(no earlier green)"
+DEFAULTS = {"every_lands": 10, "every_min": 120, "timeout_min": 60, "bisect": True, "budgets": "", "commands": {},
+            "depfix_max": 3}
 
 
 def config(raw: dict) -> dict:
@@ -99,6 +111,11 @@ def culprit_fid(message: str) -> str:
     return m.group(1) if m else ""
 
 
+def config_red(code: int, text: str) -> bool:
+    """The gate failed as a command (cannot run, not found, a Windows path in bash), not on the code under test."""
+    return code in CONFIG_EXIT or (code != 0 and bool(CONFIG_RED.search(text or "")))
+
+
 class Periodic:
     """Owned by a drive.Driver: schedules the gates, runs one command at a time in the background, bisects reds."""
 
@@ -114,7 +131,7 @@ class Periodic:
     def st(self) -> dict:
         st = self.drv.st.setdefault("periodic", {})
         for k, v in (("last_green", ""), ("lands", 0), ("last_run", 0.0), ("red", {}), ("bisect", None),
-                     ("fixed", []), ("unavailable", {})):
+                     ("fixed", []), ("unavailable", {}), ("config", {})):
             st.setdefault(k, v)
         if "green" not in st:  # an older state: one last_green for all gates, plus each gate's greens in the log
             st["green"] = self.seed_green(st["last_green"])
@@ -299,17 +316,22 @@ class Periodic:
             elif (st["bisect"] or {}).get("gate") == gate:
                 st["bisect"] = None
             return
-        red = code != 0 or bool(over)
         tail = [x for x in text.splitlines() if x.strip()][-1:] or [""]
+        if not over and config_red(code, text):
+            return self.config_red(gate, sha, mode, f"exit {code}: {tail[0][:160]}")
+        red = code != 0 or bool(over)
         reason = (f"over budget: {'; '.join(over)}" if over else f"exit {code}: {tail[0][:160]}") if red else ""
         reason = memcap.note(text, reason) if red and not over else reason
         self.drv.log(None, "periodic_red" if red else "periodic_green", f"{gate} {mode} at {sha[:12]} {reason}"[:1500])
         if mode == "run":
             st["unavailable"].pop(gate, None)
+            st["config"].pop(gate, None)
             if red:
                 self.run_red.append(gate)
-                old = st["red"].get(gate) or {}  # red since its last green: the culprit found then stands
-                st["red"][gate] = {"sha": sha, "reason": reason, "culprit": old.get("culprit", "")}
+                old = st["red"].get(gate) or {}  # every red run is bisected again, unless its depfix is in flight
+                keep = self.in_flight(old.get("depfix", "")) or NO_GREEN in str(old.get("culprit", ""))
+                st["red"][gate] = {"sha": sha, "reason": reason, "culprit": old.get("culprit", "") if keep else "",
+                                   "depfix": old.get("depfix", ""), "depfixes": old.get("depfixes", 0)}
             else:
                 st["red"].pop(gate, None)
                 st["green"][gate] = sha
@@ -319,6 +341,28 @@ class Periodic:
             return
         idx = bis["cands"].index(sha)
         bis["hi" if red else "lo"] = idx
+
+    def config_red(self, gate: str, sha: str, mode: str, reason: str) -> None:
+        """A gate that cannot run as written: an owner line (gate_config), never bisected, no depfix, not green."""
+        st = self.st
+        self.drv.log(None, "periodic_config", f"{gate} {mode} at {sha[:12]} {reason}"[:1500])
+        if mode == "run":
+            if gate not in st["config"]:
+                self.drv.say(f"periodic gate {gate} gate_config: {reason}; the owner fixes its command")
+            st["config"][gate] = {"sha": sha, "reason": reason}
+            st["red"].pop(gate, None)
+            self.run_red.append(gate)  # the run is not all green
+            return
+        bis = st["bisect"] or {}
+        if bis.get("gate") == gate:  # an older commit cannot run the gate: stop, the red stands for the owner
+            st["bisect"] = None
+            rec = st["red"].setdefault(gate, {"sha": sha, "reason": reason, "culprit": ""})
+            rec["culprit"] = f"{sha[:12]} cannot run the gate (gate_config) {NO_GREEN}"
+            self.drv.say(f"periodic gate {gate}: bisect stopped, {sha[:12]} cannot run it: {reason}")
+
+    def in_flight(self, dfid: str) -> bool:
+        d = self.drv
+        return bool(dfid) and (dfid in d.jobs or dfid in d.polish_lands or any(j.fn == dfid for j in d.land_jobs()))
 
     def end_run(self) -> bool:
         """A full run is done: all green moves last_green too. Red gates are bisected next, each on its own."""
@@ -336,13 +380,13 @@ class Periodic:
             return None
         for gate in [g for g in self.cfg["commands"] if g in st["red"]]:
             rec = st["red"][gate]
-            if rec.get("culprit") or gate in st["unavailable"]:
+            if rec.get("culprit") or gate in st["unavailable"] or gate in st["config"]:
                 continue
             green, sha = st["green"].get(gate) or st["last_green"], rec.get("sha", "")  # all green is green too
             cands = self.drv_git("rev-list", "--first-parent", "--reverse", f"{green}..{sha}").split() \
                 if green and sha else []
             if not cands:  # no green yet: nothing to bisect against
-                rec["culprit"] = f"{sha[:12]} (no earlier green)"
+                rec["culprit"] = f"{sha[:12]} {NO_GREEN}"
                 self.drv.say(f"periodic gate {gate} red at {sha[:12]} with no earlier green: {rec['reason']}")
                 continue
             st["bisect"] = {"gate": gate, "cands": cands, "lo": -1, "hi": len(cands) - 1}
@@ -350,24 +394,39 @@ class Periodic:
         return None
 
     def blame(self, gate: str, sha: str) -> bool:
-        """The first red commit: its function's module gets one depfix per gate; otherwise the red is the owner's."""
+        """The first red commit: its function's module (else the module owning its first changed file) gets one
+        depfix for this red run, up to depfix_max while the gate stays red; otherwise the red is the owner's."""
         st, self.st["bisect"] = self.st, None
         import drive
         subject = self.drv_git("log", "-1", "--format=%s", sha)
         fid = culprit_fid(subject)
+        lead = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*):", subject)
+        if fid not in self.drv.fns and lead and lead.group(1) in self.drv.fns:  # `S09: ...`: a commit for S09
+            fid = lead.group(1)
         f = self.drv.fns.get(fid)
+        files = [x for x in self.drv_git("show", "--name-only", "--format=", sha).splitlines() if x.strip()]
+        module, path = (f.module, (f.files or files or ["?"])[0]) if f else ("", "?")
+        for x in files if not module else []:
+            module, path = self.drv.owner_module(x), x
+            if module:
+                break
         rec = st["red"].setdefault(gate, {"sha": sha, "reason": "", "culprit": ""})
-        rec["culprit"] = fid or f"{sha[:12]} {subject[:60]}"
+        rec["culprit"] = fid if f else (f"{sha[:12]} {subject[:60]}" + (f" ({module})" if module else ""))
         self.drv.log(fid or None, "periodic_culprit", f"{gate}: {sha[:12]} {subject[:80]}")
-        dfid = f"{drive.DEPFIX_PREFIX}periodic-{gate}"
-        if f is None or dfid in st["fixed"]:
-            self.drv.say(f"periodic gate {gate} red since {rec['culprit']}: {rec['reason']}; the owner decides")
+        n, cap = int(rec.get("depfixes", 0)), int(self.cfg.get("depfix_max", DEFAULTS["depfix_max"]))
+        if not module or n >= cap:
+            why = "no module owns it" if not module else f"{n} depfixes did not turn it green"
+            self.drv.say(f"periodic gate {gate} red since {rec['culprit']}: {rec['reason']} ({why}); the owner decides")
             return True
+        base = f"{drive.DEPFIX_PREFIX}periodic-{gate}"
+        k = sum(1 for x in st["fixed"] if x == base or x.startswith(base + "-"))
+        dfid = base if not k else f"{base}-{k + 1}"
         st["fixed"].append(dfid)
-        self.drv.say(f"periodic gate {gate} red since {fid}: depfix to module {f.module}")
-        self.drv.start_polish_fix(f.module, [{"file": (f.files or ["?"])[0], "line": "?",
-                                              "rule": f"periodic gate {gate} red since {fid} ({sha[:12]})",
-                                              "evidence": f"`{self.cfg['commands'][gate]}`: {rec['reason']}"}],
+        rec.update(depfix=dfid, depfixes=n + 1)
+        self.drv.say(f"periodic gate {gate} red since {rec['culprit']}: {dfid} to module {module}")
+        self.drv.start_polish_fix(module, [{"file": path, "line": "?",
+                                            "rule": f"periodic gate {gate} red since {rec['culprit']} ({sha[:12]})",
+                                            "evidence": f"`{self.cfg['commands'][gate]}`: {rec['reason']}"}],
                                   fid=dfid)
         return True
 
