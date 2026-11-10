@@ -165,6 +165,14 @@ LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py'
 # [limits] min_free_gb: under it, cargo's incremental dirs under .overhaul/target are pruned and no build starts
 # (pilot2026-11-09: 20 slot target dirs of ~10 GB filled Z: to 0 GB and ENOSPC killed the drive)
 MIN_FREE_GB = 40.0
+# [limits] prune_at_gb: under it the same dirs are pruned with builds still starting, so min_free_gb is not reached
+# (pilot2026-11-10: the 40 GB floor blocked every local build); a job's own slot is pruned when the job ends
+PRUNE_AT_GB = 80.0
+# [harness] detach_builders (default true): a local build runs outside drive's kill-on-close job (worker.py launcher,
+# pid file .overhaul/jobs/<id>.json) and a restarted drive re-adopts it (pilot2026-11-09: 73 of 248 builds killed
+# by restarts). Only the owner's stop (`drive.py --stop`, Ctrl-C) kills it.
+DETACH_KINDS = ("build",)
+BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB
 INCREMENTAL = ("*/debug/incremental/*", "*/release/incremental/*")
 DEFAULTS = {
     "limits": {"builder_max_calls": 60, "brief_max_tokens": 40000,
@@ -432,10 +440,13 @@ def in_changed(n: dict, changed: dict[str, set[int]]) -> bool:
         return True
 
 
-def spawn(cmd: list[str], cwd: Path, out: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
-    """Start a worker in its own process group; stdout to out, stderr beside it; env replaces the environment."""
-    group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | spawn_priority(env)} if os.name == "nt"
-             else {"start_new_session": True})
+def spawn(cmd: list[str], cwd: Path, out: Path, env: dict[str, str] | None = None,
+          detach: bool = False) -> subprocess.Popen:
+    """Start a worker in its own process group; stdout to out, stderr beside it; env replaces the environment.
+    detach (Windows): also out of drive's job (CREATE_BREAKAWAY_FROM_JOB); OSError when a job above refuses it."""
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP | spawn_priority(env) | (BREAKAWAY if detach else 0) \
+        if os.name == "nt" else 0
+    group = {"creationflags": flags} if os.name == "nt" else {"start_new_session": True}
     with open(out, "wb") as fo, open(out.with_suffix(".err"), "wb") as fe:
         return subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, env=env, **group)
 
@@ -769,6 +780,10 @@ class Driver(mainred.MainRed):
         self.last_request_check = 0.0  # live re-plan: .overhaul/requests/ is looked at every REQUEST_POLL_S
         self.refused_plan = ""  # the main sha whose plan failed plan_validate: not reloaded again
         self.min_free_gb = float(lim.get("min_free_gb", MIN_FREE_GB) or 0)  # 0: no disk guard
+        self.prune_at_gb = float(lim.get("prune_at_gb", PRUNE_AT_GB) or 0)  # 0: prune only under min_free_gb
+        self.detach = bool(har.get("detach_builders", True))
+        self.detach_off = False  # a job above drive's refused breakaway once: builders run attached from then on
+        self.adopt: dict[str, dict] = {}  # fid -> pid file of a live detached build a previous drive left (load)
         self.width_red_s = float(har.get("width_red_min", WIDTH_RED_MIN) or 0) * 60
         self.width_since: float | None = None  # monotonic time ready rows first fell under free slots
         self.last_width = float("-inf")
@@ -882,10 +897,20 @@ class Driver(mainred.MainRed):
         recs = self.st["functions"]
         for fid in [k for k in recs if k not in self.fns]:
             del recs[fid]
+        for fid, job in drivelock.read_jobs(self.ov).items():
+            rec = recs.get(fid) or {}
+            if (fid in self.fns and self.fns[fid].status != "proven" and drivelock.job_live(job)
+                    and "building" in (rec.get("status"), rec.get("resume"))):
+                self.adopt[fid] = job  # still running: re-adopted in single_start, never committed over or reset
+            else:
+                drivelock.drop_job(self.ov, fid)  # ended (or its row went): the normal resume below
         for f in self.order:
             rec = recs.setdefault(f.id, {"status": "planned", "attempts": 0, "conflicts": 0, "last_reason": "",
                                          "branch": f"fn/{f.id}", "updated": now_iso()})
             stage = rec.pop("resume", "")
+            if f.id in self.adopt:
+                rec["status"] = "building"
+                continue
             if f.status == "proven":
                 rec["status"] = "proven"
             elif rec["status"] in IN_FLIGHT or (stage and rec["status"] == "planned"):
@@ -1015,19 +1040,20 @@ class Driver(mainred.MainRed):
         return sorted(found, key=age)
 
     def disk_guard(self, why: str) -> bool:
-        """Before a build start and every cycle: under [limits] min_free_gb free on the repo's drive, delete cargo's
-        incremental dirs oldest first until above it. False (log disk_low, state disk_low for the verdict) when still
-        under: no new build starts."""
+        """Before a build start and every cycle: under [limits] prune_at_gb (or min_free_gb, the larger) free on the
+        repo's drive, delete cargo's incremental dirs of idle slots oldest first until above it. False (log disk_low,
+        state disk_low for the verdict) when still under min_free_gb: no new build starts."""
         if self.min_free_gb <= 0:
             return True
         free = before = self.free_gb()
-        if free < self.min_free_gb:
+        goal = max(self.min_free_gb, self.prune_at_gb)
+        if free < goal:
             n = 0
             for d in self.incremental_dirs():
                 shutil.rmtree(d, ignore_errors=True)
                 n += 1
                 free = self.free_gb()
-                if free >= self.min_free_gb:
+                if free >= goal:
                     break
             if n:
                 self.log(None, "disk_pruned", f"freed {max(0.0, free - before):.1f} GB from {n} incremental dirs "
@@ -1086,7 +1112,10 @@ class Driver(mainred.MainRed):
                 elif self.dash_due and time.monotonic() - self.last_dash >= DASH_EVERY_S:
                     self.dash()
                 time.sleep(POLL_S)
-        except BaseException:
+        except KeyboardInterrupt:  # the owner's stop: every builder goes too
+            self.abort(owner=True)
+            raise
+        except BaseException:  # a crash: detached builds keep running for the next drive to re-adopt
             self.abort()
             raise
 
@@ -1246,6 +1275,8 @@ class Driver(mainred.MainRed):
             if job.kind in POLISH_KINDS:
                 self.reap_polish(job)
             elif job.kind == "land":
+                if job.slot >= 0:
+                    self.prune_slot(self.ov / "target" / f"land-{job.slot}")
                 if job is self.land_job:
                     self.land_job = None
                 else:
@@ -1253,10 +1284,24 @@ class Driver(mainred.MainRed):
                 self.after_land(job)
             else:
                 del self.jobs[job.fn]
+                self.job_ended(job)
                 {"build": self.after_build, "conflict": self.after_conflict,
                  "probe_mutate": self.after_probe_mutate,
                  "verify": self.after_verify}.get(job.kind, self.after_review)(job)
         return self.reap_gates() or done
+
+    def job_ended(self, job: Job) -> None:
+        """A slot job ended: its pid file goes, and a local job's slot loses cargo's incremental dirs (the next
+        build of that slot recompiles the workspace crates, never the deps), so finished jobs do not fill the disk."""
+        drivelock.drop_job(self.ov, job.fn)
+        if not job.host and job.fn in self.slots:
+            self.prune_slot(self.slot_dir(self.slots[job.fn]))
+
+    @staticmethod
+    def prune_slot(d: Path) -> None:
+        for sub in ("debug/incremental", "release/incremental"):
+            if (d / sub).is_dir():
+                shutil.rmtree(d / sub, ignore_errors=True)
 
     def gate_async(self, job: Job) -> None:
         """The pre-review merge and gate (sync_problem) for a finished build, in a worker thread; reap_gates hands
@@ -1329,6 +1374,8 @@ class Driver(mainred.MainRed):
                 proc = self.remote.start(rslot, fid, attempt, base, bool(self.custom_cmd(kind)), brief, cwd,
                                          self.repo, self.main, self.ov / "runs", self.scripts, STANDARD.parent,
                                          lambda c: spawn(c, self.repo, out, env), worker.env(base, {}))
+            elif self.detach and kind in DETACH_KINDS:
+                proc = self.spawn_detached(fid, kind, attempt, cmd, cwd, out)
             else:
                 proc = spawn(cmd, cwd, out, worker.env(cmd, self.slot_env(fid)))
         except OSError as e:
@@ -1341,6 +1388,57 @@ class Driver(mainred.MainRed):
         # a remote build's output arrives at its end (remote.py), so only a local one gets the idle watchdog
         self.jobs[fid] = job if job.host else self.watch(job, cmd)
 
+    def spawn_detached(self, fid: str, kind: str, attempt: int, cmd: list[str], cwd: Path,
+                       out: Path) -> subprocess.Popen:
+        """A local build in worker.py's launcher, out of drive's job (its own job, same memory cap), with a pid file
+        a restarted drive re-adopts. A job above drive that refuses breakaway: started attached (log detach_off)."""
+        rc = out.with_suffix(".rc")
+        rc.unlink(missing_ok=True)
+        wrapped = worker.launch_cmd(cmd, float(self.cfg["limits"].get("proc_mem_gb") or 0), rc)
+        env = worker.env(cmd, self.slot_env(fid))
+        try:
+            proc = spawn(wrapped, cwd, out, env, detach=not self.detach_off)
+        except OSError as e:
+            if self.detach_off or os.name != "nt":
+                raise
+            self.detach_off = True
+            self.log(fid, "detach_off", f"breakaway refused ({e}): builders run inside drive's job and die with it")
+            proc = spawn(wrapped, cwd, out, env)
+        if not isinstance(proc.pid, int):  # a stand-in process (tests): nothing to re-adopt
+            return proc
+        model = cmd[cmd.index("--model") + 1] if "--model" in cmd[:-1] else ""
+        drivelock.write_job(self.ov, fid, {
+            "pid": proc.pid, "start": drivelock.proc_start(proc.pid) or "", "kind": kind, "out": str(out),
+            "rc": str(rc), "started": time.time(), "attempt": attempt, "slot": self.slots.get(fid, -1),
+            "model": model, "stream": "stream-json" in cmd, "drive": getattr(self, "drive_id", "")})
+        return proc
+
+    def adopt_jobs(self) -> list[int]:
+        """At start (single_start): every live detached build a previous drive left becomes a running job again,
+        with its slot re-claimed and its deadline counted from its own start. Returns the adopted pids."""
+        pids = []
+        for fid, rec in self.adopt.items():
+            started = time.monotonic() - max(0.0, time.time() - float(rec.get("started") or time.time()))
+            out = Path(rec["out"])
+            job = Job(fid, str(rec.get("kind") or "build"), drivelock.Adopted(rec), out, started,
+                      started + self.timeout_s, int(rec.get("attempt") or 1), model=str(rec.get("model") or ""))
+            if rec.get("stream"):
+                job.stream = worker.Stream(out, started)
+            self.jobs[fid] = job
+            if int(rec.get("slot", -1)) >= 0:
+                self.slots[fid] = int(rec["slot"])
+                self.st.setdefault("slots", {})[fid] = int(rec["slot"])
+            self.slot(fid)  # its marker now names this drive
+            rec["drive"] = self.drive_id
+            drivelock.write_job(self.ov, fid, rec)
+            self.set(fid, status="building")
+            pids.append(job.proc.pid)
+            self.log(fid, "build_adopted", f"pid {job.proc.pid} attempt {job.attempt} kept running across the drive "
+                     "restart")
+            self.say(f"adopted {fid}: its builder (pid {job.proc.pid}) kept running")
+        self.adopt.clear()
+        return pids
+
     def span(self, branch: str) -> list[str]:
         """`git diff` arguments for what branch changes itself: main...branch, or main + stacked deps..branch."""
         return stack.diff_range(self, branch)
@@ -1348,6 +1446,7 @@ class Driver(mainred.MainRed):
     def kill(self, job: Job) -> None:
         """Stop a job dropped from self.jobs (a stack reset): its process tree, and its remote slot."""
         kill_tree(job.proc)
+        drivelock.drop_job(self.ov, job.fn)
         if job.host and self.remote:
             self.remote.after(job.fn, -1, True, job.out.with_suffix(".err"))
 
@@ -1791,17 +1890,20 @@ class Driver(mainred.MainRed):
         return self.ov / "target" / f"slot-{k}"
 
     def single_start(self) -> None:
-        """One drive per repo, at start (the lock is held): kill a dead drive's leftover workers, then restore the
-        persisted slot map, dropping a slot given twice or held by another live drive."""
+        """One drive per repo, at start (the lock is held): restore the persisted slot map (dropping a slot given
+        twice or held by another live drive), re-adopt the live detached builds a previous drive left, then kill the
+        dead drive's other leftover workers."""
         self.drive_id = drivelock.me()
-        for pid in drivelock.kill_orphans(self.repo, lambda pid, cmd: self.log(None, "orphan_killed",
-                                                                               f"pid {pid}: {cmd[:300]}")):
-            self.say(f"killed orphan pid {pid} (a dead drive's worker)")
         kept, notes = drivelock.check_slots(self.st.get("slots", {}), self.ov / "target", self.drive_id)
         for note in notes:
             self.log(None, "slot_dropped", note)
         self.slots = dict(kept)
         self.st["slots"] = dict(kept)
+        adopted = self.adopt_jobs() if getattr(self, "adopt", None) else []
+        for pid in drivelock.kill_orphans(self.repo, lambda pid, cmd: self.log(None, "orphan_killed",
+                                                                               f"pid {pid}: {cmd[:300]}"),
+                                          adopted=set(adopted)):
+            self.say(f"killed orphan pid {pid} (a dead drive's worker)")
         self.clear_git_locks()
 
     def clear_git_locks(self, min_age_s: float = 60.0) -> None:
@@ -3356,15 +3458,20 @@ class Driver(mainred.MainRed):
         print(f"DRIVE EXIT {code} {self.summary()}", flush=True)
         return code
 
-    def abort(self) -> None:
+    def abort(self, owner: bool = False) -> None:
         """Kill every worker tree this run started; their functions go back to planned, marked to resume at their
-        stage when the next drive starts (resume_mark)."""
+        stage when the next drive starts (resume_mark). A detached build (pid file) is left running unless owner:
+        the next drive re-adopts it."""
         self.periodic.stop()
         if self.remote:
             self.remote.abort()  # what remote slots run on their host
         jobs = [*self.jobs.values(), *self.land_jobs()]
+        left = {} if owner else drivelock.read_jobs(self.ov)
+        kept = [j for j in jobs if j.kind in DETACH_KINDS and j.fn in left and j.proc.poll() is None]
+        jobs = [j for j in jobs if j not in kept]
         for job in jobs:
             kill_tree(job.proc)
+            drivelock.drop_job(self.ov, job.fn)
         for fid in [*(j.fn for j in jobs), *self.land_queue]:
             rec = self.st["functions"].get(fid)
             if rec and rec["status"] in IN_FLIGHT:
@@ -3379,6 +3486,8 @@ class Driver(mainred.MainRed):
             pass
         if jobs:
             self.say(f"stopped; killed {len(jobs)} worker tree(s)")
+        if kept:
+            self.say(f"left {len(kept)} detached build(s) running for the next drive: {', '.join(j.fn for j in kept)}")
 
     # ---- manager commands ----
     def reset(self, fid: str) -> None:
@@ -3593,8 +3702,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--evidence", metavar="FILE", help="blind review file backing --mark-proven")
     ap.add_argument("--repolish", action="store_true",
                     help="reset the polish state so the next run audits again with the current checklist, then exit")
+    ap.add_argument("--stop", action="store_true",
+                    help="the owner's stop: kill the running supervise/drive and every builder it started, then exit")
+    ap.add_argument("--keep-builders", action="store_true",
+                    help="with --stop: leave detached builders running for the next drive to re-adopt (a restart)")
     args = ap.parse_args(argv)
     repo = Path(os.path.abspath(args.repo))
+    if args.stop:
+        print(f"drive: {stop(repo, args.keep_builders)}", flush=True)
+        return 0
     admin = next((f for f, on in (("--reset", args.reset), ("--mark-proven", args.mark_proven),
                                   ("--repolish", args.repolish)) if on), "")
     held = ""
@@ -3633,6 +3749,31 @@ def main(argv: list[str] | None = None) -> int:
         if held == "taken":
             drivelock.release(repo)
     return 1
+
+
+def stop(repo: Path, keep_builders: bool = False) -> str:
+    """Kill the lock holder (supervise.py or drive.py) and, unless keep_builders, every detached builder named in
+    .overhaul/jobs (they outlive a crashed or restarted drive on purpose). keep_builders kills the holder by pid only:
+    its kill-on-close job takes its attached children; detached builders run on and the next drive re-adopts them."""
+    ov = repo / ".overhaul"
+    rec = drivelock.holder(repo)
+    left = drivelock.read_jobs(ov)
+    live = {fid: job for fid, job in left.items() if drivelock.job_live(job)}  # before the holder's tree goes
+    said = []
+    if rec and drivelock.live(int(rec.get("pid") or 0), str(rec.get("start") or "")):
+        drivelock.kill_pid(int(rec["pid"]), tree=not keep_builders)
+        said.append(f"killed {rec.get('owner') or 'drive'} pid {rec['pid']}")
+    else:
+        said.append("no drive running")
+    if keep_builders:
+        said.append(f"{len(live)} detached builder(s) left running for the next drive: {', '.join(live) or '-'}")
+    else:
+        for fid, job in left.items():
+            if fid in live and drivelock.job_live(job):
+                drivelock.kill_pid(int(job["pid"]))
+            drivelock.drop_job(ov, fid)
+        said.append(f"killed {len(live)} detached builder(s)" + (f": {', '.join(live)}" if live else ""))
+    return "; ".join(said)
 
 
 def take_drive_lock(repo: Path, admin: str = "") -> str:

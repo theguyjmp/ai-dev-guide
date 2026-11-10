@@ -1,5 +1,23 @@
 # overhaul-build changelog
 
+## Builders outlive drive; disk never reaches the floor (pass C), 2026-11-10
+the pilot project overnight 2026-11-09 22:25 -> 11-10 07:00 (log.jsonl): 73 of 248 builds were killed by drive restarts (every
+code or config fix needed one), and the 40 GB `min_free_gb` floor blocked every local build.
+- Local builds start detached (`[harness] detach_builders`, default true): CREATE_BREAKAWAY_FROM_JOB out of drive's
+  kill-on-close job (memcap now sets JOB_OBJECT_LIMIT_BREAKAWAY_OK on it) into worker.py's launcher, which puts itself
+  in its own job with the same `proc_mem_gb` cap and writes the builder's exit code to `<run>.rc`. A pid file
+  `.overhaul/jobs/<id>.json` (pid, start, kind, out, rc, started, slot, attempt, model) is written per build. A job
+  above drive that refuses breakaway: builders run attached as before (`detach_off`).
+- A new drive re-adopts each live pid file as a running job (drivelock.Adopted, deadline from its own start, slot
+  marker re-claimed, `build_adopted`), and kill_orphans spares adopted trees; dead ones go through the normal resume.
+  A crash leaves detached builds running; Ctrl-C and `drive.py --stop` (new) kill them; `--stop --keep-builders` is
+  the restart path.
+- A job's or land's slot loses `debug|release/incremental` when it ends (deps stay); the disk guard prunes idle slots
+  at `[limits] prune_at_gb` (default 80) with builds still starting, so the 40 GB floor is not reached.
+- Tests: tests/test_detached_builders.py (a 12 s fake builder survives a drive crash and the next drive adopts it with
+  one build_start; `--stop` kills it; launcher rc; Adopted; kill_orphans keeps adopted trees; prune_at and slot
+  pruning). test_single_drive's bare driver gains `gating` (6 tests red on main 36a4f09).
+
 ## Stacked starts, 2026-11-09
 Owner 2026-11-09: 40 slots, at least 10 functions/h, prove it. rate_sim.py (overhaul-trial; the pilot project's real dependency
 graph and 58 measured cycles, briefs/rate-proof.md): with only proven deps the rate is width-bound at ~7.5/h whatever

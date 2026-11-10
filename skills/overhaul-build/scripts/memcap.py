@@ -5,8 +5,10 @@ starts later (builders, polish and fix agents, land.py and its acceptance runs, 
 their cargo, rustc and test binaries) is in the same job, so any one process that passes the cap fails its next
 allocation instead of starving the machine. With kill_on_close (drive.py and supervise.py) the same job also has
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: one job, both limits, so killing drive kills every builder, reviewer, land and
-cargo/test process it started (measured 2026-11-09: builders of a killed drive kept running). Elsewhere it does
-nothing. ctypes only.
+cargo/test process it started (measured 2026-11-09: builders of a killed drive kept running). That job also allows
+breakaway (JOB_OBJECT_LIMIT_BREAKAWAY_OK): only a child started with CREATE_BREAKAWAY_FROM_JOB leaves it, which drive.py
+does for a local builder (worker.py's launcher puts it in its own job with the same cap), so a drive crash or restart
+no longer kills builds in flight. Elsewhere it does nothing. ctypes only.
 
 cap_self also sets OVERHAUL_PROC_MEM_GB so children (land.py) can name the cap: note() turns an allocation failure in
 a command's output into "process memory cap 12 GB hit: <tail>".
@@ -31,6 +33,7 @@ _job = None  # the job handle; kept open for the life of the process
 
 
 KILL_ON_CLOSE = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+BREAKAWAY_OK = 0x800  # JOB_OBJECT_LIMIT_BREAKAWAY_OK: a child started with CREATE_BREAKAWAY_FROM_JOB may leave
 PROCESS_MEMORY = 0x100  # JOB_OBJECT_LIMIT_PROCESS_MEMORY
 
 
@@ -72,7 +75,7 @@ def cap_self(gb: float, kill_on_close: bool = False) -> str:
     if not job:
         return f"process memory cap not set: CreateJobObject error {ctypes.get_last_error()}"
     info = Extended()
-    info.Basic.LimitFlags = (PROCESS_MEMORY if gb > 0 else 0) | (KILL_ON_CLOSE if kill_on_close else 0)
+    info.Basic.LimitFlags = (PROCESS_MEMORY if gb > 0 else 0) | (KILL_ON_CLOSE | BREAKAWAY_OK if kill_on_close else 0)
     info.ProcessMemoryLimit = int(gb * 1024 ** 3)
     if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):  # extended limits
         return f"process memory cap not set: SetInformationJobObject error {ctypes.get_last_error()}"

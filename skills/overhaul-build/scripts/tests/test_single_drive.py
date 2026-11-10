@@ -192,7 +192,7 @@ def bare_driver(repo: Path, **extra):
     drv = drive.Driver.__new__(drive.Driver)
     drv.repo, drv.ov, drv.main = repo, repo / ".overhaul", "main"
     drv.ov.mkdir(parents=True, exist_ok=True)
-    drv.jobs, drv.slots, drv.st = {}, {}, {"functions": {}}
+    drv.jobs, drv.slots, drv.st, drv.gating = {}, {}, {"functions": {}}, {}
     for k, v in extra.items():
         setattr(drv, k, v)
     return drv

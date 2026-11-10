@@ -1553,6 +1553,8 @@ class TestDiskGuard(Toy):
 
     def test_prunes_oldest_incremental_dirs_until_above_the_floor(self):
         repo = self.make_repo()
+        put(repo / "overhaul.toml", (repo / "overhaul.toml").read_text(encoding="utf-8").replace(
+            "[limits]\n", "[limits]\nprune_at_gb = 0\n"))  # the floor alone (prune_at_gb: test_detached_builders)
         dirs = self.setup_dirs(repo)
         drv = self.driver(repo, dirs, 10.0)
         self.assertTrue(drv.disk_guard("cycle"))
