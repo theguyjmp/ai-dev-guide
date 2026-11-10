@@ -629,6 +629,60 @@ NEEDS = CHAIN.replace("| files | status |", "| files | needs | status |").replac
     "|-------|--------|", "|-------|-------|--------|").replace("| planned |", "| {n} | planned |")
 
 
+WIDE = CHAIN.replace("| F2 | 1 | alpha | F1 |", "| F2 | 1 | alpha | - |").replace(
+    "| F3 | 1 | alpha | F2 |", "| F3 | 1 | alpha | F2 |").replace("| F4 | 1 | alpha | F1 |", "| F4 | 1 | alpha | F2 |")
+
+
+class TestCriticalPath(Toy):
+    """Pass C: rows start and land in order of how many not-proven rows wait on them; st["width"] counts ready rows
+    beside free slots and goes red after [harness] width_red_min with too few (pilot2026-11-09)."""
+
+    def driver(self, repo: Path) -> drive.Driver:
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        return drv
+
+    def test_ready_starts_the_row_most_others_wait_on_first(self):
+        drv = self.driver(self.make_repo(functions=WIDE, max_parallel=4))
+        self.assertEqual(drv.waiters(), {"F1": 0, "F2": 2, "F3": 0, "F4": 0})
+        self.assertEqual([f.id for f in drv.ready()], ["F2", "F1"])  # F2 unblocks F3 and F4; F1 nothing
+        drv = self.driver(self.make_repo(functions=CHAIN, max_parallel=4))
+        self.assertEqual(drv.waiters()["F1"], 3)  # F2, F4 directly and F3 through F2
+
+    def test_land_queue_orders_the_same_way(self):
+        drv = self.driver(self.make_repo(functions=WIDE, max_parallel=4))
+        drv.land_queue[:] = ["F1", "F2"]
+        with mock.patch.object(drive, "spawn", return_value=SimpleNamespace(poll=lambda: None)):
+            self.assertTrue(drv.pump_land())
+        self.assertEqual((drv.land_job.fn, drv.land_queue), ("F2", ["F1"]))
+
+    def test_one_slot_builds_the_unblocking_row_first(self):
+        repo = self.make_repo(functions=WIDE, max_parallel=1)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        ev = [(e["fn"], e["event"]) for e in self.events(repo)]
+        self.assertLess(ev.index(("F2", "build_start")), ev.index(("F1", "build_start")))
+
+    def test_width_red_after_30_min_names_the_rows_that_unblock_most(self):
+        drv = self.driver(self.make_repo(functions=WIDE, max_parallel=4))
+        drv.width_step()
+        w = drv.st["width"]
+        self.assertEqual((w["ready"], w["free"], w["slots"], w["red"]), (2, 4, 4, False))
+        self.assertEqual(w["unblock"], [{"id": "F2", "waiting": 2, "status": "planned"}])
+        drv.width_step()  # throttled: no recount inside WIDTH_EVERY_S
+        drv.width_since -= 31 * 60
+        drv.last_width = float("-inf")
+        drv.width_step()
+        self.assertTrue(drv.st["width"]["red"])
+        self.assertEqual(drv.st["width"]["short_min"], 31)
+        red = [e for e in self.events(drv.repo) if e["event"] == "width_red"]
+        self.assertEqual(len(red), 1)
+        self.assertIn("ready 2 < free 4 for 31 min; unblock most: F2 (2 waiting, planned)", red[0]["detail"])
+        drv = self.driver(self.make_repo(functions=WIDE, max_parallel=2))
+        drv.width_step()  # ready 2 fills 2 free slots: not short
+        self.assertEqual((drv.st["width"]["ready"], drv.width_since), (2, None))
+
+
 class TestNeeds(Toy):
     """v3: a `stub` dep does not block (its stub is on main); a `behaviour` dep must land first."""
 

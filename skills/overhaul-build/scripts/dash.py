@@ -130,6 +130,10 @@ def render(p, events, v, t_now):
              (f'<span class="badge {verdict}">{verdict}</span>', esc(when(vd.parse_t(v.get("t")))) or "no verdict yet")]
     if per is not None:
         tiles.append((fmt_tokens(per), f"tokens per proven function ({fmt_tokens(tokens)} logged)"))
+    width = v.get("width") if isinstance(v.get("width"), dict) else None
+    if width:  # drive.py's ready rows beside free builder slots; red when too few for 30 min
+        tiles.append((f'<span class="{"red" if width.get("red") else ""}">{vd.as_int(width.get("ready"))}</span>',
+                      f"ready, {vd.as_int(width.get('free'))} of {vd.as_int(width.get('slots'))} slots free"))
     if p["state"].get("cycle") is not None:
         tiles.append((esc(p["state"].get("cycle")), "cycle"))
     counts = {}

@@ -151,6 +151,9 @@ REVIEW_MAX_CALLS = 20
 REASON_MAX = 1500
 POLL_S = 0.25
 DASH_EVERY_S = 15
+WIDTH_RED_MIN = 30  # [harness] width_red_min: ready rows under free slots this long is `width red`
+WIDTH_EVERY_S = 10  # width_step runs at most this often (startable() walks the plan)
+WIDTH_NAMES = 3  # the width red line names this many rows that unblock the most
 GATE_PRIORITY = priority.popen_kwargs(priority.NORMAL)  # the pre-review gate: above the builders
 REQUEST_POLL_S = 30.0  # how often the loop looks for .overhaul/requests/reset-<id> (live re-plan)
 REQUESTS_DIR = "requests"
@@ -746,6 +749,10 @@ class Driver(mainred.MainRed):
         self.last_request_check = 0.0  # live re-plan: .overhaul/requests/ is looked at every REQUEST_POLL_S
         self.refused_plan = ""  # the main sha whose plan failed plan_validate: not reloaded again
         self.min_free_gb = float(lim.get("min_free_gb", MIN_FREE_GB) or 0)  # 0: no disk guard
+        self.width_red_s = float(har.get("width_red_min", WIDTH_RED_MIN) or 0) * 60
+        self.width_since: float | None = None  # monotonic time ready rows first fell under free slots
+        self.last_width = float("-inf")
+        self.wait_cache: tuple[object, dict[str, int]] = (None, {})
 
     # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
@@ -1031,6 +1038,7 @@ class Driver(mainred.MainRed):
                 changed = self.reap() or changed
                 changed = self.pump_land() or changed
                 changed = self.launch() or changed
+                self.width_step()
                 changed = self.probe_step() or changed
                 changed = self.polish_step() or changed
                 changed = self.arch_step() or changed
@@ -1071,29 +1079,70 @@ class Driver(mainred.MainRed):
         shared = set(module_shared(section))
         return [p for p in (f.files or module_paths(section, f.module)) if p not in shared]
 
-    def ready(self) -> list[Fn]:
-        """Functions to launch now: planned, every blocking dep proven, retries left, and no file overlap with a
-        function in flight (building, in review or landing) or with one launched before it in this pass. A dep the
-        `needs` column marks `stub` does not block: its stub is on main from the plan commit.
+    def waiters(self) -> dict[str, int]:
+        """fid -> how many not-proven rows wait on it through `blocking` deps, directly or through others: the
+        critical-path weight. Cached until a row is proven or the plan's deps change."""
+        recs = self.st["functions"]
+        proven = frozenset(fid for fid, r in recs.items() if r.get("status") == "proven")
+        key = (proven, tuple((f.id, tuple(f.blocking)) for f in self.order))
+        if self.wait_cache[0] == key:
+            return self.wait_cache[1]
+        rdeps: dict[str, list[str]] = {}
+        for f in self.order:
+            for d in f.blocking:
+                if d != f.id:
+                    rdeps.setdefault(d, []).append(f.id)
+        out: dict[str, int] = {}
+        for f in self.order:
+            seen: set[str] = set()
+            todo = list(rdeps.get(f.id, []))
+            while todo:
+                cur = todo.pop()
+                if cur not in seen and cur != f.id:
+                    seen.add(cur)
+                    todo.extend(rdeps.get(cur, []))
+            out[f.id] = sum(1 for x in seen if x not in proven)
+        self.wait_cache = (key, out)
+        return out
 
-        Two builders that edit one file fail to land with a merge conflict, so a function waits while an in-flight
-        function's claimed files overlap its own. A plan with a `files` column runs one module's functions at once;
-        without it a function claims its module's paths, one function per module at a time."""
+    def rank(self, fid: str) -> tuple[int, int, int, str]:
+        """Start and land order: most rows waiting first, then phase, then plan order (id). Unknown ids (a polish
+        or fix pass) sort after the rows that unblock others, by id."""
+        f = self.fns.get(fid)
+        if f is None:
+            return (0, 1 << 30, 1 << 30, fid)
+        return (-self.waiters().get(fid, 0), *phase_key(f), fid)
+
+    def startable(self, busy: set[str]) -> list[Fn]:
+        """Planned rows that may build now, resumed builds first, then critical-path order (rank): every blocking
+        dep proven, not in flight, retries left, not held on a fix, its module not audit-locked and not past the
+        phase barrier. File claims are left to ready(), so a resumed build claims its files before a fresh one."""
         recs = self.st["functions"]
         proven = {fid for fid, r in recs.items() if r["status"] == "proven"}
         # the phase barrier: nothing past the lowest phase that still has an unproven function starts
         open_phase = min((phase_key(f)[0] for f in self.order if f.id not in proven), default=0)
         if self.barrier and self.phase_polish and (polishing := self.polish_phase()) is not None:
             open_phase = min(open_phase, polishing)  # ... and phase N+1 waits for phase N's polish and probes
-        busy, locked = self.busy(), self.audit_locked()
+        locked = self.audit_locked()
+        out = [f for f in self.order
+               if not (recs[f.id]["status"] != "planned" or f.id in busy or f.module in locked
+                       or recs[f.id].get("blocked_on") or (self.barrier and phase_key(f)[0] > open_phase)
+                       or not all(d in proven for d in f.blocking)
+                       or recs[f.id]["attempts"] > self.budget(f.id))]  # budget() walks the graph: last
+        return sorted(out, key=lambda f: (not recs[f.id].get("resume"), self.rank(f.id)))  # resumed work first
+
+    def ready(self) -> list[Fn]:
+        """Functions to launch now, critical path first: startable() rows with no file overlap with a function in
+        flight (building, in review or landing) or with one launched before it in this pass. A dep the `needs`
+        column marks `stub` does not block: its stub is on main from the plan commit.
+
+        Two builders that edit one file fail to land with a merge conflict, so a function waits while an in-flight
+        function's claimed files overlap its own. A plan with a `files` column runs one module's functions at once;
+        without it a function claims its module's paths, one function per module at a time."""
+        busy = self.busy()
         taken = [self.claims(self.fns[fid]) for fid in busy if fid in self.fns]
         ready: list[Fn] = []
-        for f in self.order:
-            if (recs[f.id]["status"] != "planned" or f.id in busy or f.module in locked
-                    or recs[f.id]["attempts"] > self.budget(f.id)
-                    or recs[f.id].get("blocked_on") or (self.barrier and phase_key(f)[0] > open_phase)
-                    or not all(d in proven for d in f.blocking)):
-                continue
+        for f in self.startable(busy):
             mine = self.claims(f)
             if any(paths_overlap(mine, other) for other in taken):
                 continue
@@ -1101,12 +1150,39 @@ class Driver(mainred.MainRed):
             ready.append(f)
         return ready
 
+    def width_step(self) -> None:
+        """Record st["width"] for verdict.py and dash.py: `ready` rows (startable, deps proven, not in flight)
+        beside free builder slots. Ready under free slots for [harness] width_red_min is `width red`, naming the
+        not-proven rows that unblock the most (pilot2026-11-09: ~9 of 120 rows ready, slots idle)."""
+        now = time.monotonic()
+        if now - self.last_width < WIDTH_EVERY_S:
+            return
+        self.last_width = now
+        n = len(self.startable(self.busy()))
+        free = max(0, self.max_parallel - len(self.jobs))
+        if n >= free or self.red_hold():
+            self.width_since = None
+        elif self.width_since is None:
+            self.width_since = now
+        short_s = 0.0 if self.width_since is None else now - self.width_since
+        red = self.width_since is not None and short_s >= self.width_red_s
+        recs, w = self.st["functions"], self.waiters()
+        top = sorted((fid for fid, c in w.items() if c and recs.get(fid, {}).get("status") != "proven"),
+                     key=self.rank)[:WIDTH_NAMES]
+        unblock = [{"id": fid, "waiting": w[fid], "status": recs[fid]["status"]} for fid in top]
+        prev = self.st.get("width") or {}
+        self.st["width"] = {"ready": n, "free": free, "slots": self.max_parallel, "short_min": round(short_s / 60),
+                            "red": red, "unblock": unblock, "t": now_iso()}
+        if red and not prev.get("red"):
+            names = ", ".join(f"{u['id']} ({u['waiting']} waiting, {u['status']})" for u in unblock) or "none"
+            self.log(None, "width_red", f"ready {n} < free {free} for {round(short_s / 60)} min; "
+                                         f"unblock most: {names}")
+
     def launch(self) -> bool:
         launched = False
         if self.red_hold():  # main red, or stopping for the manager
             return False
-        recs = self.st["functions"]
-        ready = sorted(self.ready(), key=lambda f: not recs[f.id].get("resume"))  # resumed work first
+        ready = self.ready()  # resumed work first, then critical-path order (startable)
         if ready and len(self.jobs) < self.max_parallel and not self.disk_guard("build start"):
             return False
         for f in ready:
@@ -2052,6 +2128,7 @@ class Driver(mainred.MainRed):
         the first queued function whose footprint (files and modules) overlaps none of theirs starts; when it
         commits after them it re-merges main and reruns only what their landed footprints affect."""
         router.hold_lands(self)  # rows that rerun a test failing on clean main wait off the queue for its fix
+        self.land_queue.sort(key=self.rank)  # critical path first, as builds start (stable within a rank)
         flying = self.land_jobs()
         if (not self.land_queue or len(flying) >= self.max_lands or any(j.kind != "land" for j in flying)
                 or self.st.get("main_red")):
