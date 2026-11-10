@@ -63,6 +63,7 @@ TIMEOUT_MIN = 45.0  # [harness.remote] timeout_min: a remote build's deadline (r
 HB_TAG = "remote-hb"
 LOG_FETCH_S = 60
 HOST_LOG = []  # host side: the job's log path, once known
+LIMITS_FILE = ".claude/write-limits.json"  # one pass's write limits in a builder worktree (write_guard.py)
 
 
 # ---- host side: runs on the second machine as `python -`, stdlib only ----------------------------------------------
@@ -155,23 +156,51 @@ def fresh_worktree(repo, wt, branch, sha):
     return "" if p.returncode == 0 else f"git worktree add {wt} failed: {(p.stderr or p.stdout).strip()[:300]}"
 
 
-def lint_hook(wt, script):
-    """The PostToolUse lint hook drive.py gives a local worktree, pointed at the shipped lint_hook.py."""
+def lint_hook(wt, script, guard=""):
+    """The hooks drive.py gives a builder worktree (local or on the host): the PostToolUse lint hook (lint_hook.py)
+    and, when guard names write_guard.py, the PreToolUse write limits hook. Kept out of git through info/exclude;
+    skipped when the project tracks its own settings.json. A stale write-limits.json is removed (set_limits)."""
     tracked = hgit("-C", wt, "ls-files", "--error-unmatch", ".claude/settings.json").returncode == 0
     if not Path(script).is_file() or tracked:
         return
-    hook = {"type": "command", "command": f'"{Path(sys.executable).as_posix()}" "{Path(script).as_posix()}"',
-            "timeout": 90}
+    python = Path(sys.executable).as_posix()
+    hooks = {"PostToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [
+        {"type": "command", "command": f'"{python}" "{Path(script).as_posix()}"', "timeout": 90}]}]}
+    if guard and Path(guard).is_file():
+        hooks["PreToolUse"] = [{"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [
+            {"type": "command", "command": f'"{python}" "{Path(guard).as_posix()}"', "timeout": 30}]}]
     target = Path(wt) / ".claude" / "settings.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps({"hooks": {"PostToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [hook]}]}},
-                                 indent=2), encoding="utf-8")
+    target.write_text(json.dumps({"hooks": hooks}, indent=2), encoding="utf-8")
+    set_limits(wt, None)
     exclude = Path(hgit("-C", wt, "rev-parse", "--git-path", "info/exclude").stdout.strip())
     exclude = exclude if exclude.is_absolute() else Path(wt) / exclude
     exclude.parent.mkdir(parents=True, exist_ok=True)
-    if "/.claude/settings.json" not in (exclude.read_text(encoding="utf-8") if exclude.is_file() else ""):
+    text = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+    missing = [p for p in ("/.claude/settings.json", f"/{LIMITS_FILE}") if p not in text]
+    if missing:
         with exclude.open("a", encoding="utf-8") as fh:
-            fh.write("\n/.claude/settings.json\n")
+            fh.write("\n" + "\n".join(missing) + "\n")
+
+
+def read_limits(wt):
+    """The write limits drive.py set in a laptop worktree for this pass, or None."""
+    try:
+        return json.loads((Path(wt) / LIMITS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def set_limits(wt, limits):
+    """Write one pass's write limits ({"job", "allowed", "visibility"}, repo-relative) for write_guard.py into the
+    worktree, or remove them (None). Only where lint_hook installed the guard: elsewhere the file is not
+    excluded from git and a builder's `git add -A` would commit it."""
+    path, settings = Path(wt) / LIMITS_FILE, Path(wt) / ".claude" / "settings.json"
+    if limits is None or "write_guard.py" not in (settings.read_text(encoding="utf-8") if settings.is_file() else ""):
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(limits, indent=2), encoding="utf-8")
 
 
 def account_problem(code, out):
@@ -221,7 +250,9 @@ def host_run(job, work, wt, pidfile, env, stats):
         say(why)
         return OFFLINE
     if job.get("lint_hook"):
-        lint_hook(wt, job["lint_hook"])
+        lint_hook(wt, job["lint_hook"], job.get("write_guard") or "")
+        if job.get("write_limits"):
+            set_limits(wt, job["write_limits"])
     brief = work / "briefs" / f"{job['fid']}.md"
     brief.parent.mkdir(parents=True, exist_ok=True)
     brief.write_text(job["brief"], encoding="utf-8")
@@ -385,6 +416,8 @@ class Pool:
                "brief": self.map_text(Path(brief).read_text(encoding="utf-8"), pairs),
                "ship": self.ship(dirs),
                "lint_hook": f"{self.work}/skill/scripts/lint_hook.py" if lint.is_file() else "",
+               "write_guard": f"{self.work}/skill/scripts/write_guard.py",
+               "write_limits": read_limits(wt),
                # laptop side only
                "local": {"repo": str(repo), "wt": str(wt), "main": main, "git": self.git, "ssh": self.ssh,
                          "python": self.python, "idle_s": self.idle_s}}
