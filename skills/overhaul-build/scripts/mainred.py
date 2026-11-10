@@ -26,6 +26,9 @@ _PATH = re.compile(r"(?<![\w.-])((?:[A-Za-z]:)?[\w.-]*(?:[\\/][\w.-]+)+\.\w+)")
 _FILE = re.compile(r"(?<![\w./\\-])((?:[\w.-]+[\\/])+[\w.-]+\.\w+)")
 
 
+# Reasons that say something about the row (its size, its plan), not the environment: three of them in the window
+# are not a reason to stop every launch. A builder crash (rc != 0, same panic) still stops the build.
+ROW_LEVEL = ("left no committed change", "timed out after", "BLOCKED")
 NODE_RE = re.compile(r"tests/[\w./-]+\.(?:rs|py|js|ts)::\w+")
 
 
@@ -216,6 +219,8 @@ class MainRed:
             node = None if check else NODE_RE.search(reason)  # a whole-tree check green on main still stops
             if node and self.main_test_ok(node.group(0)):
                 return self.red_clear_systemic(key, f"{node.group(0)} is green on clean {self.main}")
+            if not check and not node and any(r in reason for r in ROW_LEVEL):  # plan rounds own these rows
+                return self.red_clear_systemic(key, "row-level reason, no shared check or test is red on main")
             self.red_stop(f"systemic {key}")
             return True
         mr = self.st.get("main_red")
@@ -262,9 +267,10 @@ class MainRed:
 
     # ---- systemic ----
     def red_clear_systemic(self, key: str, why: str) -> bool:
-        """A systemic reason whose check or test is green on clean main is per-branch (or flaky under load): each
-        function keeps its own retry and the build goes on (pilot2026-11-10 03:04: a proven test red in 3
-        worktrees, green on main 3 of 3, stopped every launch for 57 min)."""
+        """A systemic reason with no shared red on main is per-branch (or flaky under load): each function keeps its
+        own retry or needs-plan and the build goes on (pilot2026-11-10: three whole-build stops in one night on a
+        test green on main 03:04 (57 min), builder timeouts 04:35 and 'no committed change' 05:01 (rows BLOCKED on
+        real plan gaps), each stopping every launch while ready rows waited)."""
         self.log(None, "systemic_clear", f"{why}; not stopping: {key}"[:1500])
         return True
 

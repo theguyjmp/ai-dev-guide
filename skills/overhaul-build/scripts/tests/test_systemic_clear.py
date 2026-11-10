@@ -43,10 +43,11 @@ class SystemicClear(unittest.TestCase):
         mainred.MainRed.red_step(d)
         d.red_set.assert_called_once()
 
-    def test_no_test_named_stops_as_before(self):
+    def test_a_row_level_reason_does_not_stop(self):
         d = fake(("key", "", "builder left no committed change"))
         mainred.MainRed.red_step(d)
-        d.red_stop.assert_called_once()
+        d.red_stop.assert_not_called()
+        self.assertEqual(d.log.call_args.args[1], "systemic_clear")
 
 
 if __name__ == "__main__":
