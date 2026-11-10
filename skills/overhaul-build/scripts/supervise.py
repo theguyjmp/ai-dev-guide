@@ -33,6 +33,8 @@ line is logged); 3 rounds used up; 1 error (the line is logged).
 Why live (measured 2026-11-09 15:07 CST on the pilot project): "rate 1.7/h of expected 1.8/h (slots 3, build 10.3m, 10
 builds/land)": 7 functions sat needs-plan with most of 79 planned rows behind them, but an Exit-3 round ran only when
 drive.py exited, and drive kept running while lands trickled, so those rows waited for hours.
+Plan lands are gated: every plan branch (Exit-3 and live rounds) passes plan_land.py (the proven acceptance tests
+its files can break, on the merged branch) after the static gates; red stops the round and main never moves.
 One supervise per repo: it takes .overhaul/drive.lock (drivelock.py) before anything else, and a second start exits at
 once naming the running pid; its drive.py runs under that lock. The memcap job also kills the whole tree (drive, its
 builders, plan-fix agents) when supervise ends.
@@ -62,6 +64,7 @@ import drivelock  # noqa: E402  one drive per repo
 import drive  # noqa: E402
 import memcap  # noqa: E402
 import router  # noqa: E402
+import watchdog  # noqa: E402  5-minute invariants beside the loop
 import worker  # noqa: E402
 
 PROOF_BRIEF = HERE.parent / "references" / "proof-check.md"
@@ -98,7 +101,8 @@ def reserve(ids: list[str], fixing: list[str], per: int = IDS_PER_FIX) -> dict[s
 
 class Supervisor:
     def __init__(self, repo: Path, max_rounds: int = 12, drive_cmd: list[str] | None = None,
-                 validate_cmd: list[str] | None = None, claude_cmd: list[str] | None = None):
+                 validate_cmd: list[str] | None = None, claude_cmd: list[str] | None = None,
+                 plan_land_cmd: list[str] | None = None):
         self.repo = repo
         self.cfg = drive.load_config(repo)
         har = self.cfg["harness"]
@@ -116,6 +120,8 @@ class Supervisor:
         self.log_path = self.ov / "supervise.log"
         self.drive_cmd = drive_cmd or [sys.executable, str(HERE / "drive.py")]
         self.validate_cmd = validate_cmd or [sys.executable, str(HERE / "plan_validate.py")]
+        self.plan_land_cmd = plan_land_cmd or [sys.executable, str(HERE / "plan_land.py")]
+        self.test_timeout = float(har.get("plan_land_timeout_s") or 1800)
         self._claude = claude_cmd
         self.live: threading.Thread | None = None  # the live round in flight
         self.live_n = 0
@@ -181,11 +187,16 @@ class Supervisor:
 
     # ---- the loop ----
     def supervise(self) -> int:
+        """The loop, with watchdog.py checking the build's invariants every 5 min beside it ([harness] watchdog)."""
+        dog = watchdog.start(self.repo, self.log) if self.cfg["harness"].get("watchdog", True) else None
         try:
             return self.loop()
         except Stop as e:
             self.log(f"stop: error: {e}")
             return 1
+        finally:
+            if dog:
+                dog.set()
 
     def loop(self) -> int:
         rounds, failed, n = 0, False, 0
@@ -304,25 +315,46 @@ class Supervisor:
             timespec="seconds")}), encoding="utf-8")
 
     def land_live(self, branch: str, merge_wt: Path, work: Path, label: str) -> None:
-        """Under .overhaul/lock: rebase onto main, static PLAN OK (no --run while drive runs), fast-forward main."""
+        """Rebased onto main: dup/literals and the proven tests it touches (plan_land.py) outside the lock; then under
+        .overhaul/lock: rebase again, static PLAN OK (no --run while drive runs), the proven tests again only when a
+        land moved main meanwhile, fast-forward main."""
         if int(self.git("rev-list", "--count", f"{self.main}..{branch}").strip() or 0) == 0:
             raise Stop(f"{branch} has no commit to land")
+        self.rebase(branch, merge_wt)  # the slow checks run before the lock, so lands keep landing meanwhile
+        self.static_gates(branch, merge_wt, work, label)
+        self.plan_tests(branch, merge_wt, work, label)
+        checked = self.git("rev-parse", self.main).strip()
         if not drive.acquire_lock(self.repo, LIVE_LOCK_WAIT_S, "supervise.py live plan land"):
             raise Stop(f".overhaul/lock held by {drive.lock_holder(self.repo) or '?'} for {LIVE_LOCK_WAIT_S:.0f}s")
         try:  # no land moves main while the plan is rebased, checked and fast-forwarded
             self.check_main()
-            try:
-                self.git("rebase", "-q", self.main, cwd=merge_wt)
-            except Stop as e:
-                self.git("rebase", "--abort", cwd=merge_wt, check=False)
-                raise Stop(f"{branch} does not rebase onto {self.main} cleanly: {e}") from e
+            self.rebase(branch, merge_wt)
             code, line = self.run([*self.validate_cmd, "--repo", str(merge_wt)], work / "validate-static.txt")
             if code or not line.startswith("PLAN OK"):
                 raise Stop(f"{branch} on {self.main} is not PLAN OK: {line}")
+            if self.git("rev-parse", self.main).strip() != checked:
+                self.plan_tests(branch, merge_wt, work, label)
             self.git("merge", "-q", "--ff-only", branch)
         finally:
             drive.release_lock(self.repo)
         self.log(f"main -> {branch} {self.git('rev-parse', '--short=12', self.main).strip()} (live)")
+
+    def rebase(self, branch: str, merge_wt: Path) -> None:
+        try:
+            self.git("rebase", "-q", self.main, cwd=merge_wt)
+        except Stop as e:
+            self.git("rebase", "--abort", cwd=merge_wt, check=False)
+            raise Stop(f"{branch} does not rebase onto {self.main} cleanly: {e}") from e
+
+    def plan_tests(self, branch: str, merge_wt: Path, work: Path, rnd: int | str) -> None:
+        """plan_land.py --tests-only on the merged branch: the proven acceptance tests the plan commit can break.
+        Red: Stop, main never moves (pilot2026-11-10: phase-10 stubs failed proven tests, main red 03:30-05:20)."""
+        code, line = self.run([*self.plan_land_cmd, "--repo", str(self.repo), "--branch", branch, "--main", self.main,
+                               "--wt", str(merge_wt), "--tests-only", "--timeout", f"{self.test_timeout:.0f}"],
+                              work / "plan-land.txt")
+        self.log(f"plan_land {branch}: {line}")
+        if code:
+            raise Stop(f"round {rnd}: {branch} fails proven tests (main would go red): {line}")
 
     def check_main(self) -> None:
         if self.git("status", "--porcelain", "--untracked-files=no").strip():
@@ -465,6 +497,7 @@ class Supervisor:
         if code or not line.startswith("PLAN OK"):
             raise Stop(f"round {rnd}: {branch} is not PLAN OK: {line}")
         self.static_gates(branch, merge_wt, work, rnd)
+        self.plan_tests(branch, merge_wt, work, rnd)
         self.git("merge", "-q", "--ff-only", branch)
         self.log(f"main -> {branch} {self.git('rev-parse', '--short=12', 'HEAD').strip()}")
         out = work / "validate-run.txt"
@@ -479,7 +512,7 @@ class Supervisor:
             raise Stop(f"round {rnd}: plan_validate --run on main: {line}"
                        + (f"; first: {problems[0][:300]}" if problems else ""))
 
-    def static_gates(self, branch: str, merge_wt: Path, work: Path, rnd: int) -> None:
+    def static_gates(self, branch: str, merge_wt: Path, work: Path, rnd: int | str) -> None:
         """The whole-tree checks that need no build (dup, literals) on the merged plan branch before main moves:
         a plan stub that repeats landed code turned main red and held every land (pilot2026-11-09 23:08)."""
         cmds = self.cfg.get("commands") or {}

@@ -392,3 +392,28 @@ class FreeBranch(unittest.TestCase):
             git("worktree", "add", "-q", "-f", "-B", "plan/fix-X", str(Path(d) / "new"), "main")
             self.assertTrue(any("removed stale worktree" in x for x in logs))
             self.assertFalse((Path(d) / "old").exists())
+
+
+class PlanLandGate(Toy):
+    """A plan branch that fails a proven acceptance test it can break never lands (pilot2026-11-10 03:30-05:20)."""
+
+    RED = "import sys; print('PLAN LAND RED: plan/x: regression: proven S03 t fails (exit 1): boom'); sys.exit(1)"
+
+    def red_sup(self) -> supervise.Supervisor:
+        sup = self.sup()
+        sup.plan_land_cmd = [sys.executable, "-c", self.RED]
+        return sup
+
+    def test_a_red_plan_land_stops_the_round_and_main_does_not_move(self):
+        self.make(exits=[3, 0], needs=["S01"], kinds={"S01": "acceptance"})
+        head = git(self.repo, "rev-parse", "main")
+        self.assertEqual(self.red_sup().supervise(), 1)
+        self.assertIn("fails proven tests (main would go red): PLAN LAND RED", self.log())
+        self.assertEqual(git(self.repo, "rev-parse", "main"), head)
+        self.assertEqual(self.calls("reset"), [])
+
+    def test_a_green_plan_land_is_logged_before_main_moves(self):
+        self.make(exits=[3, 0], needs=["S01"], kinds={"S01": "acceptance"})
+        self.assertEqual(self.sup().supervise(), 0, self.log())
+        self.assertRegex(self.log(), r"plan_land plan/fixes-r1: PLAN LAND OK: plan/fixes-r1: 1 proven rows in the "
+                                     r"footprint, no \[commands\] acceptance to run\n(.*\n)?.*main -> plan/fixes-r1")
