@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -200,6 +201,36 @@ class TestHostProgram(unittest.TestCase):
         self.assertEqual(fetched.stdout.read(), (self.root / "work" / "logs" / "F9.log").read_bytes())
 
 
+    def test_the_first_builder_line_reaches_the_laptop_before_the_builder_exits(self):
+        """remote-hang-report 2026-11-10: proc.communicate() held every line until claude exited, so each slow remote
+        build looked silent. A fake claude prints one event, then sleeps: that line must arrive while it sleeps."""
+        src = self.root / "src"
+        src.mkdir()
+        for args in (("init", "-q", "-b", "main"), ("config", "user.email", "t@e"), ("config", "user.name", "t"),
+                     ("commit", "-q", "--allow-empty", "-m", "base")):
+            git(src, *args)
+        subprocess.run(["git", "clone", "-q", "--bare", str(src), str(self.root / "host.git")], check=True)
+        fake = ('import json, time\n'
+                'print(json.dumps({"type": "system", "subtype": "init"}), flush=True)\n'
+                'time.sleep(60)\n')
+        job = self.job(repo=(self.root / "host.git").as_posix(), sha=git(src, "rev-parse", "HEAD").strip(),
+                       cmd=[sys.executable, "-c", fake])
+        p = self.run_prog(job, wait=False)
+        got: list[bytes] = []
+        reader = threading.Thread(target=lambda: got.append(p.stdout.readline()), daemon=True)
+        reader.start()
+        reader.join(timeout=40)
+        try:
+            self.assertTrue(got and b'"init"' in got[0], f"no line before exit: {got}")
+            self.assertIsNone(p.poll())  # the builder still sleeps: the line was streamed, not buffered
+        finally:
+            pidfile = Path(job["pidfile"])
+            if pidfile.is_file():
+                self.run_prog({"action": "kill", "pidfile": pidfile.as_posix()})
+            p.kill()
+            p.wait(timeout=15)
+
+
 class TestRelay(unittest.TestCase):
     """The laptop side of a remote build: live output, heartbeats as life, a silent host killed."""
 
@@ -247,6 +278,10 @@ class TestPool(unittest.TestCase):
         pool = remote.Pool.from_harness({"remote": self.CONF})
         self.assertEqual((pool.repo, pool.work, pool.git, pool.python), ("D:/app/v.git", "D:/app/v.git.work",
                                                                          "desk", ["py", "-3"]))
+
+    def test_remote_builds_get_their_own_timeout(self):
+        self.assertEqual(remote.Pool(self.CONF).timeout_s, remote.TIMEOUT_MIN * 60)
+        self.assertEqual(remote.Pool({**self.CONF, "timeout_min": 50}).timeout_s, 3000)
 
     def test_a_silent_timeout_is_the_host_not_the_row(self):
         log = mock.Mock()

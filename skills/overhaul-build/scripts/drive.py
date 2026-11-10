@@ -164,6 +164,11 @@ WIDTH_NAMES = 3  # the width red line names this many rows that unblock the most
 GATE_PRIORITY = priority.popen_kwargs(priority.NORMAL)  # the pre-review gate: above the builders
 REQUEST_POLL_S = 30.0  # how often the loop looks for .overhaul/requests/reset-<id> (live re-plan)
 REQUESTS_DIR = "requests"
+# watchdog.py requests drive honours at the same cycle boundary (owner 2026-11-10: the heartbeat must start what is
+# due and not happening): audit-phase-<N> runs phase N's polish + arch audit now (again if it already ran), arch-sweep
+# runs the whole-tree sweep now, periodic-<gate> re-arms a red gate's bisect and one more depfix (PERIODIC_REARMS).
+HARNESS_REQUESTS = ("audit-phase-", "arch-sweep", "periodic-")
+PERIODIC_REARMS = 2
 LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py's lock
 # [limits] min_free_gb: under it, cargo's incremental dirs under .overhaul/target are pruned and no build starts
 # (pilot2026-11-09: 20 slot target dirs of ~10 GB filled Z: to 0 GB and ENOSPC killed the drive)
@@ -786,6 +791,7 @@ class Driver(mainred.MainRed):
         self.periodic = periodic.Periodic(self, cfg.get("periodic") or {})
         self.red_init(har)
         self.last_request_check = 0.0  # live re-plan: .overhaul/requests/ is looked at every REQUEST_POLL_S
+        self.last_harness_request = 0.0  # watchdog requests (HARNESS_REQUESTS), same cadence
         self.refused_plan = ""  # the main sha whose plan failed plan_validate: not reloaded again
         self.min_free_gb = float(lim.get("min_free_gb", MIN_FREE_GB) or 0)  # 0: no disk guard
         self.prune_at_gb = float(lim.get("prune_at_gb", PRUNE_AT_GB) or 0)  # 0: prune only under min_free_gb
@@ -1098,6 +1104,7 @@ class Driver(mainred.MainRed):
             self.cycle("start")
             while True:
                 changed = self.replan_step()
+                changed = self.harness_requests() or changed
                 changed = self.reap() or changed
                 changed = stack.check(self) or changed
                 changed = self.pump_land() or changed
@@ -1409,9 +1416,11 @@ class Driver(mainred.MainRed):
         model = base[base.index("--model") + 1] if "--model" in base[:-1] else (
             "custom" if self.custom_cmd(kind) else "default")
         start = time.monotonic()
-        job = Job(fid, kind, proc, out, start, start + self.timeout_s, attempt, model=model, calls=max_calls or 0,
-                  host=self.remote.name if rslot is not None and self.remote else "")
-        # a remote build's output arrives at its end (remote.py), so only a local one gets the idle watchdog
+        remote_job = rslot is not None and self.remote
+        limit = self.remote.timeout_s if remote_job else self.timeout_s  # [harness.remote] timeout_min (45)
+        job = Job(fid, kind, proc, out, start, start + limit, attempt, model=model, calls=max_calls or 0,
+                  host=self.remote.name if remote_job else "")
+        # a remote build streams its events (remote.py) and has its own idle check (remote_idle_min): no local watch
         self.jobs[fid] = job if job.host else self.watch(job, cmd)
 
     def spawn_detached(self, fid: str, kind: str, attempt: int, cmd: list[str], cwd: Path,
@@ -1856,7 +1865,9 @@ class Driver(mainred.MainRed):
         self.say(f"build {f.id} attempt {attempt}{on_host}" + (f" stacked on {', '.join(on)}" if on else ""))
 
     def after_build(self, job: Job) -> None:
-        silent = job.timed_out and '"assistant"' not in read_text(job.out)  # not one turn: the host, not the row
+        # the host streams every builder line, so only a zero-byte run file is a dead host; a slow row with output
+        # is a real timeout and spends its attempt (remote-hang-report 2026-11-10: slow rows looped as "offline")
+        silent = job.timed_out and not read_text(job.out).strip()
         if job.host and self.remote and self.remote.after(job.fn, job.proc.returncode, job.timed_out,
                                                           job.out.with_suffix(".err"), silent=silent):
             self.set(job.fn, status="planned", host=None)  # the host was unusable: requeued, no attempt spent
@@ -2586,6 +2597,10 @@ class Driver(mainred.MainRed):
         """The phase whose polish is due or running now; None for the final whole-tree polish (or none at all)."""
         phases = sorted({phase_key(f)[0] for f in self.order})
         fin = self.st.get("polish") or {}
+        if self.phase_audit_on() and self.polish_rounds >= 1:
+            for n in self.st.get("phase_force") or []:  # watchdog audit-phase-<N>: ahead of order and final polish
+                if self.st.get("phase_polish", {}).get(str(n), {}).get("status") not in ("done", "failed"):
+                    return n
         if (not self.phase_audit_on() or len(phases) < 2 or self.polish_rounds < 1
                 or fin.get("round") or fin.get("status", "idle") != "idle"):
             return None  # the final polish already started (a resumed run): no phase polish behind it
@@ -2763,6 +2778,8 @@ class Driver(mainred.MainRed):
             self.start_arch_audit(ARCH_FID, self.polish_phase(), self.polish_dir() / "arch-1.json")
         pol.update(round=rnd, status="audit")
         self.save()
+        if (n := self.polish_phase()) is not None:
+            self.log(None, "phase_audit", f"phase {n} round {rnd} start")
         self.say(f"polish checklist round {rnd}")
         return True
 
@@ -3275,10 +3292,12 @@ class Driver(mainred.MainRed):
         recs = self.st["functions"]
         proven = sum(1 for f in self.order if recs[f.id]["status"] == "proven")
         final = self.st.get("polish") or {}
-        if (proven - sw["at"] < self.arch_every or proven == len(self.order) or self.polish_phase() is not None
-                or self.polish_queue or final.get("status", "idle") not in ("idle", "done")  # a past polish: still sweep
-                or self.local_jobs() >= self.max_parallel):
+        forced = bool(sw.get("forced"))  # watchdog arch-sweep: due whatever the count and the final polish say
+        if (not forced and (proven - sw["at"] < self.arch_every or proven == len(self.order)
+                            or final.get("status", "idle") not in ("idle", "done"))
+                or self.polish_phase() is not None or self.polish_queue or self.local_jobs() >= self.max_parallel):
             return False
+        sw.pop("forced", None)
         sw.update(at=proven, status="audit")
         self.start_arch_audit(SWEEP_FID, None, self.ov / "polish" / f"arch-sweep-{proven}.json")
         self.save()
@@ -3664,6 +3683,58 @@ class Driver(mainred.MainRed):
             path.unlink(missing_ok=True)
         self.cycle("replan")
         return True
+
+    def harness_requests(self) -> bool:
+        """watchdog.py requests (HARNESS_REQUESTS), each applied once (event request_applied or request_refused)
+        and removed; True if any was applied."""
+        if time.monotonic() - self.last_harness_request < REQUEST_POLL_S:
+            return False
+        self.last_harness_request = time.monotonic()
+        d = self.ov / REQUESTS_DIR
+        names = sorted(p.name for p in d.iterdir() if p.is_file()) if d.is_dir() else []
+        reqs = [d / n for n in names if n.startswith(HARNESS_REQUESTS)]
+        applied = False
+        for path in reqs:
+            why = self.harness_request(path.name)
+            self.log(None, "request_refused" if why else "request_applied", f"{path.name}" + (f": {why}" if why else ""))
+            if why:
+                self.say(f"request {path.name} refused: {why}")
+            applied = applied or not why
+            path.unlink(missing_ok=True)
+        if applied:
+            self.save()
+        return applied
+
+    def harness_request(self, name: str) -> str:
+        """Apply one watchdog request; '' when applied, else why not."""
+        if name.startswith("audit-phase-"):
+            m = re.fullmatch(r"audit-phase-(\d+)", name)
+            phases = {phase_key(f)[0] for f in self.order}
+            if not m or int(m.group(1)) not in phases:
+                return "no such phase in the plan"
+            if not self.phase_audit_on():
+                return "[harness] phase_audit is off"
+            n, force = int(m.group(1)), self.st.setdefault("phase_force", [])
+            pol = self.st.setdefault("phase_polish", {}).get(str(n))
+            if n in force and (pol or {}).get("status") not in ("done", "failed"):
+                return f"phase {n} audit already queued or running"
+            if pol and pol.get("status") in ("done", "failed"):  # audited before: once more over today's code
+                self.st["phase_polish"][str(n)] = {"round": 0, "status": "idle", "issues": None, "history": [],
+                                                   "audits": int(pol.get("audits", 1)) + 1, "gaps": pol.get("gaps")}
+            force[:] = [x for x in force if x != n] + [n]
+            return ""
+        if name == "arch-sweep":
+            if not self.phase_audit or self.arch_every < 1:
+                return "[harness] phase_audit or arch_audit_every_lands is off"
+            sw = self.sweep_state()
+            if sw["status"] != "idle":
+                return f"a sweep is already {sw['status']}"
+            sw["forced"] = True
+            return ""
+        gate = name[len("periodic-"):]
+        if not self.periodic.cfg or gate not in self.periodic.cfg.get("commands", {}):
+            return f"no periodic gate {gate}"
+        return self.periodic.rearm(gate)
 
     def reload(self) -> str:
         """Re-read the plan on main without a restart: new rows join as planned, changed rows replace their Fn,

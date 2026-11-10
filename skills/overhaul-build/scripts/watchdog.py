@@ -3,28 +3,33 @@
 
     py -3 watchdog.py --repo R [--once] [--every 300]
 
-supervise.py runs it as a thread (start()); by hand, --once checks once. Reads .overhaul/log.jsonl (its tail) and
-.overhaul/state.json, never git. Each breach writes a `watchdog` event to log.jsonl and acts:
-- starved: ready rows beside free builder slots (state.json `width`) for 10 min with no build_start -> a reload
-  request (.overhaul/requests/reload-watchdog-<time>, which drive applies at its next cycle) and an alert;
-- no_land: rows in `landing` and no land_ok for 45 min -> a stale .overhaul/lock (dead holder) is removed, else alert;
-- disk: free space on the repo's drive under [limits] prune_at_gb (default 80) -> cargo incremental dirs under
-  .overhaul/target untouched for 15 min are deleted, oldest first, until above it; alert when still under;
-- stop: a `stop` event since the last check -> alert with its line;
-- host_offline: one remote host offline twice in 30 min -> held offline for 30 min
-  (.overhaul/remote/<name>.offline, read by remote.py) and alert.
-An alert is one line appended to .overhaul/ALERT.txt for the manager. A breach that persists repeats its event and
-alert at most every 30 min. Its memory (first seen, last fired, last check) is .overhaul/watchdog.json.
+supervise.py runs it as a thread (start()); by hand, --once checks once. Reads .overhaul/log.jsonl (its tail),
+.overhaul/state.json, overhaul.toml and the plan's FUNCTIONS.md, never git. Two kinds of invariant, one table
+(INVARIANTS: name, when it is due, the evidence that it is happening, the action when it is not):
+- something is wrong (starved, no_land, disk, stop, host_offline);
+- something that should be happening is not (phase_audit, arch_sweep, periodic, progress, reload, needs_plan,
+  proof_check, dashboard): owner 2026-11-10, "if a phase has gone from unfinished to finished, check that the
+  appropriate checkers have audited or are auditing, if not trigger them" (the per-phase audit and the arch sweep
+  never ran for days and nothing noticed).
+Each breach writes a `watchdog` event to log.jsonl and acts: a request file drive honours at its next cycle
+(.overhaul/requests/audit-phase-<N>, arch-sweep, periodic-<gate>, reload-watchdog-<time>), a stale lock removed,
+incremental dirs pruned, a host held offline (.overhaul/remote/<name>.offline), the dashboard rewritten. A request
+and anything it cannot fix also append one line to .overhaul/ALERT.txt for the manager; nothing passes silently.
+A breach that persists repeats its event and alert at most every 30 min. Its memory (first seen, last fired, last
+check) is .overhaul/watchdog.json.
 
 Why (pilot2026-11-09/10): 17 gaps of over 45 min between lands, 5 whole-build stops and 5 desk hangs in 13 minutes
-were each found by the manager's 30-minute heartbeat or by the owner, not when they happened.
+were each found by the manager's 30-minute heartbeat or by the owner, not when they happened; 0 phase audits and 0
+arch sweeps ran in two days with phase_audit = true; 55 periodic reds after the last bisect drew no action.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -44,8 +49,46 @@ HOLD_S = 30 * 60.0
 REFIRE_S = 30 * 60.0
 PRUNE_AT_GB = 80.0
 QUIET_S = 15 * 60.0  # an incremental dir written to within this is in use
+AUDIT_DUE_S = 15 * 60.0  # a phase audit or arch sweep starts within this of falling due
+PROGRESS_S = 30 * 60.0  # some build/review/verify/land event within this while rows are ready and slots free
+RELOAD_S = 10 * 60.0  # drive applies a reset/reload request within this
+PLAN_ROUND_S = 30 * 60.0  # needs-plan rows: a plan round in flight or finished within this
+PROOF_DUE_S = 60 * 60.0  # a proof-check after a phase end
+DASH_S = 60 * 60.0  # the dashboard is rewritten within this while the build is live
 TAIL_BYTES = 4 << 20
 INCREMENTAL = ("*/debug/incremental/*", "*/release/incremental/*")
+PROGRESS = ("build_start", "build_end", "verdict", "review_pass", "review_fail", "review_nos", "verify_fail",
+            "land_ok", "land_fail", "polish_fix", "polish_land_ok")
+PLAN_EVENTS = ("plan_reload", "reset_applied", "reset_refused", "reload_refused")
+GATE_CONFIG = re.compile(r"exit 12[67]\b|command not found|not recognized as|No such file or directory|"
+                         r"cannot find the path", re.I)  # the gate itself is broken: the owner's, not a bisect's
+
+# name, due, evidence that it is happening, action when it is not
+INVARIANTS = (
+    ("starved", "ready rows beside free slots (state width) for 10 min", "a build_start in the last 10 min",
+     "reload request + alert"),
+    ("no_land", "rows in `landing`", "a land_ok in the last 45 min", "stale .overhaul/lock removed, else alert"),
+    ("disk", "free space on the repo's drive under [limits] prune_at_gb (80)", "-",
+     "quiet incremental dirs pruned, alert when still under"),
+    ("stop", "a `stop` event since the last check", "-", "alert with its line"),
+    ("host_offline", "one remote host offline twice in 30 min", "-", "host held offline 30 min + alert"),
+    ("phase_audit", "phase N all proven 15 min ago, or [harness] phase_audit_every lands of phase N since its last "
+     "audit", "st phase_polish[N] started or finished, or a phase_audit event for N",
+     "request audit-phase-<N> + alert"),
+    ("arch_sweep", "arch_audit_every_lands proven since the last sweep, 15 min ago",
+     "st arch_sweep not idle, or an arch_audit start of the sweep", "request arch-sweep + alert"),
+    ("periodic", "a periodic gate red for one cycle (5 min)",
+     "a bisect, culprit or depfix event for that gate since the red",
+     "request periodic-<gate> + alert; a broken gate command (exit 126/127, not found) or no green ever: owner alert"),
+    ("progress", "ready rows beside free slots", "a build/review/verify/land event in the last 30 min",
+     "reload request + alert"),
+    ("reload", "a reset-/reload- request file", "drive removed it within 10 min", "alert (with the last refusal)"),
+    ("needs_plan", "needs-plan rows for 30 min", "supervise round.json, or a plan reload/reset event in 30 min",
+     "alert"),
+    ("proof_check", "a phase finished 60 min ago", ".overhaul/proof-check.txt written after it", "alert"),
+    ("dashboard", "log events in the last 60 min", "dash/index.html written in the last 60 min",
+     "dash.py run, alert when still stale"),
+)
 
 
 def parse_t(text: str) -> float:
@@ -84,11 +127,23 @@ def events(ov: Path) -> list[dict]:
     return out
 
 
+def last_ts(evs: list[dict], pred) -> float:
+    return max((e["ts"] for e in evs if pred(e)), default=0.0)
+
+
+def _mtime(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 class Watchdog:
     def __init__(self, repo: Path, free_gb=None, now=None):
         self.repo, self.ov = repo, repo / ".overhaul"
         self._free_gb, self._now = free_gb, now
         self.mem_path = self.ov / "watchdog.json"
+        self.conf: dict = {}
 
     def now(self) -> float:
         return self._now() if self._now else time.time()
@@ -101,23 +156,53 @@ class Watchdog:
         except OSError:
             return float("inf")
 
-    def limits(self) -> dict:
+    def load_conf(self) -> dict:
         try:
-            conf = tomllib.loads((self.repo / "overhaul.toml").read_text(encoding="utf-8"))
+            return tomllib.loads((self.repo / "overhaul.toml").read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError):
-            conf = {}
-        return conf.get("limits") or {}
+            return {}
+
+    def limits(self) -> dict:
+        return (self.conf or self.load_conf()).get("limits") or {}
+
+    def harness(self) -> dict:
+        return self.conf.get("harness") or {}
+
+    def phases(self, st: dict) -> dict[int, list[str]]:
+        """Phase number -> the ids of its active rows (the plan's FUNCTIONS.md, rows drive has in state.json)."""
+        import drive  # noqa: PLC0415 - heavy, and only this needs it
+        rel = (self.conf.get("paths") or {}).get("functions") or drive.DEFAULTS["paths"]["functions"]
+        try:
+            text = (self.repo / rel).read_text(encoding="utf-8")
+        except OSError:
+            return {}
+        recs, out = st.get("functions") or {}, {}
+        for f in drive.parse_functions(text):
+            if f.status != drive.DEFERRED and f.id in recs:
+                out.setdefault(drive.phase_key(f)[0], []).append(f.id)
+        return out
 
     # ---- one check ----
     def check(self) -> list[str]:
         """Every invariant once; returns the breaches that fired (their names)."""
         now, mem = self.now(), read_json(self.mem_path)
+        self.conf = self.load_conf()
         evs, st = events(self.ov), read_json(self.ov / "state.json")
         since = float(mem.get("last_check") or now - EVERY_S)
         fired = []
-        for name, breach in (("starved", self.starved(now, mem, evs, st)), ("no_land", self.no_land(now, evs, st)),
-                             ("disk", self.disk()), ("stop", self.stopped(evs, since)),
-                             ("host_offline", self.host_offline(now, evs))):
+        checks = {
+            "starved": lambda: self.starved(now, mem, evs, st), "no_land": lambda: self.no_land(now, evs, st),
+            "disk": self.disk, "stop": lambda: self.stopped(evs, since),
+            "host_offline": lambda: self.host_offline(now, evs),
+            "phase_audit": lambda: self.phase_audit(now, evs, st), "arch_sweep": lambda: self.arch_sweep(now, mem, st),
+            "periodic": lambda: self.periodic(now, evs, st), "progress": lambda: self.progress(now, mem, evs, st),
+            "reload": lambda: self.reload(now, mem, evs), "needs_plan": lambda: self.needs_plan(now, mem, evs, st),
+            "proof_check": lambda: self.proof_check(now, evs, st), "dashboard": lambda: self.dashboard(now, evs)}
+        for name, *_ in INVARIANTS:
+            try:
+                breach = checks[name]()
+            except Exception as e:  # noqa: BLE001 - one broken check must not hide the others
+                breach = (f"check failed: {type(e).__name__}: {e}", None)
             if breach is None:
                 continue
             detail, act = breach
@@ -136,6 +221,7 @@ class Watchdog:
         self.mem_path.write_text(json.dumps(mem), encoding="utf-8")
         return fired
 
+    # ---- something is wrong ----
     def starved(self, now, mem, evs, st):
         width = st.get("width") or {}
         ready, free = int(width.get("ready") or 0), int(width.get("free") or 0)
@@ -144,7 +230,7 @@ class Watchdog:
             first.pop("starved", None)
             return None
         first.setdefault("starved", now)
-        last_start = max((e["ts"] for e in evs if e["event"] == "build_start"), default=0.0)
+        last_start = last_ts(evs, lambda e: e["event"] == "build_start")
         if now - float(first["starved"]) < STARVED_S or now - last_start < STARVED_S:
             return None
         return (f"{ready} ready rows beside {free} free slots and no build_start for "
@@ -156,7 +242,7 @@ class Watchdog:
                    and r.get("status") == "landing"]
         if not landing:
             return None
-        last = max((e["ts"] for e in evs if e["event"] == "land_ok"), default=0.0)
+        last = last_ts(evs, lambda e: e["event"] == "land_ok")
         if last and now - last < NO_LAND_S:
             return None
         if not last and evs and now - min(e["ts"] for e in evs) < NO_LAND_S:
@@ -189,7 +275,195 @@ class Watchdog:
         return (f"host {' '.join(twice)} offline {max(len(by[h]) for h in twice)} times in 30 min",
                 lambda: self.hold(twice))
 
+    # ---- something that should be happening is not ----
+    def phase_audit_on(self) -> bool:
+        har = self.harness()
+        polish = int(self.limits().get("polish_rounds", 1) or 0) >= 1
+        on = bool(har.get("phase_audit", True)) or (bool(har.get("phase_barrier", True))
+                                                    and bool(har.get("phase_polish", True)))
+        return polish and on
+
+    def phase_audit(self, now, evs, st):
+        """Each phase that finished (or had phase_audit_every lands) has a phase audit started or done."""
+        if not self.phase_audit_on():
+            return None
+        phases = self.phases(st)
+        if len(phases) < 2:
+            return None  # one phase: the final polish is its audit
+        recs, pp = st.get("functions") or {}, st.get("phase_polish") or {}
+        final_idle = (st.get("polish") or {}).get("status", "idle") == "idle" and not (st.get("polish") or {}).get(
+            "round")
+        every = int(self.harness().get("phase_audit_every", 0) or 0)
+        tail0 = min((e["ts"] for e in evs), default=now)
+        due = []
+        for n, ids in sorted(phases.items()):
+            if n == max(phases) and final_idle:
+                continue  # the last phase: the final whole-tree polish audits it
+            pol = pp.get(str(n)) or {}
+            running = pol.get("status") in ("gaps", "audit", "fix")
+            started = running or pol.get("status") in ("done", "failed") or bool(pol.get("round"))
+            audited = last_ts(evs, lambda e, n=n: (e["event"] == "phase_audit" and str(e.get("detail", "")).startswith(
+                f"phase {n} ")) or (e["event"] in ("request_applied", "request_refused")
+                                    and str(e.get("detail", "")).startswith(f"audit-phase-{n}")))
+            ids_set = set(ids)
+            lands = [e["ts"] for e in evs if e["event"] == "land_ok" and e.get("fn") in ids_set]
+            if all((recs.get(i) or {}).get("status") == "proven" for i in ids):
+                ended = max(lands, default=tail0)
+                if not started and not (audited and audited >= ended) and now - ended >= AUDIT_DUE_S:
+                    due.append((n, f"phase {n} all proven {(now - ended) / 60:.0f} min ago, no audit"))
+                    continue
+            if every and not running:
+                since = sum(1 for t in lands if t > audited)
+                if since >= every:
+                    due.append((n, f"phase {n}: {since} lands since its last audit (phase_audit_every {every})"))
+        if not due:
+            return None
+        return "; ".join(d for _, d in due), lambda: self.request(*[f"audit-phase-{n}" for n, _ in due])
+
+    def arch_sweep(self, now, mem, st):
+        """arch_audit_every_lands proven since the last sweep: the sweep starts within 15 min."""
+        har = self.harness()
+        every = int(har.get("arch_audit_every_lands", 25) or 0)
+        first = mem.setdefault("first", {})
+        sw = st.get("arch_sweep") or {"at": 0, "status": "idle"}
+        recs = st.get("functions") or {}
+        proven = sum(1 for r in recs.values() if isinstance(r, dict) and r.get("status") == "proven")
+        if (not har.get("phase_audit", True) or every < 1 or proven == len(recs) or sw.get("status", "idle") != "idle"
+                or proven - int(sw.get("at") or 0) < every):
+            first.pop("arch_sweep", None)
+            return None
+        first.setdefault("arch_sweep", now)
+        if now - float(first["arch_sweep"]) < AUDIT_DUE_S:
+            return None
+        return (f"{proven - int(sw.get('at') or 0)} proven since the last sweep (at {sw.get('at', 0)}, every "
+                f"{every}) and no sweep for {(now - float(first['arch_sweep'])) / 60:.0f} min",
+                lambda: self.request("arch-sweep"))
+
+    def periodic(self, now, evs, st):
+        """A red periodic gate is bisected or depfixed within one cycle; a broken gate command is the owner's."""
+        per = st.get("periodic") or {}
+        if (per.get("bisect") or {}).get("gate"):
+            return None  # a bisect is running
+        owner, ask = [], []
+        for gate, rec in sorted((per.get("red") or {}).items()):
+            red = last_ts(evs, lambda e, g=gate: e["event"] == "periodic_red" and str(e.get("detail", "")).startswith(
+                f"{g} "))
+            if not red or now - red < EVERY_S:
+                continue
+            tag = f"depfix-periodic-{gate}"
+            acted = last_ts(evs, lambda e, g=gate, t=tag: (
+                (e["event"] == "periodic_start" and str(e.get("detail", "")).startswith(f"{g} bisect"))
+                or (e["event"] == "periodic_culprit" and str(e.get("detail", "")).startswith(f"{g}:"))
+                or e.get("fn") == t or t in str(e.get("detail", ""))
+                or (e["event"] == "request_applied" and e.get("detail") == f"periodic-{g}")))
+            if acted >= red:
+                continue
+            reason = str(rec.get("reason", ""))[:160]
+            refused = [e for e in evs if e["event"] == "request_refused" and e["ts"] >= red
+                       and str(e.get("detail", "")).startswith(f"periodic-{gate}:")]
+            if GATE_CONFIG.search(reason):
+                owner.append(f"{gate} gate command broken ({reason})")
+            elif "no earlier green" in str(rec.get("culprit", "")):
+                owner.append(f"{gate} red with no earlier green ({reason})")
+            elif refused:
+                owner.append(f"{gate}: {str(refused[-1].get('detail', ''))[:200]}")
+            else:
+                ask.append(gate)
+        if not owner and not ask:
+            return None
+        detail = "; ".join([f"{g} red with no bisect or depfix since" for g in ask] + [f"owner: {o}" for o in owner])
+        return detail, (lambda: self.request(*[f"periodic-{g}" for g in ask])) if ask else None
+
+    def progress(self, now, mem, evs, st):
+        """Rows ready beside free slots: some build, review, verify or land event within 30 min."""
+        width = st.get("width") or {}
+        first = mem.setdefault("first", {})
+        if not (int(width.get("ready") or 0) and int(width.get("free") or 0)):
+            first.pop("progress", None)
+            return None
+        first.setdefault("progress", now)
+        last = last_ts(evs, lambda e: e["event"] in PROGRESS)
+        if now - float(first["progress"]) < PROGRESS_S or now - last < PROGRESS_S:
+            return None
+        ago = f"{(now - last) / 60:.0f} min" if last else "the whole log tail"
+        return f"no build/review/verify/land event for {ago} with rows ready and slots free", self.reload_request
+
+    def reload(self, now, mem, evs):
+        """A reset-/reload- request is applied (removed) by drive within 10 min (first seen by the watchdog)."""
+        req, seen = self.ov / "requests", mem.setdefault("requests", {})
+        names = sorted(p.name for p in req.glob("re*-*") if p.is_file()) if req.is_dir() else []
+        for gone in set(seen) - set(names):
+            del seen[gone]
+        for n in names:
+            seen.setdefault(n, now)
+        old = [n for n in names if now - float(seen[n]) >= RELOAD_S]
+        if not old:
+            return None
+        refusals = [e for e in evs if e["event"] == "reload_refused"]
+        why = f"; last refusal: {str(refusals[-1].get('detail', ''))[:200]}" if refusals else "; drive not running?"
+        return f"{len(old)} plan requests waiting over 10 min ({' '.join(old[:4])}){why}", None
+
+    def needs_plan(self, now, mem, evs, st):
+        """needs-plan rows have a plan round in flight or one finished within 30 min."""
+        first = mem.setdefault("first", {})
+        rows = sorted(f for f, r in (st.get("functions") or {}).items() if isinstance(r, dict)
+                      and r.get("status") == "needs-plan")
+        if not rows:
+            first.pop("needs_plan", None)
+            return None
+        first.setdefault("needs_plan", now)
+        if (self.ov / "supervise" / "round.json").is_file():
+            return None
+        last = last_ts(evs, lambda e: e["event"] in PLAN_EVENTS)
+        if now - float(first["needs_plan"]) < PLAN_ROUND_S or now - last < PLAN_ROUND_S:
+            return None
+        return (f"{len(rows)} needs-plan rows ({' '.join(rows[:6])}) and no plan round for "
+                f"{(now - max(last, float(first['needs_plan']))) / 60:.0f} min", None)
+
+    def proof_check(self, now, evs, st):
+        """A blind proof-check after each phase end (the manager runs it; supervise.py runs it at the very end)."""
+        phases, recs = self.phases(st), st.get("functions") or {}
+        tail0 = min((e["ts"] for e in evs), default=now)
+        ended = []
+        for n, ids in phases.items():
+            if all((recs.get(i) or {}).get("status") == "proven" for i in ids):
+                ids_set = set(ids)
+                ended.append((max((e["ts"] for e in evs if e["event"] == "land_ok" and e.get("fn") in ids_set),
+                                  default=tail0), n))
+        if not ended:
+            return None
+        t, n = max(ended)
+        done = max(_mtime(self.ov / "proof-check.txt"), _mtime(self.ov / "proof-check-1.txt"))
+        if done >= t or now - t < PROOF_DUE_S:
+            return None
+        return (f"phase {n} ended {(now - t) / 60:.0f} min ago and no proof-check since "
+                f"(references/proof-check.md)", None)
+
+    def dashboard(self, now, evs):
+        """While the build is live, dash/index.html is rewritten at least hourly."""
+        last = max((e["ts"] for e in evs), default=0.0)
+        page = self.repo / "dash" / "index.html"
+        if not page.exists() or not last or now - last >= DASH_S or now - _mtime(page) < DASH_S:
+            return None  # never written: dash.py is not installed beside drive (drive says so itself)
+        return f"dash/index.html {(now - _mtime(page)) / 60:.0f} min old while the build is live", self.redash
+
     # ---- actions ----
+    def request(self, *names: str) -> str:
+        """Write .overhaul/requests/<name> for drive; one already waiting is reported, not rewritten."""
+        req, made, waiting = self.ov / "requests", [], []
+        req.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            path = req / name
+            if path.exists():
+                waiting.append(name)
+                continue
+            path.write_text(f"watchdog {datetime.fromtimestamp(self.now()).isoformat(timespec='seconds')}\n",
+                            encoding="utf-8")
+            made.append(name)
+        parts = ([f"requested {' '.join(made)}"] if made else []) + (
+            [f"{' '.join(waiting)} still waiting for drive"] if waiting else [])
+        return "alert: " + "; ".join(parts)
+
     def reload_request(self) -> str:
         req = self.ov / "requests"
         if any(req.glob("reload-watchdog-*")):
@@ -232,6 +506,16 @@ class Watchdog:
                             encoding="utf-8")
         return f"alert: held offline {HOLD_S / 60:.0f} min: {' '.join(hosts)}"
 
+    def redash(self) -> str:
+        page = self.repo / "dash" / "index.html"
+        before = _mtime(page)
+        try:
+            subprocess.run([sys.executable, str(HERE / "dash.py"), "--repo", str(self.repo)], cwd=self.repo,
+                           stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
+        except (OSError, subprocess.SubprocessError) as e:
+            return f"alert: dash.py failed: {type(e).__name__}"
+        return "dashboard rewritten" if _mtime(page) > before else "alert: dash.py ran and wrote nothing"
+
     # ---- output ----
     def event(self, detail: str) -> None:
         stamp = datetime.fromtimestamp(self.now(), timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -245,13 +529,6 @@ class Watchdog:
         stamp = datetime.fromtimestamp(self.now()).isoformat(timespec="seconds")
         with open(self.ov / "ALERT.txt", "a", encoding="utf-8") as f:
             f.write(f"{stamp} {line}\n")
-
-
-def _mtime(p: Path) -> float:
-    try:
-        return p.stat().st_mtime
-    except OSError:
-        return 0.0
 
 
 def start(repo: Path, log=None, every: float = EVERY_S) -> threading.Event:

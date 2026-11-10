@@ -371,6 +371,25 @@ class Periodic:
                                   fid=dfid)
         return True
 
+    def rearm(self, gate: str) -> str:
+        """watchdog periodic-<gate>: a red gate whose culprit is set (and depfix spent) bisects again and gets one more
+        depfix, at most drive.PERIODIC_REARMS times; '' when re-armed, else why not."""
+        import drive
+        st = self.st
+        rec = st["red"].get(gate)
+        if not rec:
+            return f"{gate} is not red"
+        if (st["bisect"] or {}).get("gate") == gate or (self.job and self.job[1] == gate):
+            return f"{gate} is already running or bisecting"
+        n = int(st.setdefault("rearmed", {}).get(gate, 0))
+        if n >= drive.PERIODIC_REARMS:
+            return f"{gate} re-armed {n} times already; the owner decides ({rec.get('reason', '')[:160]})"
+        st["rearmed"][gate] = n + 1
+        rec["culprit"] = ""
+        dfid = f"{drive.DEPFIX_PREFIX}periodic-{gate}"
+        st["fixed"] = [x for x in st["fixed"] if x != dfid]
+        return ""
+
     def stop(self) -> None:
         if self.job:
             import drive

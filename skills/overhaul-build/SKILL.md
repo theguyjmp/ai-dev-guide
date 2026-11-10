@@ -71,7 +71,7 @@ same builder command over ssh in a host worktree on fn/<id> with a per-slot CARG
 back; review, the pre-review gate and land stay local. An unusable host (ssh drop, push or fetch failure, no
 CLAUDE_CODE_OAUTH_TOKEN, a spent Claude account) logs `remote_offline`, goes offline for offline_min (default 10) and
 requeues the function without an attempt; a timed-out or dropped build is killed on the host by its slot's pid file.
-`build_start ... host=<name>` and the dashboard name the host. The host streams builder events back as they come, writes `<work>/logs/<id>.log` (a line per event) and a heartbeat every `heartbeat_s` (30); no line for `remote_idle_min` (5) is a hung host (killed, offline, requeued, no attempt), and every failed remote build fetches its host log to `.overhaul/runs/<id>-host.log`.
+`build_start ... host=<name>` and the dashboard name the host. The host streams builder events back as they come, writes `<work>/logs/<id>.log` (a line per event) and a heartbeat every `heartbeat_s` (30); no line for `remote_idle_min` (5) is a hung host (killed, offline, requeued, no attempt); a remote build's deadline is `[harness.remote] timeout_min` (45), and a timeout with output spends its attempt (only a zero-byte stream benches the host); every failed remote build fetches its host log to `.overhaul/runs/<id>-host.log`.
 Stacked starts: `[harness] stacked_starts = true` (default false; scripts/stack.py) makes a row READY when each dep is
 proven or its fn/<dep> passed review and waits to land; the worktree merges main then those branches and the brief
 names them. The row lands only after them (queued meanwhile); a landed dep's dependents merge the new main. A dep that
