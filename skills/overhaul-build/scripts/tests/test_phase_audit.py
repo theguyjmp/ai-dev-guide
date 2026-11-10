@@ -203,6 +203,61 @@ class Units(Base):
         self.assertEqual(drv.sweep_state()["status"], "idle")
 
 
+class AppSettings(Base):
+    """pf-F item 1: the pilot project (phase_barrier false, phase_polish false, phase_audit true) logged 0 phase audits in 3
+    days: its final polish had ended (status done) before the plan grew, and phase 3 waits on needs-plan rows."""
+    THREE_PHASES = LOCKED + "| F4 | 3 | beta | F1 | `toy quad 4` | tests/acceptance/test_f4.py::test_quad | planned |\n"
+
+    def app(self, every=15) -> drive.Driver:
+        drv = self.driver(functions=self.THREE_PHASES, phase_polish=False,
+                          extra=f"phase_audit_every = {every}\n")
+        drv.st["polish"] = {"round": 3, "status": "done", "issues": 17, "history": [[1, 20], [2, 19], [3, 9]]}
+        return drv
+
+    def test_a_done_final_polish_no_longer_blocks_a_complete_phase(self):
+        drv = self.app()
+        self.assertEqual((drv.barrier, drv.phase_polish, drv.phase_audit, drv.phase_audit_every),
+                         (False, False, True, 15))
+        drv.st["functions"]["F1"]["status"] = "proven"
+        self.assertEqual(drv.polish_phase(), 1)
+        self.assertEqual(drv.polish_state()["why"], "complete")
+        with mock.patch.object(drv, "start_polish_audit", return_value=True) as audit:
+            self.assertTrue(drv.polish_step())
+        audit.assert_called_once_with(1)
+        st = drv.polish_state()
+        self.assertEqual((st["at"], st["locked"]), (1, ["alpha"]))
+        ev = [e for e in self.events(drv.repo) if e["event"] == "phase_audit"]
+        self.assertTrue(ev and ev[0]["detail"].startswith("phase 1 start (complete): 1 of 1"), ev)
+
+    def test_an_unfinished_phase_is_audited_after_n_lands_and_locks_nothing_of_its_own(self):
+        drv = self.app(every=1)
+        drv.st["functions"]["F2"]["status"] = "proven"  # phase 2: 1 of 2 proven, F3 waits (the pilot project: needs-plan)
+        self.assertEqual(drv.polish_phase(), 2)
+        self.assertEqual(drv.polish_state()["why"], "lands")
+        self.assertEqual(drv.audit_locked(), set())  # builds go on in beta and alpha beside it
+        with mock.patch.object(drv, "start_polish_audit", return_value=True):
+            drv.polish_step()
+        self.assertEqual(drv.polish_state()["locked"], [])
+        drv.polish_state().update(status="done")
+        self.assertIsNone(drv.polish_phase())  # no new land since: not due again
+        drv.st["functions"]["F3"]["status"] = "proven"  # phase 2 complete now: audited again, whole phase
+        self.assertEqual(drv.polish_phase(), 2)
+        pol = drv.polish_state()
+        self.assertEqual((pol["status"], pol["why"], pol["at"]), ("idle", "complete", 1))
+
+    def test_a_later_phase_is_not_held_behind_an_unfinished_earlier_one(self):
+        drv = self.app(every=0)  # lands trigger off: only complete phases
+        drv.st["functions"]["F2"]["status"] = "proven"
+        drv.st["functions"]["F3"]["status"] = "proven"  # phase 2 complete, phase 1 (F1) not
+        self.assertEqual(drv.polish_phase(), 2)
+
+    def test_a_running_final_polish_still_holds_phase_audits(self):
+        drv = self.app()
+        drv.st["polish"]["status"] = "audit"
+        drv.st["functions"]["F1"]["status"] = "proven"
+        self.assertIsNone(drv.polish_phase())
+
+
 class Runs(Base):
     def test_phase_1_polish_runs_beside_phase_2_builds_and_holds_only_alpha(self):
         repo = self.repo({"audit": [[]], "arch": [[]]})
