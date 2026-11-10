@@ -25,6 +25,32 @@ let 4 private copies of app_core helpers through (`invalid` with swapped argumen
   dependencies (`[harness] index_top`, default 40, at most 1/8 of brief_max_tokens), the search command and the
   FAIL rule. Review brief: the same lines; C05 evidence cites the INDEX line checked for each new function.
 - tests/test_index_api.py.
+## Plan lands gated, remote heartbeat, watchdog, 2026-11-10
+Owner 2026-11-10 07:15: "Fix all of those permanently so those kinds won't happen again." Measured on the pilot project
+(.overhaul/log.jsonl, 2026-11-09/10): a plan commit turned main red twice (23:08 stubs failed dup; the phase-10 stubs
+failed proven tests and held every land 03:30-05:20), because plan commits ran only static checks; 5 `remote_offline`
+in 13 min (05:57-06:10), all "timed out with no builder output", with no host-side trace to diagnose; 17 gaps of over
+45 min between lands and 5 whole-build `stop`s, each found by the 30-min manager heartbeat or the owner.
+- scripts/plan_land.py (new) `--repo R --branch B [--wt W] [--tests-only]`: on B merged with main, PLAN OK, dup and
+  literals, then the proven acceptance tests the commit can break (rows whose test file it touches, land.py's
+  footprint_rows of the modules it touches, every proven row for a file outside every module that is no spec/*.md and
+  no acceptance file), batched with land.regression, CARGO_TARGET_DIR .overhaul/target/plan. `PLAN LAND OK|RED`.
+- supervise.py: Exit-3 land_plan runs it (--tests-only) after the static gates; live rounds now run the static gates
+  and it before taking .overhaul/lock (lands keep landing), and again under the lock only if main moved. Red: Stop,
+  main never moves. overhaul-plan's SKILL.md: a planner moves main only at PLAN LAND OK.
+- remote.py: the host streams the builder's events to stdout as they come (drive's run file fills live; before, the
+  whole output came back at exit), writes <work>/logs/<id>.log (notes and a line per event) and <id>.hb every
+  `heartbeat_s` (30) with a `remote-hb` stderr line. The laptop wrapper (relay) counts any line as life: none for
+  `remote_idle_min` (5) kills the session and exits OFFLINE (host offline, requeue, no attempt). Any failure fetches
+  the host log to .overhaul/runs/<id>-host.log. A host held by the watchdog (.overhaul/remote/<name>.offline) is
+  refused at once.
+- scripts/watchdog.py (new), a supervise.py thread every 5 min (`[harness] watchdog`, default on; `--once` by hand):
+  starved (ready beside free slots 10 min, no build_start) -> reload request; no land_ok 45 min with rows landing ->
+  stale lock removed or alert; free disk under `[limits] prune_at_gb` (80) -> incremental dirs quiet for 15 min
+  pruned; a `stop` -> alert; a host offline twice in 30 min -> held 30 min. Each logs `watchdog`; unresolved ones go
+  to .overhaul/ALERT.txt. A persisting breach repeats at most every 30 min (.overhaul/watchdog.json).
+- tests: test_plan_land.py (8), test_watchdog.py (8), test_remote.py (+4: streamed events, host log, heartbeat,
+  relay hang/heartbeat, hold), test_supervise.py PlanLandGate (2), test_live_replan.py (+1 live red).
 
 ## Stacked starts, 2026-11-09
 Owner 2026-11-09: 40 slots, at least 10 functions/h, prove it. rate_sim.py (overhaul-trial; the pilot project's real dependency

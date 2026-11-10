@@ -2,6 +2,7 @@
 the host program locally, and a bare clone stands in for the host repo."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -166,6 +167,75 @@ class TestHostProgram(unittest.TestCase):
         self.assertTrue(wait_dead(builder))
         self.assertFalse(pidfile.exists())
         self.assertTrue((self.root / "work" / "briefs" / "F9.md").is_file())
+
+
+    def test_builder_events_stream_to_stdout_and_the_host_log_with_a_heartbeat(self):
+        src = self.root / "src"
+        src.mkdir()
+        for args in (("init", "-q", "-b", "main"), ("config", "user.email", "t@e"), ("config", "user.name", "t"),
+                     ("commit", "-q", "--allow-empty", "-m", "base")):
+            git(src, *args)
+        subprocess.run(["git", "clone", "-q", "--bare", str(src), str(self.root / "host.git")], check=True)
+        events = ('import json, sys, time\n'
+                  'for i in range(3):\n'
+                  '    print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", '
+                  '"name": "Bash"}]}}), flush=True)\n'
+                  '    time.sleep(0.5)\n'
+                  'print(json.dumps({"type": "result", "subtype": "success", "is_error": False}), flush=True)\n')
+        job = self.job(repo=(self.root / "host.git").as_posix(), sha=git(src, "rev-parse", "HEAD").strip(),
+                       cmd=[sys.executable, "-c", events], hb_s=0.3)
+        p = self.run_prog(job)
+        self.assertEqual(p.returncode, 0)
+        out = p.stdout.read().decode().splitlines()
+        self.assertEqual(len(out), 4)
+        self.assertIn('"result"', out[-1])
+        err = p.stderr.read().decode()
+        self.assertIn(remote.HB_TAG, err)  # the laptop's relay reads these as life and drops them
+        log = (self.root / "work" / "logs" / "F9.log").read_text(encoding="utf-8")
+        self.assertEqual(log.count("builder: assistant tools=Bash"), 3)
+        self.assertIn("builder: result/success", log)
+        self.assertIn("builder exit 0 after 4 events", log)
+        self.assertIn("events=", (self.root / "work" / "logs" / "F9.hb").read_text(encoding="utf-8"))
+        fetched = self.run_prog({"action": "log", "log": (self.root / "work" / "logs" / "F9.log").as_posix()})
+        self.assertEqual(fetched.stdout.read(), (self.root / "work" / "logs" / "F9.log").read_bytes())
+
+
+class TestRelay(unittest.TestCase):
+    """The laptop side of a remote build: live output, heartbeats as life, a silent host killed."""
+
+    def relay(self, code: str, idle_s: float):
+        out, err = mock.Mock(buffer=io.BytesIO()), mock.Mock(buffer=io.BytesIO())
+        with mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err):
+            t0 = time.monotonic()
+            res = remote.relay([sys.executable, "-c", code], b"", idle_s, poll_s=0.1)
+        return res, out.buffer.getvalue().decode(), err.buffer.getvalue().decode(), time.monotonic() - t0
+
+    def test_a_host_that_sends_nothing_is_killed_as_hung(self):
+        (code, _, hung), _, _, took = self.relay("import time; time.sleep(60)", 1.0)
+        self.assertTrue(hung)
+        self.assertLess(took, 20)
+
+    def test_heartbeats_keep_a_quiet_build_alive_and_never_reach_the_err_file(self):
+        prog = ("import sys, time\n"
+                "for i in range(8):\n"
+                "    print('remote-hb t events=0 pid=1', file=sys.stderr, flush=True)\n"
+                "    time.sleep(0.25)\n"
+                "print('remote: note', file=sys.stderr, flush=True)\n"
+                "print('{\"type\": \"result\"}', flush=True)\n")
+        (code, err_text, hung), out, err, _ = self.relay(prog, 1.0)
+        self.assertEqual((code, hung), (0, False))
+        self.assertIn('"result"', out)
+        self.assertEqual(err.strip(), "remote: note")
+        self.assertNotIn("remote-hb", err_text)
+
+    def test_a_host_the_watchdog_holds_is_refused_until_its_time(self):
+        repo = Path(tempfile.mkdtemp())
+        self.assertEqual(remote.held(repo, "desk"), "")
+        path = remote.hold_path(repo, "desk")
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"until": 1000.0, "why": "offline twice in 30 min"}), encoding="utf-8")
+        self.assertIn("offline twice in 30 min", remote.held(repo, "desk", now=999.0))
+        self.assertEqual(remote.held(repo, "desk", now=1001.0), "")
 
 
 class TestPool(unittest.TestCase):

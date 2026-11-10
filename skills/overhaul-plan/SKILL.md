@@ -176,8 +176,8 @@ One numbered line per decision, no ceremony: `D3: drop export-xml; nothing reach
 entry, deliberate behaviour change, dependency added after the plan, and acceptance test changed after the plan.
 ## Re-plan a needs-plan function (drive.py exited 3)
 Read only its row, `.overhaul/reviews/<id>.txt` and its `.overhaul/log.jsonl` lines, never the diff. Do one, add one
-DECISIONS line, pass Step 7, make a plan commit on main touching only spec/, tests/, new stubs and
-overhaul.toml, then run `drive.py --repo <rebuild> --reset <id>` and restart drive.py:
+DECISIONS line, pass Step 7, make a plan commit on a branch (only spec/, tests/, new stubs, overhaul.toml), move main
+to it only at PLAN LAND OK (rule below), then run `drive.py --repo <rebuild> --reset <id>` and restart drive.py:
 1. Split it: new ids with one new failing test each; update deps and OLD-ENTRIES lines naming it; drop its row and test.
 2. Fix its acceptance test, only where it contradicts OLD-ENTRIES or DECISIONS, never to make it easier.
 3. Fix the plan: add the missing API item or dependency, or move the function to the module that owns the code.
@@ -214,5 +214,6 @@ Good: only public commands of F04 and its deps, its own data dir, what the user 
 - Each cross-cutting policy has one owner, each domain rule one function, every concurrent writer a concurrent test and every boundary a negative test [by plan_validate.py].
 - Lint enforces line length and the strict set, no 20+ char literal is written twice, functions stay within 30 lines, constants sit at the top and no fixture is copied [by plan_validate.py, dup_literals.py and shape_check.py].
 - The plan commit lands a stub per function in its required `files` cell (signatures, types, docstrings, bodies raising NotImplementedError) that imports; the longest chain of blocking (`behaviour`) deps is at most max(4, ceil(N/4)), or `[plan] max_depth` [by plan_validate.py].
+- No plan commit moves main of a project with proven rows until `plan_land.py --repo R --branch B` prints PLAN LAND OK: PLAN OK, dup and literals, and every proven acceptance test the commit's files can break, green on B merged with main [by plan_land.py, run by supervise.py and by the planner].
 - A function counts only when its test is red on main, green after the merge, and every proven test stays green [by land.py].
 - Builders never edit tests/acceptance or leave their module's Paths [by drive.py's brief and the blind review].
