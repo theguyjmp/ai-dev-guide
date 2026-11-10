@@ -505,27 +505,58 @@ class TestTrial3Waste(Toy):
         self.assertEqual([(g["fn"], g["module"], g["gap"]) for g in gaps], [("F1", "alpha", gap)])
         self.assertFalse(any(e["event"] == "needs_plan" for e in self.events(repo)))
 
-    def test_verified_dedup_no_with_plan_gap_passes_and_records_the_gap(self):
-        review = {"checklist": "v1", "plan_gap": "C07: beta must export LIMIT; beta is outside the allowed paths",
-                  "items": [{"id": "C07", "answer": "no", "file": "src/alpha/f1.py", "line": 1,
-                             "evidence": "LIMIT = 9 repeats beta's literal", "fix": "import it from beta"}]}
-        repo = self.make_repo({"F1": {"review": [review]}}, retries=2)
-        rc, out = self.drive_cli(repo)
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "proven")
-        gaps = (repo / ".overhaul" / "plan-gaps.jsonl").read_text(encoding="utf-8")
-        self.assertIn("beta must export LIMIT", gaps)
+    def dedup_verified(self, gap: str, other: str = "src/beta/f2.py:3"):
+        """after_verify on one verified C07 NO of F1 (alpha), as a unit: (driver, start_polish_fix mock, fail mock)."""
+        repo = self.make_repo(retries=2)
+        drv = drive.Driver(repo, drive.load_config(repo))
+        drv.load()
+        no = {"id": "C07", "severity": "P1", "answer": "no", "file": "src/alpha/f1.py", "line": 1, "other": other,
+              "evidence": "LIMIT = 9 repeats beta's literal", "fix": "import it from beta"}
+        (drv.ov / "verify").mkdir(parents=True, exist_ok=True)
+        (drv.ov / "verify" / "F1-1.json").write_text(json.dumps([{"n": 1, "reproduced": True, "how": "grep"}]),
+                                                     encoding="utf-8")
+        drv.verify_meta["F1"] = {"findings": [no], "head": "HEAD", "gap": gap}
+        job = SimpleNamespace(fn="F1", started=time.monotonic(), out=drv.ov / "none.json", timed_out=False,
+                              attempt=1, head="HEAD", model="m")
+        with mock.patch.object(drv, "reset_wt"), mock.patch.object(drv, "gap_nos", side_effect=lambda f, g, r: r), \
+                mock.patch.object(drv, "start_polish_fix") as fix:
+            drv.after_verify(job)
+        return drv, fix
 
-    def test_verified_dedup_no_on_the_last_attempt_lands_and_records_a_gap(self):  # trial 7 F02
+    def test_verified_dedup_no_with_plan_gap_fails_and_sends_the_owner_a_depfix(self):  # pf-F item 2
+        drv, fix = self.dedup_verified("C07: beta must export LIMIT; beta is outside the allowed paths")
+        rec = drv.st["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["attempts"], rec["dupfixes"], rec["blocked_on"]),
+                         ("planned", 0, 1, "depfix-dup-F1"))  # failed review, waits, no attempt spent
+        self.assertNotIn("F1", drv.land_queue)
+        self.assertEqual(fix.call_args.args[0], "beta")
+        self.assertEqual(fix.call_args.kwargs["fid"], "depfix-dup-F1")
+        self.assertIn("src/beta/f2.py", fix.call_args.args[1][0]["file"])
+        self.assertIn("existing item to reuse instead: `src/beta/f2.py:3`", rec["last_reason"])
+        ev = self.events(drv.repo)
+        self.assertFalse([e for e in ev if e["event"] == "review_pass"], ev)
+        self.assertTrue(any(e["event"] == "review_fail" and "plan gap + depfix-dup-F1" in e["detail"] for e in ev))
+        self.assertIn("beta must export LIMIT", (drv.ov / "plan-gaps.jsonl").read_text(encoding="utf-8"))
+        drv.depfix_settled("depfix-dup-F1", True)  # it landed: F1 builds again, with the NO
+        self.assertIsNone(drv.st["functions"]["F1"]["blocked_on"])
+
+    def test_verified_dedup_no_in_its_own_module_is_an_ordinary_review_fail(self):  # pf-F item 2
+        drv, fix = self.dedup_verified("C07: copy of alpha's own helper", other="src/alpha/f0.py:2")
+        fix.assert_not_called()
+        rec = drv.st["functions"]["F1"]
+        self.assertEqual((rec["status"], rec["attempts"]), ("planned", 1))
+        self.assertIn("existing item to reuse instead: `src/alpha/f0.py:2`", rec["last_reason"])
+
+    def test_verified_dedup_no_on_the_last_attempt_fails_review(self):  # pf-F item 2 (was: landed, trial 7 F02)
         review = {"checklist": "v1",
                   "items": [{"id": "C03", "answer": "no", "file": "src/alpha/f1.py", "line": 1,
                              "evidence": "help text repeats the limit", "fix": "build it from LIMIT"}]}
         repo = self.make_repo({"F1": {"review": [review]}}, retries=0)
         rc, out = self.drive_cli(repo)
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "proven")
-        gaps = (repo / ".overhaul" / "plan-gaps.jsonl").read_text(encoding="utf-8")
-        self.assertIn("help text repeats the limit", gaps)
+        self.assertEqual(rc, 3, out)
+        self.assertEqual(self.state(repo)["functions"]["F1"]["status"], "needs-plan")
+        ev = self.events(repo)
+        self.assertFalse([e for e in ev if e["event"] in ("review_pass", "land_ok") and e["fn"] == "F1"], ev)
 
     def test_plan_gap_with_a_verified_behaviour_no_goes_to_needs_plan(self):  # F15, trial 6 F05
         review = {"checklist": "v1", "plan_gap": "C13: beta must export LIMIT; beta is outside the allowed paths",

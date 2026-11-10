@@ -1,5 +1,16 @@
 # overhaul-build changelog
 
+## pf-F: phase audits run, a verified duplicate fails review, 2026-11-10
+- Phase audit (the pilot project: phase_audit = true, 0 phase_audit events in 3 days): a final polish that ended before the plan
+  grew (st.polish status done) no longer blocks every phase audit; phases are scanned past the first unfinished one;
+  a phase is also due after `[harness] phase_audit_every` (default 15) of its rows proven since its last audit (a
+  "lands" audit locks only what its fixes edit, so builds go on beside it); a done audit re-arms on the next trigger;
+  event phase_audit on start. Tests: test_phase_audit AppSettings.
+- A verified C03/C05-class duplicate NO always fails review (was: "recorded as plan gap" and passed, 20 in the pilot project's
+  log). One only another module can clear becomes a plan gap AND depfix-dup-<id> to that module; the function waits
+  without spending an attempt, then retries with the NO. Retry NOs name the existing item to reuse (`other`).
+  Tests: test_drive dedup_verified units, last-attempt dup now fails.
+
 ## Stacked starts, 2026-11-09
 Owner 2026-11-09: 40 slots, at least 10 functions/h, prove it. rate_sim.py (overhaul-trial; the pilot project's real dependency
 graph and 58 measured cycles, briefs/rate-proof.md): with only proven deps the rate is width-bound at ~7.5/h whatever

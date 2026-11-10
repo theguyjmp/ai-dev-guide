@@ -189,6 +189,7 @@ DUP_IDS = ("C03", "C05")  # checklist duplication items: a cross-module one goes
 # in two modules) and A02 (a module reaching around its owner's API) route like DUP_IDS: the caller gets the fix.
 ARCH_ITEMS = {"A01": "P1", "A02": "P1", "A03": "P0", "A04": "P1", "A05": "P1"}
 ARCH_DUP_IDS = ("A01", "A02")
+PHASE_AUDIT_EVERY = 15  # default [harness] phase_audit_every: a phase audit per N of its rows proven since the last
 ARCH_EVERY_LANDS = 25  # default [harness] arch_audit_every_lands: a whole-tree arch audit (the sweep) per N lands
 ARCH_FID, SWEEP_FID, SWEEP_VERIFY = "arch-audit", "arch-sweep", "arch-verify"
 
@@ -398,7 +399,8 @@ def where(n: dict) -> str:
 
 def format_nos(nos: list[dict]) -> str:
     return "\n".join(f"- [{n['id']} {n['severity']}] `{where(n)}` {n.get('evidence') or n.get('issue') or ''}"
-                     + (f" -> {n['fix']}" if n.get("fix") else "") for n in nos)
+                     + (f" -> {n['fix']}" if n.get("fix") else "")
+                     + (f" (existing item to reuse instead: `{n['other']}`)" if n.get("other") else "") for n in nos)
 
 
 def changed_lines(cwd: Path, old: str, new: str) -> dict[str, set[int]] | None:
@@ -751,6 +753,7 @@ class Driver(mainred.MainRed):
         self.phase_polish = bool(har.get("phase_polish", True))  # item 8: gaps, probes and polish per phase too
         self.phase_audit = bool(har.get("phase_audit", True))  # the same per-phase polish beside builds, no barrier
         self.arch_every = max(0, int(har.get("arch_audit_every_lands", ARCH_EVERY_LANDS)))
+        self.phase_audit_every = max(0, int(har.get("phase_audit_every", PHASE_AUDIT_EVERY)))
         self.arch_meta: dict[str, dict] = {}  # arch audit fid -> {"phase": n, "file": path}
         self.fns: dict[str, Fn] = {}
         self.deferred: set[str] = set()  # rows planned later: never built, counted apart
@@ -1464,8 +1467,9 @@ class Driver(mainred.MainRed):
         """The plan gaps of the polish in scope: those phase N's functions recorded, or for the final pass every
         gap a phase gap pass has not already taken (a gap of a function outside the plan goes to the final pass)."""
         phase_of, n = {f.id: phase_key(f)[0] for f in self.order}, self.polish_phase()
-        if n is not None:
-            return [e for e in self.read_gaps() if phase_of.get(str(e.get("fn"))) == n]
+        if n is not None:  # minus those an earlier audit of this phase already took
+            done = set(self.polish_state().get("gaps_done") or [])
+            return [e for e in self.read_gaps() if phase_of.get(str(e.get("fn"))) == n and e.get("gap") not in done]
         taken = {int(k) for k, v in self.st.get("phase_polish", {}).items() if v.get("gaps")}
         return [e for e in self.read_gaps() if phase_of.get(str(e.get("fn"))) not in taken]
 
@@ -2205,23 +2209,14 @@ class Driver(mainred.MainRed):
             self.land_queue.append(fid)
             self.set(fid, status="landing")
             return
-        if (all(n["id"] in DEDUP_IDS for n in real)
-                and self.st["functions"][fid]["attempts"] + 1 > self.budget(fid)):
-            note = " / ".join(f"[{n['id']} {where(n)}] {n.get('evidence', '')} {n.get('fix', '')}" for n in real)
-            self.keep_gap(fid, f"{gap} / {note}" if gap else note)  # a duplicate never parks a working function
-            self.log(fid, "review_pass", f"{len(real)} verified dedup NOs ({', '.join(n['id'] for n in real)}) "
-                     f"recorded as plan gap on the last attempt model={job.model}", secs, tokens)
-            self.land_queue.append(fid)
-            self.set(fid, status="landing")
-            return
+        # pf-F: a verified duplicate NO always fails review (pilot2026-11-10: 20 passed "recorded as plan gap").
+        # Only one another module must change for (its owner has to export the item) is a plan gap AND a depfix of
+        # that module; the function waits for it without spending an attempt, then retries with the NO.
         stuck = self.gap_nos(fid, gap, real)
-        if stuck and gap and all(n["id"] in DEDUP_IDS for n in stuck) and len(stuck) == len(real):
-            self.keep_gap(fid, gap)  # only another module's shared constant or helper can fix it: batch it
-            self.log(fid, "review_pass", f"{len(real)} verified dedup NOs ({', '.join(n['id'] for n in stuck)}) "
-                     f"recorded as plan gap model={job.model}", secs, tokens)
-            self.land_queue.append(fid)
-            self.set(fid, status="landing")
-            return
+        if stuck and all(n["id"] in DEDUP_IDS for n in stuck) and len(stuck) == len(real):
+            if self.dup_depfix(fid, gap, real, job, secs, tokens):
+                return
+            stuck = []  # no other module to change: the builder reuses the existing item itself
         stuck = [n for n in stuck if n["id"] not in DEDUP_IDS]
         if stuck:
             notes = (f"PLAN-GAP: {gap} / " if gap else "") + " / ".join(
@@ -2232,6 +2227,10 @@ class Driver(mainred.MainRed):
             return
         self.keep_gap(fid, gap)
         self.log(fid, "review_fail", f"{len(real)} verified blocking NOs model={job.model}", secs, tokens)
+        self.fail(fid, self.review_nos(fid, job, real))
+
+    def review_nos(self, fid: str, job: Job, real: list[dict]) -> str:
+        """Record a failed review's verified NOs (state and reviews/<id>-nos.md); the retry's reason line."""
         prev = self.st["functions"][fid].get("review") or {}
         self.set(fid, review={"head": job.head, "ids": sorted({n["id"] for n in real}),
                               "round": prev.get("round", 0) + 1})
@@ -2239,8 +2238,34 @@ class Driver(mainred.MainRed):
         listing = format_nos(real)
         full.write_text(f"# Verified blocking NOs for {fid}: fix every one\n\n{listing}\n", encoding="utf-8")
         head = f"review FAIL: {len(real)} verified blocking NOs; fix every one (full list: {full.as_posix()}):\n"
-        self.fail(fid, head + (listing if len(head) + len(listing) <= REASON_MAX
-                               else listing[:REASON_MAX - len(head) - 4] + " ..."))
+        return head + (listing if len(head) + len(listing) <= REASON_MAX
+                       else listing[:REASON_MAX - len(head) - 4] + " ...")
+
+    def dup_depfix(self, fid: str, gap: str, real: list[dict], job: Job, secs: float, tokens: int | None) -> bool:
+        """Verified duplicate NOs only another module can clear (it must export the item): a plan gap, plus one fix
+        pass in that module (depfix-dup-<id>); the function fails review, waits for it without spending an attempt
+        and retries with the NOs. False when no other owner module is found or this function had its dup depfix."""
+        rec, own = self.st["functions"][fid], self.fns[fid].module
+        owners = [self.owner_module(str(n.get("other") or "").split(":")[0]) or str(n.get("module") or "")
+                  for n in real] + self.gap_modules([{"gap": gap}] if gap else [])
+        module = next((m for m in owners if m and m != own), "")
+        dfid = f"{DEPFIX_PREFIX}dup-{fid}"
+        if not module or rec.get("dupfixes", 0) >= 1 or dfid in self.jobs or dfid in self.polish_lands:
+            return False
+        note = " / ".join(f"[{n['id']} {where(n)}] {n.get('evidence', '')} {n.get('fix', '')}" for n in real)
+        self.keep_gap(fid, f"{gap} / {note}" if gap else note)
+        self.log(fid, "review_fail", f"{len(real)} verified dedup NOs ({', '.join(n['id'] for n in real)}) need "
+                 f"{module} to export the existing item: plan gap + {dfid} model={job.model}", secs, tokens)
+        reason = self.review_nos(fid, job, real)
+        self.set(fid, status="planned", dupfixes=rec.get("dupfixes", 0) + 1, blocked_on=dfid,
+                 last_reason=f"waiting on {dfid}; then {reason}"[:REASON_MAX])
+        items = [{"file": str(n.get("other") or where(n)).split(":")[0], "line": "?",
+                  "rule": f"duplicate found by the review of {fid} ({n['id']})",
+                  "evidence": f"{n.get('evidence', '')}. Export the existing item from {module} (no behaviour "
+                              f"change) so {fid} in {own} can import it instead of its copy at {where(n)}."}
+                 for n in real]
+        self.start_polish_fix(module, items, fid=dfid)
+        return True
 
     # ---- land ----
     def footprint(self, fid: str) -> list[str]:
@@ -2371,19 +2396,46 @@ class Driver(mainred.MainRed):
     # Per phase (item 8): with the phase barrier on, when every function of phase N (not the last) is proven, the
     # same gap pass, probes and audit/fix rounds run scoped to phase N before phase N+1 starts. Its state is
     # st["phase_polish"][N] and its files .overhaul/polish/phase-N/; the final whole-tree polish still runs at the end.
+    # pf-F (pilot2026-11-10, 0 phase audits in 3 days): a final polish that ended before the plan grew (status
+    # done) no longer blocks every phase audit, phases are scanned past the first unfinished one, and a phase is also
+    # due after [harness] phase_audit_every lands since its last audit (its open rows wait on needs-plan for days).
+    # A lands audit ("why": "lands") locks only what its fixes edit; a done audit re-arms on the next trigger.
     def polish_phase(self) -> int | None:
         """The phase whose polish is due or running now; None for the final whole-tree polish (or none at all)."""
         phases = sorted({phase_key(f)[0] for f in self.order})
         fin = self.st.get("polish") or {}
         if (not self.phase_audit_on() or len(phases) < 2 or self.polish_rounds < 1
-                or fin.get("round") or fin.get("status", "idle") != "idle"):
-            return None  # the final polish already started (a resumed run): no phase polish behind it
-        recs, ended = self.st["functions"], self.st.get("phase_polish", {})
-        for n in phases[:-1]:
-            if ended.get(str(n), {}).get("status") in ("done", "failed"):
+                or fin.get("status", "idle") not in ("idle", "done", "failed")):
+            return None  # the final polish is running: no phase polish beside it
+        ended = self.st.get("phase_polish") or {}
+        for k, pol in ended.items():  # one already running keeps the slot until it ends
+            if pol.get("status") in ("gaps", "audit", "fix") or (pol.get("status") == "idle" and "locked" in pol):
+                return int(k)
+        for n in phases:
+            if (why := self.phase_due(n, n == phases[-1])) is None:
                 continue
-            return n if all(recs[f.id]["status"] == "proven" for f in self.phase_fns(n)) else None
+            self.st["phase_polish"], pol = ended, ended.get(str(n))
+            fresh = {"round": 0, "status": "idle", "issues": None, "history": []}
+            if pol is not None and pol.get("status") in ("done", "failed"):  # re-arm: a new audit of this phase
+                fresh.update(history=pol.get("history", []), at=pol.get("at", 0), gaps_done=pol.get("gaps_done", []))
+                ended[str(n)] = fresh
+            ended.setdefault(str(n), fresh)["why"] = why
+            return n
         return None
+
+    def phase_due(self, n: int, last: bool) -> str | None:
+        """Why phase n's audit is due now: "complete" (every row proven, not the last phase: the final polish covers
+        that), "lands" (phase_audit_every of its rows proven since its last audit), or None."""
+        fns = self.phase_fns(n)
+        proven = sum(1 for f in fns if self.st["functions"][f.id]["status"] == "proven")
+        pol = (self.st.get("phase_polish") or {}).get(str(n)) or {}
+        ended = pol.get("status") in ("done", "failed")
+        at = int(pol.get("at", len(fns) if ended else 0))  # a done record without "at" audited the whole phase
+        if proven == len(fns):
+            return None if last or (ended and at >= proven) else "complete"
+        if not self.phase_audit or self.phase_audit_every < 1:
+            return None
+        return "lands" if proven - at >= self.phase_audit_every else None
 
     def phase_fns(self, n: int | None) -> list[Fn]:
         """The (non-deferred) functions in polish scope: phase n's, or every one for the final polish."""
@@ -2419,7 +2471,12 @@ class Driver(mainred.MainRed):
         if n is None and any(self.st["functions"][fid]["status"] != "proven" for fid in self.fns):
             return False
         if n is not None and "locked" not in pol:  # what audit_locked holds from now until this polish ends
-            pol["locked"] = sorted({f.module for f in self.phase_fns(n)} | set(self.gap_modules(self.scope_gaps())))
+            mine = set() if pol.get("why") == "lands" else {f.module for f in self.phase_fns(n)}
+            pol["locked"] = sorted(mine | set(self.gap_modules(self.scope_gaps())))
+            pol["at"] = sum(1 for f in self.phase_fns(n) if self.st["functions"][f.id]["status"] == "proven")
+            locks = ", ".join(pol["locked"]) or "-"
+            self.log(None, "phase_audit", f"phase {n} start ({pol.get('why', 'complete')}): {pol['at']} of "
+                                          f"{len(self.phase_fns(n))} rows proven, locks {locks}")
         started = self.pump_polish_land()
         if self.probe_waiting(n) or self.sweep_state()["status"] != "idle":
             return started
@@ -2463,7 +2520,8 @@ class Driver(mainred.MainRed):
                           "a gap that would change behaviour and say so in your hand-back.\n"}]
         items += [{"text": f"- [plan gap from {e.get('fn', '?')}, module {e.get('module', '?')}] {e['gap']}"}
                   for e in gaps]
-        pol.update(gaps="started", status="gaps")
+        pol.update(gaps="started", status="gaps", gaps_done=sorted({*(pol.get("gaps_done") or []),
+                                                                   *(str(e.get("gap")) for e in gaps)}))
         self.save()
         self.log(GAPS_FID, "plan_gaps", f"start: {len(gaps)} gaps across {', '.join(modules)}")
         self.start_polish_fix(", ".join(modules), items, fid=GAPS_FID)
@@ -2978,7 +3036,9 @@ class Driver(mainred.MainRed):
             return set()
         n, out = self.polish_phase(), set()
         if n is not None:  # due: its phase's modules at once, then what polish_step records (plus its plan gaps)
-            out = set(self.polish_state().get("locked") or {f.module for f in self.phase_fns(n)})
+            pol = self.polish_state()  # a lands audit (open rows still to build) locks only what its fixes edit
+            mine = set() if pol.get("why") == "lands" else {f.module for f in self.phase_fns(n)}
+            out = set(pol["locked"]) if "locked" in pol else mine
         fixes = [m for m, _ in self.polish_queue] + [m for fid, (m, _) in self.polish_meta.items()
                                                     if fid.startswith(("polish-", "arch-")) and self.fix_open(fid)]
         for m in fixes:
