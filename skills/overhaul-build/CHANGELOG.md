@@ -1,5 +1,31 @@
 # overhaul-build changelog
 
+## One capability index, semantic duplicate gate (pass E), 2026-11-10
+Owner 2026-11-10: builders must check an organized index of existing helpers before writing one; a textual dup check
+let 4 private copies of app_core helpers through (`invalid` with swapped argument order, `bad_param`, `whole`,
+`text_param`; briefs/manager-review-0822.md).
+- scripts/index_api.py: `spec/index/<module>.md` per ARCHITECTURE.md module, every item (pub and private) as
+  `path:line  kind name(signature) -> ret  // first doc line  [purpose: ..]`, and `spec/INDEX.md` (module -> items).
+  Rust by rust_src's lexer (impl/trait owners, cfg(test) and fn bodies skipped), Python by ast, JS/TS by regex;
+  deterministic. `--check` reports stale files, `--pairs N` lists the tree's strongest duplicate pairs.
+- land.py regenerates and commits the INDEX with every land commit (and a polish land), one helper `stage_index`;
+  the stacked-land same-tree check ignores the INDEX files. plan_land.py (pass D) should call
+  `index_api.regen_and_stage(wt, mods)` before its commit once both are merged.
+- Semantic duplicate gate (`index_api.semantic_problem`): each function the diff adds is scored against main's
+  items: IDF-weighted purpose tokens 0.4, normalized signature 0.3 (parameter types as a multiset, return type;
+  `String`=`str`), body identifiers 0.3; or by name: the same rare compound name, never for associated fns or a
+  function returning its own file's type. Plan stubs (`todo!`, "not built") and sibling-convention names (the same
+  name in 3+ files of one directory) are skipped. At `[harness] dup_semantic_min` (default 0.70; 0 off) drive.py
+  sends the build back before the gate and review, naming `reuse <path::name>` (first time not counted, event
+  dup_semantic), and land.py refuses the land.
+- Threshold on the pilot project bae1ce5: the 4 review pairs score 1.00 (`invalid`), 0.75 (`bad_param`), 0.72 (`whole`), 0.71
+  (`text_param`); 50 tree pairs at >= 0.70, all real duplicates on inspection (44 confirmed by blanked body shape
+  >= 0.8 or the review, 6 by hand); the nearest non-duplicate is `parse_query` x2 at 0.689.
+- Build brief: "Existing helpers you must reuse" with the ranked INDEX lines of the row's module and its
+  dependencies (`[harness] index_top`, default 40, at most 1/8 of brief_max_tokens), the search command and the
+  FAIL rule. Review brief: the same lines; C05 evidence cites the INDEX line checked for each new function.
+- tests/test_index_api.py.
+
 ## Stacked starts, 2026-11-09
 Owner 2026-11-09: 40 slots, at least 10 functions/h, prove it. rate_sim.py (overhaul-trial; the pilot project's real dependency
 graph and 58 measured cycles, briefs/rate-proof.md): with only proven deps the rate is width-bound at ~7.5/h whatever

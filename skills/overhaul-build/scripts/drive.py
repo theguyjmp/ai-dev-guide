@@ -55,6 +55,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import drivelock  # noqa: E402  beside this script: one drive per repo, orphans, slot markers
+import index_api  # noqa: E402  beside this script: the capability INDEX and the semantic duplicate gate
 import land as land_mod  # noqa: E402  the lock protocol is land.py's
 import mainred  # noqa: E402  beside this script: main red, systemic failures, dead depfixes
 import memcap  # noqa: E402  beside this script: [limits] proc_mem_gb
@@ -166,6 +167,8 @@ LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py'
 # (pilot2026-11-09: 20 slot target dirs of ~10 GB filled Z: to 0 GB and ENOSPC killed the drive)
 MIN_FREE_GB = 40.0
 INCREMENTAL = ("*/debug/incremental/*", "*/release/incremental/*")
+HELPERS_TOP = 40  # [harness] index_top: INDEX lines a build or review brief lists, ranked by purpose
+HELPERS_SHARE = 8  # those lines take at most 1/HELPERS_SHARE of brief_max_tokens
 DEFAULTS = {
     "limits": {"builder_max_calls": 60, "brief_max_tokens": 40000,
                "retries_per_function": 1, "conflict_retries": 2, "builder_timeout_min": 30,
@@ -714,6 +717,8 @@ class Driver(mainred.MainRed):
         self.land_timeout_s = float(har.get("land_timeout_min", land_mod.LAND_TIMEOUT_MIN) or 0) * 60
         self.max_calls = int(lim["builder_max_calls"])
         self.max_tokens = int(lim["brief_max_tokens"])
+        self.dup_semantic_min = float(har.get("dup_semantic_min", index_api.DUP_SEMANTIC_MIN))
+        self.index_top = int(har.get("index_top", HELPERS_TOP))
         self.retries = int(lim["retries_per_function"])
         self.conflict_retries = max(0, int(lim["conflict_retries"]))
         self.timeout_s = float(lim["builder_timeout_min"]) * 60
@@ -1530,6 +1535,70 @@ class Driver(mainred.MainRed):
         return f"{len(pairs)} tests of proven rows {rows}:\n\n" + "\n".join(
             f"- `{cmd}`" for _, cmd in land_mod.batch_cmds(tmpl, [n for _, n in pairs]))
 
+    def index_modules(self) -> dict[str, list[str]]:
+        """{module: paths} of every planned module, as the allowed paths read them from ARCHITECTURE.md."""
+        mods = dict.fromkeys(f.module for f in self.order if f.module)
+        return {m: module_paths(module_section(self.arch, m), m) for m in mods}
+
+    def helpers_lines(self, f: Fn) -> list[str]:
+        """main's INDEX lines of the row's module and every module it may depend on (transitively), ranked by
+        purpose-token overlap with the row and its acceptance test; [] when the plan has no module Paths."""
+        mods, todo = [], [f.module]
+        while todo:
+            m = todo.pop(0)
+            if m not in mods:
+                mods.append(m)
+                todo += module_deps(self.arch, m)
+        try:
+            idx = index_api.index_at(self.repo, self.main_sha(), self.index_modules())
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            self.log(f.id, "index_error", str(e)[:300])
+            return []
+        items = [it for m in mods for it in idx.get(m, [])]
+        lines = index_api.ranked(items, f.row + "\n" + self.acceptance_text(f), self.index_top)
+        budget, out = self.max_tokens * 4 // HELPERS_SHARE, []
+        for ln in lines:
+            ln = ln if len(ln) <= 300 else ln[:297] + "..."
+            if sum(len(x) + 1 for x in out) + len(ln) > budget:
+                break
+            out.append(ln)
+        return out
+
+    def helpers_text(self, f: Fn) -> str:
+        lines = self.helpers_lines(f)
+        if not lines:
+            return ("(no indexed item of this module or its dependencies matches this row's words; still search "
+                    f"`{index_api.INDEX_DIR}/` before writing any function)")
+        return "```\n" + "\n".join(lines) + "\n```"
+
+    def semantic_dup(self, fid: str) -> str:
+        """The semantic duplicate gate on fn/<fid>'s new functions against main (index_api), or ''."""
+        if self.dup_semantic_min <= 0:
+            return ""
+        branch = f"fn/{fid}"
+        try:
+            changed = [p for p in git(self.repo, "diff", "--name-only", *self.span(branch)).splitlines() if p]
+            return index_api.semantic_problem(self.repo, self.main_sha(), branch, changed, self.index_modules(),
+                                              self.dup_semantic_min)
+        except (OSError, ValueError, DriveError, subprocess.SubprocessError) as e:
+            self.log(fid, "index_error", str(e)[:300])
+            return ""
+
+    def dup_requeue(self, fid: str) -> bool:
+        """Pre-review: a semantic duplicate sends the build back before the gate and the review. The first time the
+        attempt is not counted (the builder had no index hit to go on); after that it is an ordinary failure."""
+        if fid not in self.fns or not (problem := self.semantic_dup(fid)):
+            return False
+        rec = self.st["functions"][fid]
+        self.log(fid, "dup_semantic", problem)
+        if rec.get("dup_free"):
+            self.fail(fid, problem)
+        else:
+            rec["dup_free"] = True
+            self.set(fid, status="planned", last_reason=f"(not counted) {problem}"[:REASON_MAX])
+            self.say(f"{fid} sent back before review, attempt not counted: {problem}")
+        return True
+
     def dup_text(self) -> str:
         """The build brief's C05 section: git grep for each new name, then the dup and literals commands."""
         lines = ['- `git grep -n "<words>"` for every helper, constant, message or format string you added: its '
@@ -1626,6 +1695,7 @@ class Driver(mainred.MainRed):
             "allowed_paths": self.allowed(f), "acceptance_source": self.acceptance_text(f),
             "policies": self.policies(f), "commands": self.commands_text(f), "max_calls": str(self.max_calls),
             "footprint": self.footprint_text(f), "dup_check": self.dup_text(),
+            "helpers": self.helpers_text(f), "index_dir": index_api.INDEX_DIR,
             "previous": previous + stack.brief_note(on), **self.standard_values(f)})
         tokens = len(brief) // 4
         if tokens > self.max_tokens:
@@ -1671,6 +1741,8 @@ class Driver(mainred.MainRed):
             return
         if problem := self.build_problem(job, text):
             self.to_review(job, problem)
+            return
+        if job.kind == "build" and self.dup_requeue(job.fn):
             return
         self.gate_async(job)
 
@@ -2081,7 +2153,8 @@ class Driver(mainred.MainRed):
             "policies": self.policies(f), **values, "checklist_path": CHECKLIST.as_posix(),
             "checklist_version": checklist()[0],
             "checklist": checklist_text(applicable_items(scope, bool(f.rules))),
-            "round_rule": self.round_rule(fid),
+            "round_rule": self.round_rule(fid), "helpers": self.helpers_text(f),
+            "index_dir": index_api.INDEX_DIR,
             "diffstat": git(self.repo, "diff", "--stat", *span).rstrip(),
             "diff": git(self.repo, "diff", *span).rstrip(),
             "max_calls": str(REVIEW_MAX_CALLS)})

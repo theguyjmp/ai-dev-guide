@@ -63,6 +63,7 @@ import tomllib
 from pathlib import PurePosixPath
 
 import anchors  # beside this script
+import index_api  # beside this script: the capability INDEX files and the semantic duplicate gate
 import memcap  # beside this script: [limits] proc_mem_gb
 import priority  # beside this script: Windows process priority classes
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
@@ -809,6 +810,8 @@ def gate_branch(repo, fid, main, timeout, stack=(), own=False):
     if bad:
         raise LandFail(f"{branch} edits plan files: {', '.join(bad[:5])}")
     check_anchors(repo, main_sha, fn_sha, branch, fpath)
+    if dup := semantic_dup(repo, conf, main_sha, fn_sha, touched):
+        raise LandFail(dup)
 
     prepare_worktree(repo, wt)
 
@@ -834,7 +837,8 @@ def gate_branch(repo, fid, main, timeout, stack=(), own=False):
             stacked = []
             break
     ctx = dict(fid=fid, wt=wt, out_path=out_path, branch=branch, main_sha=main_sha, fn_sha=fn_sha,
-               commands=commands, fpath=fpath, rows=rows, mine=mine, stacked=stacked, touched=touched,
+               commands=commands, fpath=fpath, apath=arch_path(conf), rows=rows, mine=mine, stacked=stacked,
+               touched=touched,
                tiers=tier_globs(conf), near=footprint_modules(repo, main_sha, conf, touched))
     gate_tree(ctx, rows, stacked, timeout)
     ctx["gated"] = git(wt, "rev-parse", "HEAD").stdout.strip()
@@ -886,6 +890,32 @@ def footprint_modules(repo, main_sha, conf, touched):
     apath = conf.get("paths", {}).get("architecture", "spec/ARCHITECTURE.md")
     arch = git(repo, "show", f"{main_sha}:{apath}", check=False).stdout
     return touched_modules(arch, touched)
+
+
+def arch_path(conf):
+    return conf.get("paths", {}).get("architecture", "spec/ARCHITECTURE.md")
+
+
+def semantic_dup(repo, conf, main_sha, fn_sha, touched):
+    """The semantic duplicate gate (index_api) on what the branch adds against main's tree, or ''. [harness]
+    dup_semantic_min (0 turns it off) is the threshold."""
+    thr = float(conf.get("harness", {}).get("dup_semantic_min", index_api.DUP_SEMANTIC_MIN))
+    if thr <= 0:
+        return ""
+    mods = module_paths(git(repo, "show", f"{main_sha}:{arch_path(conf)}", check=False).stdout)
+    return index_api.semantic_problem(repo, main_sha, fn_sha, touched, mods, thr)
+
+
+def stage_index(wt, apath):
+    """Regenerate the capability INDEX files on the merged tree in wt and stage them (S28: generated, never edited
+    by hand). True when they changed."""
+    arch = os.path.join(wt, apath)
+    if not os.path.isfile(arch):
+        return False
+    with open(arch, encoding="utf-8") as f:
+        index_api.regen_and_stage(wt, module_paths(f.read()))
+    return git(wt, "diff", "--cached", "--quiet", "--", index_api.INDEX_DIR, index_api.SUMMARY,
+               check=False).returncode != 0
 
 
 def regression(rows, ids, commands, wt, out_path, timeout, tiers=(), near=None, extra=()):
@@ -1041,8 +1071,9 @@ def commit_land(repo, ctx, main, timeout):
         if merged.returncode != 0:
             git(wt, "merge", "--abort", check=False)
             raise LandFail(f"merge conflict merging {main} into {branch}")
-        same = stack_ok and git(wt, "diff", "--quiet", ctx["gated"], "HEAD", "--", ".",
-                                f":(exclude){fpath}", check=False).returncode == 0
+        same = stack_ok and git(wt, "diff", "--quiet", ctx["gated"], "HEAD", "--", ".", f":(exclude){fpath}",
+                                f":(exclude){index_api.INDEX_DIR}", f":(exclude){index_api.SUMMARY}",
+                                check=False).returncode == 0
         ctx["regated"] = not same
         if not same:  # main moved by something the gate did not see: gate the real tree, under the lock
             ctx["main_now"] = cur
@@ -1058,6 +1089,7 @@ def commit_land(repo, ctx, main, timeout):
     with open(fp, "w", encoding="utf-8", newline="") as f:
         f.write(text)
     git(wt, "add", "--", fpath)
+    stage_index(wt, ctx.get("apath", "spec/ARCHITECTURE.md"))
     git(wt, "commit", "-q", "-m", f"land {fid}: proven")
     new = git(wt, "rev-parse", "HEAD").stdout.strip()
     advance(repo, main, new, main_sha)
@@ -1135,6 +1167,8 @@ def land_polish(repo, fid, main, timeout):
         raise LandFail(f"merge conflict merging {main} into {branch}")
     gate_merged(wt, parse_functions(git(repo, "show", f"{main_sha}:{fpath}").stdout), commands,
                 os.path.join(ovh, "land.out"), timeout)
+    if stage_index(wt, arch_path(conf)):
+        git(wt, "commit", "-q", "-m", f"polish {fid}: regenerate INDEX")
     new = git(wt, "rev-parse", "HEAD").stdout.strip()
     advance(repo, main, new, main_sha)
     return new

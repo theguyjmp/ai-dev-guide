@@ -60,6 +60,20 @@ DONE, before review; a red one fails the attempt with the test named, and land.p
 
 {{footprint}}
 
+## Existing helpers you must reuse (from `{{index_dir}}/`, ranked by how close their purpose is to this row)
+
+These are main's INDEX lines (`path:line  kind name(signature) -> ret  // doc  [purpose: ..]`) of your module and
+every module it may depend on, public and private, the closest first:
+
+{{helpers}}
+
+Before you write any function, search the INDEX by purpose, not only by name:
+`git grep -n -i -E "<word>|<synonym>" -- {{index_dir}}/` (for example `param|field|refusal` before writing a param
+reader). Reuse the listed owner, or extend it (a parameter, `pub`), never write a second copy under another name. A
+new function whose purpose matches an indexed one is a review FAIL (C05), and drive.py's semantic duplicate gate
+sends the build back before review naming the helper to reuse. The INDEX files are generated on every land; never
+edit them.
+
 ## Duplication check (the reviewer's top blocking item, C05)
 
 Most failed reviews are C05: a helper, constant, message or 4+ line block that already exists elsewhere in the

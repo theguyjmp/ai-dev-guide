@@ -41,6 +41,15 @@ allowed.
 {{standard}}
 {{project_rules}}
 
+## Existing helpers (main's `{{index_dir}}/` lines closest to this row, for C05)
+
+{{helpers}}
+
+For C05, check every new function in the diff against the INDEX by purpose (`git grep -n -i -E "<word>|<synonym>"
+-- {{index_dir}}/`), not only by name. In the C05 evidence, cite the INDEX line you checked for each new function
+(`path:line name`), or say `no INDEX line matches <purpose words>`. A new function whose job an indexed one already
+does, under any name or argument order, is a C05 NO naming the owner to reuse.
+
 ## Checklist {{checklist_version}} (from `{{checklist_path}}`): answer every item below
 
 {{checklist}}
