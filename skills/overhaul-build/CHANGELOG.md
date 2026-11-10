@@ -1,5 +1,22 @@
 # overhaul-build changelog
 
+## Remote builders, 2026-11-09
+Owner 2026-11-09: "we have 2 computers... USE THEM." Measured on the pilot project: 2 lands/h, against the harness's expected
+4.3/h with 13 laptop slots; every builder, review and test ran on the laptop and the desktop (16 logical CPUs) ran only the GPU
+gate.
+- remote.py (new) and `[harness.remote]`: build slots on a second machine on top of max_parallel. A remote build is one
+  local process drive spawns like a builder (so its timeout applies): push the start sha (refs/remote-builds/<id>) and
+  main, ssh `python -` with this file plus the job (no remote-shell quoting; cmd or sh alike), where it ships the
+  harness scripts the brief names, makes the worktree on fn/<id>, maps laptop paths in the brief, runs the same builder
+  command with the slot's CARGO_TARGET_DIR and the laptop repo's git identity, commits leftovers; then fetch fn/<id>
+  into the laptop worktree. Review, gate and land are unchanged.
+- An unusable host exits 75: `remote_offline` event, host offline for offline_min (10), function requeued with no
+  attempt counted. No CLAUDE_CODE_OAUTH_TOKEN on the host fails in about 2 s with one line; a builder refused by the
+  host's account (weekly limit, bad key) is the same. A timeout or drop kills the slot's tree on the host by pid file
+  (checked on the desktop: killing the local ssh left the builder running; the kill job ended it).
+- drive.py: `build_start ... host=<name>`, state `host`, local-slot counting; dash.py shows `on <host>` and a tile.
+- Checked on the desktop with a scratch repo: build round trip 8-22 s overhead, brief and env mapped, fetch back.
+
 ## Lean workers, 2026-11-09
 Measured on the pilot project (24 h to 16:48): the first API call of every worker session carried 34.6k to 37.9k tokens
 (median 37.5k) of fixed context before the worker read anything: the coordinator's global CLAUDE.md, auto-memory,

@@ -59,6 +59,7 @@ import mainred  # noqa: E402  beside this script: main red, systemic failures, d
 import memcap  # noqa: E402  beside this script: [limits] proc_mem_gb
 import periodic  # noqa: E402  beside this script: [gates.periodic]
 import priority  # noqa: E402  beside this script: Windows process priority classes
+import remote  # noqa: E402  beside this script: [harness.remote] builder slots on a second machine
 import router  # noqa: E402  beside this script: failure classes routed to their fix
 import worker  # noqa: E402  beside this script: lean claude launch, stream-json watch
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
@@ -232,6 +233,7 @@ class Job:
     slot: int = -1  # a land: k of its CARGO_TARGET_DIR .overhaul/target/land-<k>
     stream: worker.Stream | None = None  # a stream-json worker's live events (worker.py)
     idle: str = ""  # why the no-event watchdog killed it
+    host: str = ""  # a build on a [harness.remote] slot: the host's name; "" = this machine
 
 
 def now_iso() -> str:
@@ -763,6 +765,7 @@ class Driver(mainred.MainRed):
         self.width_since: float | None = None  # monotonic time ready rows first fell under free slots
         self.last_width = float("-inf")
         self.wait_cache: tuple[object, dict[str, int]] = (None, {})
+        self.remote = remote.Pool.from_harness(har, self.log, self.say)  # slots on top of max_parallel
 
     # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
@@ -1192,15 +1195,22 @@ class Driver(mainred.MainRed):
         launched = False
         if self.red_hold():  # main red, or stopping for the manager
             return False
-        ready = self.ready()  # resumed work first, then critical-path order (startable)
-        if ready and len(self.jobs) < self.max_parallel and not self.disk_guard("build start"):
-            return False
-        for f in ready:
-            if len(self.jobs) >= self.max_parallel:
+        local_ok: bool | None = None  # the disk guard, checked once, and only before a build on this machine
+        for f in self.ready():  # resumed work first, then critical-path order (startable)
+            if self.local_jobs() < self.max_parallel and local_ok is None:
+                local_ok = self.disk_guard("build start")
+            if self.local_jobs() < self.max_parallel and local_ok:
+                self.start_build(f)
+            elif self.remote and (k := self.remote.free_slot()) is not None:  # a host's disk is its own
+                self.start_build(f, rslot=k)
+            else:
                 break
-            self.start_build(f)
             launched = True
         return launched
+
+    def local_jobs(self) -> int:
+        """Jobs on this machine's max_parallel slots ([harness.remote] builds count on their host)."""
+        return sum(not j.host for j in self.jobs.values())
 
     def reap(self) -> bool:
         """Handle finished or timed-out jobs; True if any finished."""
@@ -1270,19 +1280,28 @@ class Driver(mainred.MainRed):
         model = {"review": self.review_model, "verify": self.verify_model}.get(kind, self.builder_model)
         return cmd + (["--model", model] if model else [])
 
-    def start_job(self, fid: str, kind: str, attempt: int, brief: Path, cwd: Path, tag: str = "") -> None:
+    def start_job(self, fid: str, kind: str, attempt: int, brief: Path, cwd: Path, tag: str = "",
+                  rslot: int | None = None) -> None:
         out = self.ov / "runs" / f"{fid}-a{attempt}-{tag or kind}.json"
         base = self.worker_cmd(kind)
         cmd = [*base, f"Read and do {brief.as_posix()}"]
         try:
-            proc = spawn(cmd, cwd, out, worker.env(cmd, self.slot_env(fid)))
+            if rslot is not None and self.remote:  # remote.py: push, build on the host, fetch fn/<id> back
+                env = {k: v for k, v in os.environ.items() if k != "OVERHAUL_HARNESS"}
+                proc = self.remote.start(rslot, fid, attempt, base, bool(self.custom_cmd(kind)), brief, cwd,
+                                         self.repo, self.main, self.ov / "runs", self.scripts, STANDARD.parent,
+                                         lambda c: spawn(c, self.repo, out, env), worker.env(base, {}))
+            else:
+                proc = spawn(cmd, cwd, out, worker.env(cmd, self.slot_env(fid)))
         except OSError as e:
             raise DriveError(f"cannot start the {kind} worker {cmd[0]}: {e}") from e
         model = base[base.index("--model") + 1] if "--model" in base[:-1] else (
             "custom" if self.custom_cmd(kind) else "default")
         start = time.monotonic()
-        self.jobs[fid] = self.watch(Job(fid, kind, proc, out, start, start + self.timeout_s, attempt, model=model),
-                                    cmd)
+        job = Job(fid, kind, proc, out, start, start + self.timeout_s, attempt, model=model,
+                  host=self.remote.name if rslot is not None and self.remote else "")
+        # a remote build's output arrives at its end (remote.py), so only a local one gets the idle watchdog
+        self.jobs[fid] = job if job.host else self.watch(job, cmd)
 
     def prepare_worktree(self, fid: str) -> Path:
         """A clean worktree on fn/<id> at main (reset on a retry)."""
@@ -1436,12 +1455,12 @@ class Driver(mainred.MainRed):
 
     def proven_footprint(self, fid: str, touched: list[str]) -> list[tuple[str, str]]:
         """[(row id, test id)]: the proven acceptance tests a change to `touched` (paths or path patterns) can
-        break, picked as land.py picks a regate's (land.footprint_rows over fid's module and the modules whose
-        Paths hold a touched path): rows of those modules, of every module depending on one, and of modules
+        break, picked as land.py picks a regate's (land.footprint_rows over footprint_modules: fid's module and the
+        modules whose Paths hold a touched path): rows of those modules, of every module depending on one, and of modules
         ARCHITECTURE.md does not list. A [tiers] test is in only when its row's module is touched itself, as land
         runs it. fid's own tests are left out: the build runs those anyway."""
         f = self.fns[fid]
-        mods = land_mod.touched_modules(self.arch, touched) | {f.module}
+        mods = self.footprint_modules(fid, touched)
         proven = self.proven_ids()
         rows = {r: {"status": "proven" if r in proven else "", "module": g.module} for r, g in self.fns.items()}
         ids, own, tiers, out = land_mod.footprint_rows(self.arch, rows, mods, fid), set(f.acceptance), \
@@ -1537,7 +1556,7 @@ class Driver(mainred.MainRed):
     def row_table(self, f: Fn) -> str:
         return f"{f.header}\n|{'---|' * len(cells(f.header))}\n{f.row}"
 
-    def start_build(self, f: Fn) -> None:
+    def start_build(self, f: Fn, rslot: int | None = None) -> None:
         rec = self.st["functions"][f.id]
         attempt = rec["attempts"] + 1
         resume = rec.get("resume") == "building"
@@ -1568,14 +1587,20 @@ class Driver(mainred.MainRed):
         wt = self.resume_worktree(f.id) if resume else self.prepare_worktree(f.id)
         path = self.ov / "briefs" / f"{f.id}.md"
         path.write_text(brief, encoding="utf-8")
-        self.start_job(f.id, "build", attempt, path, wt)
+        self.start_job(f.id, "build", attempt, path, wt, rslot=rslot)
+        host = self.jobs[f.id].host
         # a fresh branch from main: a fresh conflict budget; a resumed one keeps its own
-        self.set(f.id, status="building", **({} if resume else {"conflicts": 0}))
-        self.log(f.id, "build_start", f"attempt {attempt} model={self.jobs[f.id].model}"
+        self.set(f.id, status="building", host=host or None, **({} if resume else {"conflicts": 0}))
+        on = f" host={host}" if host else ""
+        self.log(f.id, "build_start", f"attempt {attempt} model={self.jobs[f.id].model}{on}"
                  + (" resumed" if resume else ""))
-        self.say(f"build {f.id} attempt {attempt}")
+        self.say(f"build {f.id} attempt {attempt}{on}")
 
     def after_build(self, job: Job) -> None:
+        if job.host and self.remote and self.remote.after(job.fn, job.proc.returncode, job.timed_out,
+                                                          job.out.with_suffix(".err")):
+            self.set(job.fn, status="planned", host=None)  # the host was unusable: requeued, no attempt spent
+            return
         tokens, turns, text = read_result(job.out)
         flags = (" over-budget" if turns is not None and turns > self.max_calls else "") + \
                 (" timeout" if job.timed_out else "")
@@ -2374,7 +2399,7 @@ class Driver(mainred.MainRed):
         if self.land_job and self.land_job.kind == "polish_land":
             held.append(self.land_job.fn)
         taken = [self.polish_claims(self.polish_meta[fid][0]) for fid in held if fid in self.polish_meta]
-        out, free = [], self.max_parallel - len(self.jobs)
+        out, free = [], self.max_parallel - self.local_jobs()
         queued = {m for m, _ in self.polish_queue}
         for item in self.polish_queue:
             if len(out) >= free:
@@ -2957,7 +2982,7 @@ class Driver(mainred.MainRed):
         proven = sum(1 for f in self.order if recs[f.id]["status"] == "proven")
         final = self.st.get("polish") or {}
         if (proven - sw["at"] < self.arch_every or proven == len(self.order) or self.polish_phase() is not None
-                or self.polish_queue or final.get("status", "idle") != "idle" or len(self.jobs) >= self.max_parallel):
+                or self.polish_queue or final.get("status", "idle") != "idle" or self.local_jobs() >= self.max_parallel):
             return False
         sw.update(at=proven, status="audit")
         self.start_arch_audit(SWEEP_FID, None, self.ov / "polish" / f"arch-sweep-{proven}.json")
@@ -3025,7 +3050,7 @@ class Driver(mainred.MainRed):
                 continue
             if any(recs[f.id]["status"] != "proven" for f in self.order if f.module == module):
                 continue
-            if len(self.jobs) >= self.max_parallel:
+            if self.local_jobs() >= self.max_parallel:
                 break
             self.start_probe(fid, module)
             started = True
@@ -3252,6 +3277,8 @@ class Driver(mainred.MainRed):
         """Kill every worker tree this run started; their functions go back to planned, marked to resume at their
         stage when the next drive starts (resume_mark)."""
         self.periodic.stop()
+        if self.remote:
+            self.remote.abort()  # what remote slots run on their host
         jobs = [*self.jobs.values(), *self.land_jobs()]
         for job in jobs:
             kill_tree(job.proc)
