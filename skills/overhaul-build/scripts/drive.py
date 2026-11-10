@@ -673,6 +673,7 @@ def load_config(repo: Path) -> dict:
     cfg["commands"] = {k: str(v) for k, v in raw_cmds.items() if not isinstance(v, dict)}
     cfg["acceptance"] = land_mod.acceptance_template(raw_cmds)
     cfg["extra"] = land_mod.extra_cmds(raw_cmds)
+    cfg["tiers"] = land_mod.tier_globs(raw)  # [tiers]: proven tests that rerun only inside a footprint, as at land
     cfg["plan"] = raw.get("plan") if isinstance(raw.get("plan"), dict) else {}  # plan_validate's keys, read-only
     cfg["periodic"] = periodic.config(raw)  # [gates.periodic]: slow gates on main in the background (X2, X13)
     return cfg
@@ -1320,6 +1321,110 @@ class Driver(mainred.MainRed):
         lines += [f"- {name}: `{cmd}`" for name, cmd in self.cfg.get("extra", [])]
         return "\n".join(lines) or "(overhaul.toml has no [commands])"
 
+    def proven_ids(self) -> set[str]:
+        recs = (getattr(self, "st", None) or {}).get("functions", {})
+        return {r for r, g in self.fns.items() if g.status == "proven" or recs.get(r, {}).get("status") == "proven"}
+
+    def proven_footprint(self, fid: str, touched: list[str]) -> list[tuple[str, str]]:
+        """[(row id, test id)]: the proven acceptance tests a change to `touched` (paths or path patterns) can
+        break, picked as land.py picks a regate's (land.footprint_rows over fid's module and the modules whose
+        Paths hold a touched path): rows of those modules, of every module depending on one, and of modules
+        ARCHITECTURE.md does not list. A [tiers] test is in only when its row's module is touched itself, as land
+        runs it. fid's own tests are left out: the build runs those anyway."""
+        f = self.fns[fid]
+        mods = land_mod.touched_modules(self.arch, touched) | {f.module}
+        proven = self.proven_ids()
+        rows = {r: {"status": "proven" if r in proven else "", "module": g.module} for r, g in self.fns.items()}
+        ids, own, tiers, out = land_mod.footprint_rows(self.arch, rows, mods, fid), set(f.acceptance), \
+            self.cfg.get("tiers", []), {}
+        for g in self.order:
+            for node in g.acceptance if g.id in ids else ():
+                if node not in own and node not in out and (g.module in mods or not land_mod.under(acc_file(node),
+                                                                                                  tiers)):
+                    out[node] = g.id
+        return [(rid, node) for node, rid in out.items()]
+
+    def footprint_text(self, f: Fn) -> str:
+        """The build brief's footprint section: the batched commands of proven_footprint() over the allowed paths."""
+        tmpl = self.cfg.get("acceptance") or self.cfg["commands"].get("acceptance")
+        pairs = self.proven_footprint(f.id, self.allowed_lists(f)[0]) if tmpl else []
+        if not pairs:
+            return "None yet: no proven row's acceptance test is in this function's footprint."
+        rows = ", ".join(dict.fromkeys(r for r, _ in pairs))
+        return f"{len(pairs)} tests of proven rows {rows}:\n\n" + "\n".join(
+            f"- `{cmd}`" for _, cmd in land_mod.batch_cmds(tmpl, [n for _, n in pairs]))
+
+    def dup_text(self) -> str:
+        """The build brief's C05 section: git grep for each new name, then the dup and literals commands."""
+        lines = ['- `git grep -n "<words>"` for every helper, constant, message or format string you added: its '
+                 "name and its core expression or distinctive words. A hit outside your change is a duplicate"]
+        lines += [f"- {n}: `{c}` (a finding in one of your changed files is a C05 NO)"
+                  for n in ("dup", "literals") if (c := self.cfg["commands"].get(n))]
+        return "\n".join(lines)
+
+    def footprint_problem(self, wt: Path, fid: str) -> str:
+        """The proven tests in the branch's real footprint (proven_footprint() over its changed files), run before
+        review in the worktree on fid's slot, batched as land runs them: a regression costs a retry with the test
+        named, not a review and a land slot. A failed [tiers] test reruns alone like at land; a test that also fails on
+        clean main is land's main-flake case and does not fail the attempt; a timeout is left to land. ''
+        when green, off ([harness] pre_review_footprint = false) or not a function."""
+        tmpl = self.cfg.get("acceptance") or self.cfg["commands"].get("acceptance")
+        if fid not in self.fns or not tmpl or not self.cfg["harness"].get("pre_review_footprint", True):
+            return ""
+        changed = [p for p in git(self.repo, "diff", "--name-only", f"{self.main}...fn/{fid}").splitlines() if p]
+        pairs = self.proven_footprint(fid, changed)
+        if not pairs:
+            return ""
+        owner = {n: r for r, n in pairs}
+
+        def runner(cmd: str) -> tuple[int, str, str]:
+            p = self.sh(cmd, wt, fid)
+            if p is None:
+                return 124, "timed out", ""
+            text = p.stdout + p.stderr
+            return p.returncode, " / ".join([ln.strip() for ln in text.splitlines() if ln.strip()][-8:]), text
+        res = land_mod.batch_results(tmpl, list(owner), runner)
+        self.log(fid, "footprint", f"{len(owner)} proven tests of {len(set(owner.values()))} rows before review: "
+                 f"{sum(1 for c, _, _ in res.values() if c != 0)} red")
+        for node, (code, tail, _) in res.items():
+            if code == 0:
+                continue
+            if code in (-1, 124):
+                self.log(fid, "footprint_timeout", f"{node} timed out before review; land runs it")
+                continue
+            # alone, for its own output; a [tiers] bench starved by the builders gets land's extra reruns
+            one = land_mod.acceptance_cmds(tmpl, [node])[0][1]
+            tier = land_mod.under(acc_file(node), self.cfg.get("tiers", []))
+            for _ in range(1 + (land_mod.TIER_RERUNS if tier else 0)):
+                code, tail, text = runner(one)
+                if code == 0:
+                    break
+            if code in (0, -1, 124) or self.footprint_red_on_main(node, one):
+                continue
+            out = self.ov / "runs" / f"{fid}-footprint.out"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(text, encoding="utf-8")
+            return memcap.note(text, f"regression before review: proven {owner[node]} {node} (exit {code}) is "
+                               f"red in the worktree after merging {self.main}: {tail} (full output: "
+                               f"{out.as_posix()}). Keep it green inside your allowed paths (rule 6 b), then "
+                               "hand back")
+        return ""
+
+    def footprint_red_on_main(self, node: str, cmd: str) -> bool:
+        """Whether a proven test is red on clean main too (cached per main sha): then it is not this branch's."""
+        sha = self.main_sha()
+        key = (sha, "footprint:" + node)
+        if key not in self.red_cache:
+            wt = self.prepare_worktree("main-check")
+            run(["git", "checkout", "-q", "-f", "--detach", sha], wt)
+            p = self.sh(cmd, wt, "main-check")
+            self.red_cache[key] = (p is None or p.returncode == 0, "")
+        red = not self.red_cache[key][0]
+        if red:
+            self.log(None, "footprint_main_red", f"{node} is red on clean {self.main} {sha[:12]} too; land's "
+                     "main-flake path owns it")
+        return red
+
     def row_table(self, f: Fn) -> str:
         return f"{f.header}\n|{'---|' * len(cells(f.header))}\n{f.row}"
 
@@ -1343,6 +1448,7 @@ class Driver(mainred.MainRed):
             or "(spec/ARCHITECTURE.md has no section naming this module)",
             "allowed_paths": self.allowed(f), "acceptance_source": self.acceptance_text(f),
             "policies": self.policies(f), "commands": self.commands_text(f), "max_calls": str(self.max_calls),
+            "footprint": self.footprint_text(f), "dup_check": self.dup_text(),
             "previous": previous, **self.standard_values(f)})
         tokens = len(brief) // 4
         if tokens > self.max_tokens:
@@ -1550,7 +1656,7 @@ class Driver(mainred.MainRed):
                 return memcap.note(p.stdout + p.stderr, f"{name} failed (exit {p.returncode}) in the worktree after "
                                    f"merging {self.main}, before review: `{cmd}`: {tail}. Merge {self.main} and "
                                    "rerun the gate before you hand back")
-        return self.acceptance_problem(wt, fid)
+        return self.acceptance_problem(wt, fid) or self.footprint_problem(wt, fid)
 
     def gate_list(self, names) -> list[tuple[str, str]]:
         """The pre-review commands: the named [commands] that are set, then [commands.extra], as land runs them."""

@@ -345,7 +345,7 @@ phase_audit = {str(phase_audit).lower()}
 class TestTemplates(unittest.TestCase):
     def test_every_placeholder_is_one_drive_fills(self):
         build = "id attempt worktree branch row entry module module_section allowed_paths " \
-                "acceptance_source policies commands max_calls previous standard_path standard project_rules".split()
+                "acceptance_source policies commands max_calls previous standard_path standard project_rules footprint dup_check".split()
         review = "id branch row allowed_paths acceptance_source review_file policies diffstat diff max_calls " \
                  "standard_path standard project_rules checklist_path checklist_version checklist round_rule".split()
         conflict = "id pass worktree branch main module reason row allowed_paths commands max_calls".split()

@@ -528,10 +528,16 @@ def regate_rows(repo, old, new, fpath, apath, rows_now, fid):
         if not mods and not (f.startswith("spec/") and f.endswith(".md")):
             return None
         hit |= mods
-    affected = dependents(arch, hit)
-    keep = {r for r in proven if r in newly or rows_now[r].get("module", "") in affected
-            or rows_now[r].get("module", "") not in paths}
-    return keep, newly, hit
+    return newly | footprint_rows(arch, rows_now, hit, fid), newly, hit
+
+
+def footprint_rows(arch, rows, mods, fid=""):
+    """The proven rows (fid aside) a change to modules `mods` can break: rows of those modules or of a module
+    depending on one (ARCHITECTURE.md `Depends on:`), and every row whose module ARCHITECTURE.md does not list.
+    regate_rows, and drive.py's build brief and pre-review gate, all pick a footprint this way."""
+    paths, affected = module_paths(arch), dependents(arch, mods)
+    return {r for r, row in rows.items() if row["status"] == "proven" and r != fid
+            and (row.get("module", "") in affected or row.get("module", "") not in paths)}
 
 
 def acceptance_cmds(template, nodes):
