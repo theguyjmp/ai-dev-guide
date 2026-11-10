@@ -164,7 +164,7 @@ class DeadDepfix(Base):
         self.drv.depfix_settled("depfix-F3", False, "builder left no committed change on fn/depfix-F3")
         rec = self.drv.st["functions"]["F3"]
         self.assertEqual((rec["status"], rec["attempts"]), ("needs-plan", 0))
-        self.assertEqual(rec["last_reason"], "plan gap: src/alpha/f2.py:9 double() is wrong")
+        self.assertIn("plan gap: src/alpha/f2.py:9 double() is wrong", rec["last_reason"])  # router prefixes its class
         self.assertIn("dead depfix in alpha", self.drv.st["systemic"][0]["reason"])
         self.assertTrue(self.drv.red_dead_block("F4", "alpha", "src/alpha/f1.py:1 x"))
         self.assertEqual(self.drv.st["functions"]["F4"]["last_reason"], "plan gap: src/alpha/f1.py:1 x")
