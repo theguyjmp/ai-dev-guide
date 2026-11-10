@@ -38,6 +38,7 @@ import json
 import os
 import re
 import shlex
+from concurrent.futures import Future, ThreadPoolExecutor
 import shutil
 import signal
 import stat
@@ -704,6 +705,12 @@ class Driver(mainred.MainRed):
         self.max_parallel = max(1, int(har.get("max_parallel") or lim.get("max_parallel") or 6))
         # [harness] land_parallel (the older max_lands): lands at once; overlapping footprints never
         self.max_lands = max(1, int(har.get("land_parallel") or har.get("max_lands") or 3))
+        # [harness] gate_parallel: pre-review merges + gates (whole-tree checks, own acceptance, footprint) run in
+        # worker threads, so the main loop keeps reaping, reviewing and landing while they run (pilot2026-11-10:
+        # run serially in the loop at ~3.5 min each, 11 built rows queued for review and no land started for 35 min)
+        self.gate_parallel = max(1, int(har.get("gate_parallel") or 4))
+        self.gate_pool: ThreadPoolExecutor | None = None
+        self.gating: dict[str, tuple[Job, Future]] = {}
         self.land_timeout_s = float(har.get("land_timeout_min", land_mod.LAND_TIMEOUT_MIN) or 0) * 60
         self.max_calls = int(lim["builder_max_calls"])
         self.max_tokens = int(lim["brief_max_tokens"])
@@ -1082,7 +1089,8 @@ class Driver(mainred.MainRed):
         waiting = {fid for fid, r in self.st["functions"].items()
                    if (r["status"] == "landing" and r.get("blocked_on")) or r.get("blocked_on") == mainred.MAIN_RED}
         gates = {"periodic"} if self.periodic.busy() else set()
-        return set(self.jobs) | set(self.land_queue) | {j.fn for j in self.land_jobs()} | waiting | gates
+        return (set(self.jobs) | set(self.gating) | set(self.land_queue) | {j.fn for j in self.land_jobs()} | waiting
+                | gates)
 
     def land_jobs(self) -> list[Job]:
         """Lands in flight, the plain one (or a polish land) first, then the stacked ones in start order."""
@@ -1242,7 +1250,27 @@ class Driver(mainred.MainRed):
                 {"build": self.after_build, "conflict": self.after_conflict,
                  "probe_mutate": self.after_probe_mutate,
                  "verify": self.after_verify}.get(job.kind, self.after_review)(job)
-        return done
+        return self.reap_gates() or done
+
+    def gate_async(self, job: Job) -> None:
+        """The pre-review merge and gate (sync_problem) for a finished build, in a worker thread; reap_gates hands
+        the result to to_review in the main loop. The row keeps its slot while gating (slot() counts it held)."""
+        self.slot(job.fn)
+        if self.gate_pool is None:
+            self.gate_pool = ThreadPoolExecutor(max_workers=self.gate_parallel, thread_name_prefix="gate")
+        self.gating[job.fn] = (job, self.gate_pool.submit(self.sync_problem, job.fn))
+
+    def reap_gates(self) -> bool:
+        """Finished pre-review gates go on to review (or fail, or a conflict pass); True if any finished."""
+        done = [fid for fid, (_, fut) in self.gating.items() if fut.done()]
+        for fid in done:
+            job, fut = self.gating.pop(fid)
+            try:
+                problem = fut.result()
+            except Exception as e:  # noqa: BLE001 - a gate that crashed is a failed gate, never a dead drive
+                problem = f"pre-review gate crashed: {type(e).__name__}: {e}"[:REASON_MAX]
+            self.to_review(job, problem)
+        return bool(done)
 
     def stalled(self, job: Job, now: float) -> bool:
         """Read a stream-json worker's new events into <run>.progress; True when it has sent none for
@@ -1634,7 +1662,10 @@ class Driver(mainred.MainRed):
                  f"model={job.model}", time.monotonic() - job.started, tokens)
         if self.blocked_by(job.fn, text):
             return
-        self.to_review(job, self.build_problem(job, text) or self.sync_problem(job.fn))
+        if problem := self.build_problem(job, text):
+            self.to_review(job, problem)
+            return
+        self.gate_async(job)
 
     def owner_module(self, path: str) -> str:
         """The module whose ARCHITECTURE paths hold path, or ''."""
@@ -1736,7 +1767,7 @@ class Driver(mainred.MainRed):
         """The parallel slot whose CARGO_TARGET_DIR fid's worktree commands reuse, so a worktree does not
         cold-build: fid keeps its slot while no other running job holds it, else takes the lowest free one. Two
         processes that run at once never share a slot."""
-        held = {self.slots[j] for j in self.jobs if j != fid and j in self.slots}
+        held = {self.slots[j] for j in [*self.jobs, *self.gating] if j != fid and j in self.slots}
         me = getattr(self, "drive_id", "")
         k = self.slots.get(fid)
         if k is None or k in held or drivelock.held_by_other(self.slot_dir(k), me):
