@@ -58,6 +58,7 @@ import mainred  # noqa: E402  beside this script: main red, systemic failures, d
 import memcap  # noqa: E402  beside this script: [limits] proc_mem_gb
 import periodic  # noqa: E402  beside this script: [gates.periodic]
 import priority  # noqa: E402  beside this script: Windows process priority classes
+import router  # noqa: E402  beside this script: failure classes routed to their fix
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 os.environ.setdefault("OVERHAUL_HARNESS", "drive")  # the main guard (guard/reference-transaction) lets only the harness move main's code
@@ -1254,6 +1255,7 @@ class Driver(mainred.MainRed):
 
     def depfix_settled(self, dfid: str, ok: bool, reason: str = "") -> None:
         """A dependency fix landed or failed: its waiting function builds again, or parks with the reason."""
+        router.on_depfix_settled(self, dfid, ok)  # a main-flake fix settled: the lands it held queue again
         if self.red_depfix(dfid, ok, reason):  # the main-red fix, or a second dead depfix in one module
             return
         for fid, rec in self.st["functions"].items():
@@ -1278,6 +1280,7 @@ class Driver(mainred.MainRed):
         if not module or dfid in self.jobs or dfid in self.polish_lands:
             return False
         self.log(fid, "main_flake", f"test={test} path={path or '?'} module={module}")
+        router.on_main_flake(self, fid, test, path, module, dfid)  # lands that rerun the test wait for its fix
         if test in self.flake_tests:
             self.park(fid, f"main flake on {test} again after its fix this run: {reason}")
             return True
@@ -1741,6 +1744,7 @@ class Driver(mainred.MainRed):
         target dir, and takes the lock only to commit. Beside lands in flight (up to [harness] land_parallel) only
         the first queued function whose footprint (files and modules) overlaps none of theirs starts; when it
         commits after them it re-merges main and reruns only what their landed footprints affect."""
+        router.hold_lands(self)  # rows that rerun a test failing on clean main wait off the queue for its fix
         flying = self.land_jobs()
         if (not self.land_queue or len(flying) >= self.max_lands or any(j.kind != "land" for j in flying)
                 or self.st.get("main_red")):
@@ -2735,6 +2739,8 @@ class Driver(mainred.MainRed):
     def fail(self, fid: str, reason: str) -> None:
         if self.red_fail(fid, reason):  # main fails the same check: not this function's attempt
             return
+        if router.on_failure(self, fid, reason):  # a plan-class cause parks at once; a load flake is not charged
+            return
         attempts = self.st["functions"][fid]["attempts"] + 1
         self.set(fid, status="planned", attempts=attempts, last_reason=reason[:REASON_MAX])
         self.say(f"{fid} attempt {attempts} failed: {reason}")
@@ -2761,6 +2767,7 @@ class Driver(mainred.MainRed):
         return self.retries + min(2, len(self.waiting_on(fid)) // 5)
 
     def park(self, fid: str, reason: str) -> None:
+        reason = router.on_park(self, fid, reason)  # classed and, for a plan class, routed to a plan fix
         self.set(fid, status="needs-plan", last_reason=reason[:REASON_MAX])
         self.log(fid, "needs_plan", reason)
         self.say(f"needs-plan {fid}: {reason}")

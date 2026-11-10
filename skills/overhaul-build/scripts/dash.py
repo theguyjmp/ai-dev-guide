@@ -83,6 +83,14 @@ def table(head, rows, empty):
     return f'<div class="card"><table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
+def fails_html(f):
+    """The router's failure classes of the last 60 min (verdict.json "failures"), red when one cause dominates."""
+    if not isinstance(f, dict) or not f.get("total"):
+        return ""
+    words = f' <span class="red">{esc(f.get("words"))}</span>' if f.get("red") else ""
+    return f'<p class="sub mono">{esc(f.get("line"))}{words}</p>'
+
+
 def verdict_html(v):
     if not v.get("line"):
         return '<div class="card pad empty">No verdict yet: run the verdict script with --repo R.</div>'
@@ -93,7 +101,8 @@ def verdict_html(v):
         reds += f'<li class="act">+{more} more</li>'
     t = vd.parse_t(v.get("t"))
     out = (f'<div class="card pad"><p class="line mono">{esc(v["line"])}</p>'
-           f'<p class="sub">verdict at {esc(when(t))}</p>' + (f"<ol>{reds}</ol>" if reds else "") + "</div>")
+           f'<p class="sub">verdict at {esc(when(t))}</p>' + (f"<ol>{reds}</ol>" if reds else "")
+           + fails_html(v.get("failures")) + "</div>")
     checks = v.get("checks")
     if isinstance(checks, dict) and checks:
         rows = [f'<td class="mono">{esc(n)}</td><td class="{"ok" if c.get("ok") else "red"}">'
