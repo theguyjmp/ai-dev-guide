@@ -238,7 +238,7 @@ if mode in ("ok", "stray"):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(f"def run():\\n    return '{fid} real work'\\n", encoding="utf-8")
     git("add", "-A")
-    git("commit", "-q", "-m", f"{fid}: build {n}")
+    git("commit", "-q", "--allow-empty", "-m", f"{fid}: build {n}")
 finish("DONE")
 '''
 
@@ -339,7 +339,8 @@ phase_audit = {str(phase_audit).lower()}
 
     def drive_cli(self, repo: Path, *args: str) -> tuple[int, str]:
         p = subprocess.run([sys.executable, str(DRIVE), "--repo", str(repo), *args], capture_output=True,
-                           text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=180)
+                           text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+                           timeout=float(os.environ.get("DRIVE_TEST_TIMEOUT", "180")))  # raise on a loaded machine
         return p.returncode, p.stdout + p.stderr
 
     @staticmethod
@@ -419,9 +420,31 @@ class TestRetries(Toy):
         self.assertIn("Attempt 1 failed: builder exited rc=7: boom: disk on fire", self.seen("F1-build-2.md"))
         self.assertIn("Attempt 2 failed: review FAIL: 1 verified blocking NOs", self.seen("F1-build-3.md"))
         self.assertIn("] `src/alpha/f1.py:1` stub left in f1.py", self.seen("F1-build-3.md"))
-        self.assertIn("The worktree was reset to main", self.seen("F1-build-3.md"))
+        self.assertIn("That work is kept", self.seen("F1-build-3.md"))
         rec = self.state(repo)["functions"]["F1"]
         self.assertEqual((rec["status"], rec["attempts"]), ("proven", 2))
+
+    def test_retry_brief_continues_the_failed_attempt(self):  # H2: a retry is not a fresh session
+        repo = self.make_repo({"F1": {"build": ["ok", "ok"], "review": ["FAIL stub left in f1.py", "PASS"]}},
+                              retries=1)
+        rc, out = self.drive_cli(repo)
+        self.assertEqual(rc, 0, out)
+        first, second = self.seen("F1-build-1.md"), self.seen("F1-build-2.md")
+        self.assertNotIn("## Retry", first)
+        top = second[:second.index("## The function")]
+        for needle in ("## Retry: attempt 1 failed", "Attempt 1 failed: review FAIL: 1 verified blocking NOs",
+                       "stub left in f1.py", "Its final message:", "DONE",
+                       "git diff --stat main...fn/F1", "src/alpha/f1.py", "1 file changed",
+                       "That work is kept: the worktree is on `fn/F1`"):
+            self.assertIn(needle, top)
+        self.assertIn('See "Retry" at the top of this brief.', second)
+        self.assertEqual(self.state(repo)["functions"]["F1"]["last_summary"], "DONE")
+        starts = [e["detail"] for e in self.events(repo) if e["event"] == "build_start"]
+        self.assertIn("continues attempt 1", starts[1])
+        # the retry built on attempt 1's commit instead of a branch reset to main
+        log = git(repo, "log", "--format=%s", "main")
+        self.assertIn("F1: build 1", log)
+        self.assertIn("F1: build 2", log)
 
     def test_needs_plan_after_the_retries_are_used(self):
         repo = self.make_repo({"F1": {"build": ["outside", "nochange"]}}, retries=1)

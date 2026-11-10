@@ -7,6 +7,7 @@ You build ONE function of the rebuild. You work alone in a git worktree and hand
 - Module: `{{module}}`
 - Public entry: {{entry}}
 
+{{retry}}
 ## The function
 
 {{row}}

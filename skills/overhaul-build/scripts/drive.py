@@ -156,6 +156,8 @@ OUTSIDE = re.compile(r"\boutside\s+(?:the\s+|my\s+|its\s+|your\s+)?allowed\s+pat
 FENCE = {".py": "python", ".rs": "rust", ".js": "javascript", ".ts": "typescript"}
 REVIEW_MAX_CALLS = 20
 REASON_MAX = 1500
+SUMMARY_MAX = 1500  # a failed build's final message, carried into the retry brief
+DIFFSTAT_LINES = 30  # `git diff --stat` lines of the failed attempt's branch shown to the retry
 POLL_S = 0.25
 DASH_EVERY_S = 15
 WIDTH_RED_MIN = 30  # [harness] width_red_min: ready rows under free slots this long is `width red`
@@ -1814,7 +1816,11 @@ class Driver(mainred.MainRed):
         attempt = rec["attempts"] + 1
         resume = rec.get("resume") == "building"
         on = list(rec.get("stacked_on") or {}) if resume else stack.to_stack(self, f)
-        previous = (f"Attempt {attempt - 1} failed: {rec['last_reason']}\n"
+        retry = not resume and rec["attempts"] > 0 and bool(rec["last_reason"])
+        stat = self.branch_stat(f.id) if retry else ""
+        dropped = self.keep_branch(f.id, on) if retry else ""
+        previous = ("See \"Retry\" at the top of this brief." if retry
+                    else f"Attempt {attempt - 1} failed: {rec['last_reason']}\n"
                     "The worktree was reset to main. Fix that cause first."
                     if rec["last_reason"] else "None. This is the first attempt.")
         widened = rec.pop("widened", "")
@@ -1835,7 +1841,9 @@ class Driver(mainred.MainRed):
             "policies": self.policies(f), "commands": self.commands_text(f), "max_calls": str(calls),
             "footprint": self.footprint_text(f), "dup_check": self.dup_text(),
             "helpers": self.helpers_text(f), "index_dir": index_api.INDEX_DIR,
-            "previous": previous + stack.brief_note(on), **self.standard_values(f)})
+            "previous": previous + stack.brief_note(on),
+            "retry": self.retry_text(f.id, rec, attempt, stat, dropped) if retry else "",
+            **self.standard_values(f)})
         brief = feasibility.embed(brief, packet)  # under the title: the builder starts there
         tokens = len(brief) // 4
         if tokens > self.max_tokens:
@@ -1843,7 +1851,8 @@ class Driver(mainred.MainRed):
                             "split the function or trim its acceptance test or ARCHITECTURE section")
             return
         rec.pop("resume", None)
-        wt = self.resume_worktree(f.id) if resume else self.prepare_worktree(f.id)
+        wt = (self.resume_worktree(f.id) if resume else self.ov / "wt" / f.id if retry and not dropped
+              else self.prepare_worktree(f.id))
         if not resume:
             shas = stack.merge_deps(self, f.id, wt, on) if on else {}
             if shas is None:
@@ -1863,10 +1872,56 @@ class Driver(mainred.MainRed):
         self.set(f.id, status="building", host=host or None, **({} if resume else {"conflicts": 0}))
         on_host = f" host={host}" if host else ""
         self.log(f.id, "build_start", f"attempt {attempt} model={self.jobs[f.id].model}{on_host}"
-                 + (" resumed" if resume else ""))
+                 + (" resumed" if resume else "") + (f" continues attempt {attempt - 1}" if retry and not dropped
+                                                      else f" restarts from {self.main}: {dropped}" if retry else ""))
         if on and not resume:
             self.log(f.id, "stacked", f"built on unlanded {', '.join(on)}")
         self.say(f"build {f.id} attempt {attempt}{on_host}" + (f" stacked on {', '.join(on)}" if on else ""))
+
+    def branch_stat(self, fid: str) -> str:
+        """`git diff --stat main...fn/<id>`: what the failed attempt left on its branch, capped."""
+        p = run(["git", "diff", "--stat", f"{self.main}...fn/{fid}"], self.repo)
+        lines = p.stdout.rstrip().splitlines() if p.returncode == 0 else []
+        if len(lines) > DIFFSTAT_LINES:
+            lines = lines[:DIFFSTAT_LINES - 1] + [f" ... {len(lines) - DIFFSTAT_LINES} more files", lines[-1]]
+        return "\n".join(lines) or "(no changes)"
+
+    def keep_branch(self, fid: str, on: list[str]) -> str:
+        """A retry continues the failed attempt: fn/<id>'s worktree keeps its commits and gets main merged in.
+        '' when kept, else why the retry starts from main instead (the caller then resets the worktree)."""
+        rec = self.st["functions"][fid]
+        if rec["last_reason"].startswith("builder "):  # killed or crashed: its edits may be uncommitted
+            self.commit_leftovers(fid)
+        if not self.ahead(fid):
+            return "the failed attempt left no commits"
+        gone = [d for d in rec.get("stacked_on") or {} if d not in on
+                and self.st["functions"].get(d, {}).get("status") != "proven"]
+        if gone:
+            return f"it was stacked on {', '.join(gone)}, no longer in the stack"
+        changed = run(["git", "diff", "--name-only", *self.span(f"fn/{fid}")], self.repo).stdout.split()
+        if hits := [p for p in changed if p.startswith(self.protected)]:
+            return f"it changed protected files ({', '.join(hits[:5])})"
+        try:
+            wt = self.resume_worktree(fid)
+            git(wt, "checkout", "-q", "-f", f"fn/{fid}")
+            git(wt, "clean", "-fdq")
+        except DriveError as e:
+            return f"its worktree is unusable: {e}"
+        p = run(["git", "merge", "-q", "--no-edit", "-m", f"{fid}: merge {self.main} into the retry", self.main], wt)
+        if p.returncode != 0:
+            run(["git", "merge", "--abort"], wt)
+            return f"it no longer merges with {self.main}"
+        return ""
+
+    def retry_text(self, fid: str, rec: dict, attempt: int, stat: str, dropped: str) -> str:
+        """The retry brief's top section: attempt N-1's exact failure, its final message and its branch diffstat."""
+        summary = rec.get("last_summary") or "(none: it was killed or printed nothing)"
+        keep = (f"That work is kept: the worktree is on `fn/{fid}` with {self.main} merged in. Continue from it: "
+                "fix the failure above first, then finish; do not start over." if not dropped else
+                f"That work was dropped ({dropped}): the worktree was reset to {self.main}. Fix that cause first.")
+        return (f"## Retry: attempt {attempt - 1} failed\n\nAttempt {attempt - 1} failed: {rec['last_reason']}\n\n"
+                f"Its final message:\n\n```text\n{summary}\n```\n\n"
+                f"Its work (`git diff --stat {self.main}...fn/{fid}`):\n\n```text\n{stat}\n```\n\n{keep}\n")
 
     def after_build(self, job: Job) -> None:
         # the host streams every builder line, so only a zero-byte run file is a dead host; a slow row with output
@@ -1880,6 +1935,7 @@ class Driver(mainred.MainRed):
         cap = job.calls or self.max_calls
         flags = (" over-budget" if turns is not None and turns > cap else "") + \
                 (" timeout" if job.timed_out else "")
+        self.st["functions"][job.fn]["last_summary"] = text.strip()[-SUMMARY_MAX:]  # the retry brief quotes it
         self.log(job.fn, "build_end", f"rc={job.proc.returncode} turns={turns}/{cap}{flags} "
                  f"model={job.model}", time.monotonic() - job.started, tokens)
         if self.blocked_by(job.fn, text):
