@@ -160,8 +160,8 @@ def lint_hook(wt, script, guard=""):
     """The hooks drive.py gives a builder worktree (local or on the host): the PostToolUse lint hook (lint_hook.py)
     and, when guard names write_guard.py, the PreToolUse write limits hook. Kept out of git through info/exclude;
     skipped when the project tracks its own settings.json. A stale write-limits.json is removed (set_limits)."""
-    tracked = hgit("-C", wt, "ls-files", "--error-unmatch", ".claude/settings.json").returncode == 0
-    if not Path(script).is_file() or tracked:
+    if not Path(script).is_file() or hgit("-C", wt, "ls-files", "--error-unmatch",
+                                          ".claude/settings.json").returncode == 0:
         return
     python = Path(sys.executable).as_posix()
     hooks = {"PostToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [
