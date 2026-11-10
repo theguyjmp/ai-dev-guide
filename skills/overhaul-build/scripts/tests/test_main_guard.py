@@ -101,7 +101,7 @@ class MainGuard(unittest.TestCase):
         os.environ["OVERHAUL_HARNESS"] = "drive"
         drv = drive.Driver.__new__(drive.Driver)
         drv.ov = self.r / ".overhaul"
-        drv.slots, drv.jobs = {}, {}
+        drv.slots, drv.jobs, drv.gating = {}, {}, {}  # gating: set in __init__ since the async gate (494641d)
         env = drv.slot_env("F01")
         self.assertNotIn("OVERHAUL_HARNESS", env)
 
