@@ -25,6 +25,11 @@ let 4 private copies of app_core helpers through (`invalid` with swapped argumen
   dependencies (`[harness] index_top`, default 40, at most 1/8 of brief_max_tokens), the search command and the
   FAIL rule. Review brief: the same lines; C05 evidence cites the INDEX line checked for each new function.
 - tests/test_index_api.py.
+- Merged with pass D: plan_land.py, green with --wt, regenerates the INDEX and commits it on the plan branch through
+  land.commit_index (the one helper a polish land uses too), so main fast-forwards to a matching spec/index.
+  supervise.py's rebase takes main's copy when it stops only on spec/index or spec/INDEX.md; the plan_tests rerun
+  after main moved regenerates them. tests/test_plan_land.py covers the branch commit.
+
 ## Plan lands gated, remote heartbeat, watchdog, 2026-11-10
 Owner 2026-11-10 07:15: "Fix all of those permanently so those kinds won't happen again." Measured on the pilot project
 (.overhaul/log.jsonl, 2026-11-09/10): a plan commit turned main red twice (23:08 stubs failed dup; the phase-10 stubs

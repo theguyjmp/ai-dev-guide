@@ -131,6 +131,24 @@ class Cli(unittest.TestCase):
         self.assertIn("PLAN LAND OK", line)
         self.assertIn("1 proven rows green: P2", line)
 
+    def test_green_in_the_branch_worktree_commits_the_regenerated_index_on_the_branch(self):
+        self.branch("plan/idx", {"src/beta/helpers.py": "def parse_query(text: str) -> dict:\n    return {}\n"})
+        wt = self.root / "wt"
+        git(self.repo, "worktree", "add", "-q", str(wt), "plan/idx")
+        before = git(self.repo, "rev-parse", "plan/idx")
+        p = subprocess.run([sys.executable, str(Path(plan_land.__file__)), "--repo", str(self.repo), "--branch",
+                            "plan/idx", "--wt", str(wt), "--tests-only", "--timeout", "120"],
+                           capture_output=True, text=True)
+        line = p.stdout.strip().splitlines()[-1]
+        self.assertEqual(p.returncode, 0, line)
+        self.assertIn("INDEX regenerated", line)
+        self.assertEqual(git(self.repo, "rev-parse", "plan/idx~1"), before)  # one commit on top, on the branch
+        files = git(self.repo, "show", "--name-only", "--format=", "plan/idx").split()
+        self.assertIn("spec/INDEX.md", files)
+        self.assertTrue(all(f.startswith("spec/index/") or f == "spec/INDEX.md" for f in files), files)
+        self.assertIn("parse_query", git(self.repo, "show", "plan/idx:spec/index/beta.md"))
+        self.assertEqual(git(wt, "status", "--porcelain", "--untracked-files=no"), "")
+
     def test_a_branch_that_does_not_merge_with_main_is_red(self):
         self.branch("plan/clash", {"src/gamma/schema.json": '{"a": 1}\n'})
         put(self.repo / "src" / "gamma" / "schema.json", '{"b": 2}\n')
