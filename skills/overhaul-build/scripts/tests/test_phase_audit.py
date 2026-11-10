@@ -63,7 +63,10 @@ BUILD = SimpleNamespace(kind="build", host="")  # a local job (remote-builders: 
 class Base(Toy):
     def repo(self, scenario=None, functions=LOCKED, barrier=False, extra="", **kw) -> Path:
         repo = self.make_repo(scenario, functions=functions, phase_audit=True,
-                              harness_extra=f"phase_barrier = {str(barrier).lower()}\n{extra}", **kw)
+                              # the toy's acceptance tests never pass, so a pre-review footprint check only reruns
+                              # them (batch, alone, clean main: about 40 s a run under load); land tests own it
+                              harness_extra=f"phase_barrier = {str(barrier).lower()}\npre_review_footprint = false\n"
+                                            f"{extra}", **kw)
         put(self.root / "fake_worker.py", ARCH_WORKER + FAKE_WORKER)
         put(repo / "spec" / "ARCHITECTURE.md", ARCH_DEPS)
         git(repo, "commit", "-q", "-am", "deps")

@@ -424,7 +424,9 @@ def on_park(d, fid: str, reason: str) -> str:
         cls = classify(reason, builder_text(ov_of(d), fid) if THIN.search(reason) else "", cell_of(d, fid))
     except Exception:  # noqa: BLE001
         return reason
-    if cls == "files_gap" and widen(d, fid, gap_files(reason), reason):
+    # mainred's dead-depfix "plan gap: <dep file>" is never widened: two depfixes died in that module, so the plan,
+    # not this row's claim, is wrong (widening would let the row rewrite a dep's proven code)
+    if cls == "files_gap" and not reason.startswith("plan gap: ") and widen(d, fid, gap_files(reason), reason):
         return ""
     if cls in PLAN_CLASSES and fid in d.fns:
         record(d, fid, cls, want_plan_fix(d, fid, cls, reason), reason)

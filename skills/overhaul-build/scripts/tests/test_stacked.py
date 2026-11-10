@@ -34,7 +34,7 @@ class StackedToy(td.Toy):
 
     @staticmethod
     def no_spawn(drv):
-        def fake(fid, kind, attempt, brief, cwd, tag="", rslot=None):
+        def fake(fid, kind, attempt, brief, cwd, tag="", rslot=None, max_calls=None):
             drv.jobs[fid] = SimpleNamespace(host="", model="fake", head="", proc=None, fn=fid)
         return mock.patch.object(drv, "start_job", side_effect=fake)
 
