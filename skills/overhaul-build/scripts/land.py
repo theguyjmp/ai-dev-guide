@@ -925,6 +925,15 @@ def stage_index(wt, apath):
                check=False).returncode != 0
 
 
+def commit_index(wt, apath, msg):
+    """stage_index, then commit the INDEX files alone when they changed: a polish land, and plan_land.py on a plan
+    branch. True when it committed."""
+    if not stage_index(wt, apath):
+        return False
+    git(wt, "commit", "-q", "-m", msg, "--", index_api.INDEX_DIR, index_api.SUMMARY)
+    return True
+
+
 def regression(rows, ids, commands, wt, out_path, timeout, tiers=(), near=None, extra=()):
     """(row id, node, reason) of the first of `ids` whose acceptance fails in wt, or None. All their tests run
     batched by test target, not one command per test. With `near` (a module set), a test whose file matches a
@@ -1174,8 +1183,7 @@ def land_polish(repo, fid, main, timeout):
         raise LandFail(f"merge conflict merging {main} into {branch}")
     gate_merged(wt, parse_functions(git(repo, "show", f"{main_sha}:{fpath}").stdout), commands,
                 os.path.join(ovh, "land.out"), timeout)
-    if stage_index(wt, arch_path(conf)):
-        git(wt, "commit", "-q", "-m", f"polish {fid}: regenerate INDEX")
+    commit_index(wt, arch_path(conf), f"polish {fid}: regenerate INDEX")
     new = git(wt, "rev-parse", "HEAD").stdout.strip()
     advance(repo, main, new, main_sha)
     return new

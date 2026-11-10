@@ -368,8 +368,30 @@ class Supervisor:
         try:
             self.git("rebase", "-q", self.main, cwd=merge_wt)
         except Stop as e:
+            if self.index_only_conflicts(merge_wt):
+                return
             self.git("rebase", "--abort", cwd=merge_wt, check=False)
             raise Stop(f"{branch} does not rebase onto {self.main} cleanly: {e}") from e
+
+    def index_only_conflicts(self, merge_wt: Path) -> bool:
+        """A rebase stopped only on the generated INDEX files (plan_land.py's regenerate commit vs a land's): take
+        main's copy and go on; the plan_tests rerun after main moved regenerates them. True when the rebase finished."""
+        for _ in range(20):
+            bad = [f for f in self.git("diff", "--name-only", "--diff-filter=U", cwd=merge_wt,
+                                       check=False).splitlines() if f]
+            if not bad or not all(f.startswith("spec/index/") or f == "spec/INDEX.md" for f in bad):
+                return False
+            self.git("checkout", "--ours", "--", *bad, cwd=merge_wt, check=False)
+            self.git("add", "--", *bad, cwd=merge_wt, check=False)
+            try:  # main's copy alone left nothing to commit: skip the regenerate commit
+                if not self.git("diff", "--cached", "--name-only", cwd=merge_wt, check=False).strip():
+                    self.git("rebase", "--skip", cwd=merge_wt)
+                else:
+                    self.git("-c", "core.editor=true", "rebase", "--continue", cwd=merge_wt)
+                return True
+            except Stop:
+                continue
+        return False
 
     def plan_tests(self, branch: str, merge_wt: Path, work: Path, rnd: int | str) -> None:
         """plan_land.py --tests-only on the merged branch: the proven acceptance tests the plan commit can break.

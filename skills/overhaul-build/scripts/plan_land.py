@@ -11,6 +11,9 @@ R/.overhaul/plan-land/ that merges main and is removed afterwards):
    row of a module it touches or of a module depending on one (land.py's footprint_rows), and every proven row when it
    touches a file outside every module's Paths that is neither spec/*.md nor an acceptance file. Batched like a land
    (land.regression), CARGO_TARGET_DIR R/.overhaul/target/plan.
+3. green with --wt (B checked out there): regenerate the capability INDEX (land.commit_index, the helper land.py
+   uses) and commit it on B, so main fast-forwards to a plan commit whose spec/index matches its tree. Without
+   --wt the merged tree is thrown away, so the next land regenerates it.
 Last line `PLAN LAND OK: ...` (exit 0) or `PLAN LAND RED: ...` (exit 1). With --ff it then moves main to B through
 fast_forward() (also supervise.py's one way to move main): the main guard judges the ref update before any file of
 the checkout changes, so a refusal leaves main and the checkout exactly as they were (never `git merge --ff-only`,
@@ -76,11 +79,15 @@ def plan_rows(arch: str, rows: dict, files: list[str], fpath: str) -> tuple[set[
     return ids, mods, direct
 
 
+def arch_of(conf: dict) -> str:
+    return str((conf.get("paths") or {}).get("architecture") or "spec/ARCHITECTURE.md")
+
+
 def proven_check(tree: Path, main: str, conf: dict, timeout: float, out: Path) -> tuple[bool, str]:
     """Rerun the proven acceptance tests the tree's change can break (plan_rows). (green, one line)."""
     paths = conf.get("paths") or {}
     fpath = str(paths.get("functions") or "spec/FUNCTIONS.md")
-    apath = str(paths.get("architecture") or "spec/ARCHITECTURE.md")
+    apath = arch_of(conf)
     rows = land.parse_functions(_read(tree / fpath))
     ids, mods, direct = plan_rows(_read(tree / apath), rows, touched(tree, main), fpath)
     commands = land.load_commands(conf)
@@ -148,7 +155,11 @@ def check(repo: Path, branch: str, main: str, wt: Path | None, tests_only: bool,
         if not tests_only and (why := static_check(tree, conf, out.parent)):
             return 1, f"{RED}: {branch} {why}"
         green, line = proven_check(tree, main, conf, timeout, out)
-        return (0, f"{OK}: {branch}: {line}") if green else (1, f"{RED}: {branch}: {line}")
+        if not green:
+            return 1, f"{RED}: {branch}: {line}"
+        if wt and land.commit_index(str(tree), arch_of(conf), f"plan {branch}: regenerate INDEX"):
+            line += "; INDEX regenerated"
+        return 0, f"{OK}: {branch}: {line}"
     finally:
         if not wt:
             drop_tree(repo, tree)

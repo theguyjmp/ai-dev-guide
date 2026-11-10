@@ -343,8 +343,6 @@ class FlakyUnderLoad(unittest.TestCase):
         self.assertEqual(res["t.py::b"][:2], (1, "still"))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class PlanMergeStaticGates(unittest.TestCase):
@@ -430,3 +428,48 @@ class LiveRetry(unittest.TestCase):
         sup.live_tried = {"R1": 0}
         self.assertEqual(supervise.Supervisor.live_retry(sup, ["R1"]), [])
         self.assertEqual(sup.live_tried, {"R1": 0})
+
+
+class IndexRebase(unittest.TestCase):
+    """A plan branch's INDEX regenerate commit and a land's both changed spec/index: the rebase takes main's copy."""
+
+    def test_a_rebase_stopped_only_on_generated_index_files_finishes_and_a_real_conflict_does_not(self):
+        root = Path(tempfile.mkdtemp(prefix="sup-idx-")).resolve()
+        self.addCleanup(shutil.rmtree, root, True)
+        repo = root / "repo"
+        repo.mkdir()
+        git(repo, "init", "-q", "-b", "main")
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+
+        def commit(files, msg):
+            for rel, text in files.items():
+                (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+                (repo / rel).write_text(text, encoding="utf-8")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-q", "-m", msg)
+
+        commit({"spec/index/a.md": "a 1\n", "spec/INDEX.md": "a: 1\n", "src/a.py": "x = 1\n"}, "m0")
+        git(repo, "checkout", "-q", "-b", "plan/p")
+        commit({"spec/FUNCTIONS.md": "rows\n"}, "plan")
+        commit({"spec/index/a.md": "a plan\n", "spec/INDEX.md": "a: plan\n"}, "plan: regenerate INDEX")
+        git(repo, "checkout", "-q", "main")
+        commit({"spec/index/a.md": "a land\n", "spec/INDEX.md": "a: land\n", "src/a.py": "x = 2\n"}, "land")
+        sup = supervise.Supervisor.__new__(supervise.Supervisor)
+        sup.repo, sup.main, sup.env = repo, "main", lambda: None
+        git(repo, "checkout", "-q", "plan/p")
+        sup.rebase("plan/p", repo)
+        self.assertEqual(git(repo, "show", "plan/p:spec/index/a.md"), "a land\n")
+        self.assertEqual(git(repo, "show", "plan/p:spec/FUNCTIONS.md"), "rows\n")
+        self.assertEqual(git(repo, "rev-parse", "plan/p~1"), git(repo, "rev-parse", "main"))  # empty one skipped
+        commit({"src/a.py": "x = 3\n"}, "plan edits code")
+        git(repo, "checkout", "-q", "main")
+        commit({"src/a.py": "x = 4\n"}, "land 2")
+        git(repo, "checkout", "-q", "plan/p")
+        with self.assertRaises(supervise.Stop):
+            sup.rebase("plan/p", repo)
+        self.assertEqual(git(repo, "status", "--porcelain", "--untracked-files=no"), "")  # aborted cleanly
+
+
+if __name__ == "__main__":
+    unittest.main()
