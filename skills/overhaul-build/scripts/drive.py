@@ -61,6 +61,7 @@ import periodic  # noqa: E402  beside this script: [gates.periodic]
 import priority  # noqa: E402  beside this script: Windows process priority classes
 import remote  # noqa: E402  beside this script: [harness.remote] builder slots on a second machine
 import router  # noqa: E402  beside this script: failure classes routed to their fix
+import stack  # noqa: E402  beside this script: [harness] stacked_starts, builds on reviewed dep branches
 import worker  # noqa: E402  beside this script: lean claude launch, stream-json watch
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
@@ -766,6 +767,7 @@ class Driver(mainred.MainRed):
         self.last_width = float("-inf")
         self.wait_cache: tuple[object, dict[str, int]] = (None, {})
         self.remote = remote.Pool.from_harness(har, self.log, self.say)  # slots on top of max_parallel
+        self.stacked = bool(har.get("stacked_starts", False))  # rows start on deps' reviewed branches (stack.py)
 
     # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
@@ -1049,6 +1051,7 @@ class Driver(mainred.MainRed):
             while True:
                 changed = self.replan_step()
                 changed = self.reap() or changed
+                changed = stack.check(self) or changed
                 changed = self.pump_land() or changed
                 changed = self.launch() or changed
                 self.width_step()
@@ -1128,8 +1131,9 @@ class Driver(mainred.MainRed):
 
     def startable(self, busy: set[str]) -> list[Fn]:
         """Planned rows that may build now, resumed builds first, then critical-path order (rank): every blocking
-        dep proven, not in flight, retries left, not held on a fix, its module not audit-locked and not past the
-        phase barrier. File claims are left to ready(), so a resumed build claims its files before a fresh one."""
+        dep proven (or, with [harness] stacked_starts, its branch reviewed and waiting to land), not in flight,
+        retries left, not held on a fix, its module not audit-locked and not past the phase barrier. File claims are
+        left to ready(), so a resumed build claims its files before a fresh one."""
         recs = self.st["functions"]
         proven = {fid for fid, r in recs.items() if r["status"] == "proven"}
         # the phase barrier: nothing past the lowest phase that still has an unproven function starts
@@ -1140,7 +1144,7 @@ class Driver(mainred.MainRed):
         out = [f for f in self.order
                if not (recs[f.id]["status"] != "planned" or f.id in busy or f.module in locked
                        or recs[f.id].get("blocked_on") or (self.barrier and phase_key(f)[0] > open_phase)
-                       or not all(d in proven for d in f.blocking)
+                       or not stack.deps_ok(self, f, proven)
                        or recs[f.id]["attempts"] > self.budget(f.id))]  # budget() walks the graph: last
         return sorted(out, key=lambda f: (not recs[f.id].get("resume"), self.rank(f.id)))  # resumed work first
 
@@ -1303,6 +1307,16 @@ class Driver(mainred.MainRed):
         # a remote build's output arrives at its end (remote.py), so only a local one gets the idle watchdog
         self.jobs[fid] = job if job.host else self.watch(job, cmd)
 
+    def span(self, branch: str) -> list[str]:
+        """`git diff` arguments for what branch changes itself: main...branch, or main + stacked deps..branch."""
+        return stack.diff_range(self, branch)
+
+    def kill(self, job: Job) -> None:
+        """Stop a job dropped from self.jobs (a stack reset): its process tree, and its remote slot."""
+        kill_tree(job.proc)
+        if job.host and self.remote:
+            self.remote.after(job.fn, -1, True, job.out.with_suffix(".err"))
+
     def prepare_worktree(self, fid: str) -> Path:
         """A clean worktree on fn/<id> at main (reset on a retry)."""
         wt, branch = self.ov / "wt" / fid, f"fn/{fid}"
@@ -1353,7 +1367,7 @@ class Driver(mainred.MainRed):
         """Why a change to a file under vis (and not under allowed) is more than a visibility edit, or ''. Files
         outside both are left to the review, as before."""
         bad = [p for p in changed if not in_paths(p, allowed) and in_paths(p, vis)
-               and not visibility_only(git(self.repo, "diff", "-U0", f"{self.main}...{branch}", "--", p))]
+               and not visibility_only(git(self.repo, "diff", "-U0", *self.span(branch), "--", p))]
         return (f"changed {', '.join(bad[:5])} beyond visibility: {what} may only make an existing item pub/"
                 "pub(crate)/export or re-export it there") if bad else ""
 
@@ -1390,7 +1404,7 @@ class Driver(mainred.MainRed):
         f = self.fns[fid]  # its own and its deps' module files count: an edit there passed the visibility check
         allowed = [p for group in self.allowed_lists(f) for p in group]
         allowed += module_paths(module_section(self.arch, f.module), f.module) + self.dep_paths([f.module])
-        changed = git(self.repo, "diff", "--name-only", f"{self.main}...fn/{fid}").splitlines()
+        changed = git(self.repo, "diff", "--name-only", *self.span(f"fn/{fid}")).splitlines()
         return hits if all(in_paths(p, allowed) for p in changed) else []  # else the builder strayed: ordinary FAIL
 
     @property
@@ -1499,7 +1513,7 @@ class Driver(mainred.MainRed):
         tmpl = self.cfg.get("acceptance") or self.cfg["commands"].get("acceptance")
         if fid not in self.fns or not tmpl or not self.cfg["harness"].get("pre_review_footprint", True):
             return ""
-        changed = [p for p in git(self.repo, "diff", "--name-only", f"{self.main}...fn/{fid}").splitlines() if p]
+        changed = [p for p in git(self.repo, "diff", "--name-only", *self.span(f"fn/{fid}")).splitlines() if p]
         pairs = self.proven_footprint(fid, changed)
         if not pairs:
             return ""
@@ -1560,6 +1574,7 @@ class Driver(mainred.MainRed):
         rec = self.st["functions"][f.id]
         attempt = rec["attempts"] + 1
         resume = rec.get("resume") == "building"
+        on = list(rec.get("stacked_on") or {}) if resume else stack.to_stack(self, f)
         previous = (f"Attempt {attempt - 1} failed: {rec['last_reason']}\n"
                     "The worktree was reset to main. Fix that cause first."
                     if rec["last_reason"] else "None. This is the first attempt.")
@@ -1577,7 +1592,7 @@ class Driver(mainred.MainRed):
             "allowed_paths": self.allowed(f), "acceptance_source": self.acceptance_text(f),
             "policies": self.policies(f), "commands": self.commands_text(f), "max_calls": str(self.max_calls),
             "footprint": self.footprint_text(f), "dup_check": self.dup_text(),
-            "previous": previous, **self.standard_values(f)})
+            "previous": previous + stack.brief_note(on), **self.standard_values(f)})
         tokens = len(brief) // 4
         if tokens > self.max_tokens:
             self.park(f.id, f"brief is {tokens} tokens, over brief_max_tokens {self.max_tokens}; "
@@ -1585,16 +1600,27 @@ class Driver(mainred.MainRed):
             return
         rec.pop("resume", None)
         wt = self.resume_worktree(f.id) if resume else self.prepare_worktree(f.id)
+        if not resume:
+            shas = stack.merge_deps(self, f.id, wt, on) if on else {}
+            if shas is None:
+                self.save()
+                return  # a dep branch does not merge: the row waits for its deps to land (no_stack)
+            rec.pop("stacked_on", None)
+            rec.pop("stacked", None)
+            if shas:
+                rec["stacked_on"] = shas
         path = self.ov / "briefs" / f"{f.id}.md"
         path.write_text(brief, encoding="utf-8")
         self.start_job(f.id, "build", attempt, path, wt, rslot=rslot)
         host = self.jobs[f.id].host
         # a fresh branch from main: a fresh conflict budget; a resumed one keeps its own
         self.set(f.id, status="building", host=host or None, **({} if resume else {"conflicts": 0}))
-        on = f" host={host}" if host else ""
-        self.log(f.id, "build_start", f"attempt {attempt} model={self.jobs[f.id].model}{on}"
+        on_host = f" host={host}" if host else ""
+        self.log(f.id, "build_start", f"attempt {attempt} model={self.jobs[f.id].model}{on_host}"
                  + (" resumed" if resume else ""))
-        self.say(f"build {f.id} attempt {attempt}{on}")
+        if on and not resume:
+            self.log(f.id, "stacked", f"built on unlanded {', '.join(on)}")
+        self.say(f"build {f.id} attempt {attempt}{on_host}" + (f" stacked on {', '.join(on)}" if on else ""))
 
     def after_build(self, job: Job) -> None:
         if job.host and self.remote and self.remote.after(job.fn, job.proc.returncode, job.timed_out,
@@ -1839,7 +1865,7 @@ class Driver(mainred.MainRed):
                 git(wt, "commit", "-q", "-m", f"{job.fn}: {job.kind} attempt {job.attempt} (committed by drive.py)")
         except DriveError as e:
             return f"auto-commit of the builder's leftover changes failed: {e}"
-        changed = git(self.repo, "diff", "--name-only", f"{self.main}...{branch}").splitlines()
+        changed = git(self.repo, "diff", "--name-only", *self.span(branch)).splitlines()
         if not changed:
             return f"builder left no committed change on {branch}"
         hits = [p for p in changed if p.startswith(self.protected)]
@@ -1996,6 +2022,7 @@ class Driver(mainred.MainRed):
         review_file.unlink(missing_ok=True)
         values = self.standard_values(f)
         scope = "\n".join((self.row_table(f), module_section(self.arch, f.module), self.acceptance_text(f)))
+        span = self.span(branch)  # the row's own diff: a stacked row's deps are not under review
         brief = render("review-brief.md", {
             "id": fid, "branch": branch, "row": self.row_table(f), "allowed_paths": self.allowed(f),
             "acceptance_source": self.acceptance_text(f), "review_file": review_file.as_posix(),
@@ -2003,8 +2030,8 @@ class Driver(mainred.MainRed):
             "checklist_version": checklist()[0],
             "checklist": checklist_text(applicable_items(scope, bool(f.rules))),
             "round_rule": self.round_rule(fid),
-            "diffstat": git(self.repo, "diff", "--stat", f"{self.main}...{branch}").rstrip(),
-            "diff": git(self.repo, "diff", f"{self.main}...{branch}").rstrip(),
+            "diffstat": git(self.repo, "diff", "--stat", *span).rstrip(),
+            "diff": git(self.repo, "diff", *span).rstrip(),
             "max_calls": str(REVIEW_MAX_CALLS)})
         tokens = len(brief) // 4
         if tokens > self.max_tokens:
@@ -2166,7 +2193,7 @@ class Driver(mainred.MainRed):
     # ---- land ----
     def footprint(self, fid: str) -> list[str]:
         """What a land touches: the function's claimed files plus every file its branch changes."""
-        changed = run(["git", "diff", "--name-only", f"{self.main}...fn/{fid}"], self.repo).stdout.split()
+        changed = run(["git", "diff", "--name-only", *self.span(f"fn/{fid}")], self.repo).stdout.split()
         return [*self.claims(self.fns[fid]), *changed]
 
     def footprint_modules(self, fid: str, files: list[str]) -> set[str]:
@@ -2192,14 +2219,17 @@ class Driver(mainred.MainRed):
         if (not self.land_queue or len(flying) >= self.max_lands or any(j.kind != "land" for j in flying)
                 or self.st.get("main_red")):
             return False
-        fid = self.land_queue[0]
+        queue = [q for q in self.land_queue if stack.landable(self, q)]  # a stacked row after its deps
+        if not queue:
+            return False
+        fid = queue[0]
         if flying:
             taken = [self.land_footprint(j.fn) for j in flying]
 
             def clear(q: str) -> bool:
                 files, mods = self.land_footprint(q)
                 return not any(paths_overlap(files, tf) or mods & tm for tf, tm in taken)
-            fid = next((q for q in self.land_queue if clear(q)), "")
+            fid = next((q for q in queue if clear(q)), "")
             if not fid:
                 return False
         self.land_queue.remove(fid)
@@ -2235,6 +2265,7 @@ class Driver(mainred.MainRed):
             self.periodic.landed()
             self.say(f"landed {fid}")
             self.record_proven()
+            stack.landed(self, fid)  # rows stacked on it merge the new main
             self.cycle_due = f"landed {fid}"  # run after launch(): dependents start before verdict and dash
             return
         reason = "land.py timed out" if job.timed_out else (

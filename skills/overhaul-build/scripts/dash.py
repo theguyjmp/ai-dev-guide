@@ -139,6 +139,10 @@ def render(p, events, v, t_now):
     if width:  # drive.py's ready rows beside free builder slots; red when too few for 30 min
         tiles.append((f'<span class="{"red" if width.get("red") else ""}">{vd.as_int(width.get("ready"))}</span>',
                       f"ready, {vd.as_int(width.get('free'))} of {vd.as_int(width.get('slots'))} slots free"))
+    stacked = v.get("stacked") if isinstance(v.get("stacked"), dict) else None
+    if stacked and (stacked.get("starts") or stacked.get("resets")):  # [harness] stacked_starts
+        tiles.append((str(vd.as_int(stacked.get("starts"))),
+                      f"stacked starts, {vd.as_int(stacked.get('resets'))} reset"))
     if p["state"].get("cycle") is not None:
         tiles.append((esc(p["state"].get("cycle")), "cycle"))
     counts = {}

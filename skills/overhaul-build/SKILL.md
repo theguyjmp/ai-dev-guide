@@ -71,6 +71,11 @@ back; review, the pre-review gate and land stay local. An unusable host (ssh dro
 CLAUDE_CODE_OAUTH_TOKEN, a spent Claude account) logs `remote_offline`, goes offline for offline_min (default 10) and
 requeues the function without an attempt; a timed-out or dropped build is killed on the host by its slot's pid file.
 `build_start ... host=<name>` and the dashboard name the host.
+Stacked starts: `[harness] stacked_starts = true` (default false; scripts/stack.py) makes a row READY when each dep is
+proven or its fn/<dep> passed review and waits to land; the worktree merges main then those branches and the brief
+names them. The row lands only after them (queued meanwhile); a landed dep's dependents merge the new main. A dep that
+leaves the land queue any other way resets its dependents to planned, attempt not counted (`stack_reset`). Review and
+the pre-review checks diff against main + the dep shas; `stacked` events, `stacked N` in verdict and dash.
 `[gates.periodic]` (scripts/periodic.py): slow gates (CI parity matrix via `periodic.py ci`, full scale tier, GPU over ssh)
 run on main in the background every N lands or M minutes and once at the end; `BENCH` lines are judged against
 spec/BUDGETS.toml (CI at ci_factor 2x, macOS record-only); each gate keeps its own green, so a red gate bisects to

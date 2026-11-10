@@ -493,6 +493,7 @@ def judge(p, prev, t_now, checks, events):
                          f"(~{tp['top_cost']:.1f}/h lost)", RATE_FIX[tp["top_stage"]]))
     odir = os.path.dirname(p["log"]) if p.get("log") else ""  # no log path: classify from the reason alone
     fails = router.failures(events, t_now, builder=lambda fid: router.builder_text(Path(odir), fid) if odir else "")
+    stacked = stacked_counts(events)  # [harness] stacked_starts: builds on reviewed, unlanded dep branches
     if fails["red"]:  # one cause over 30% of the last hour's failures: the manager's bottleneck, in words
         reds.append((1, "failures", fails["words"], fails["action"]))
     nits = pol.get("nits") if pol else None
@@ -549,7 +550,7 @@ def judge(p, prev, t_now, checks, events):
             "reds": [{"kind": k, "what": w, "action": a} for _, k, w, a in shown], "reds_total": len(reds),
             "checks": checks if checks is not None else "skipped", "needs_plan_since": since,
             "polish_issues": issues, "nits": nits, "trend": trend, "phase_audits": audits,
-            "deferred": p.get("deferred", 0), "throughput": tp, "width": width, "failures": fails,
+            "deferred": p.get("deferred", 0), "throughput": tp, "width": width, "failures": fails, "stacked": stacked,
             "line": f"VERDICT {verdict} proven {proven}/{total}"
                     f"{' deferred ' + str(p['deferred']) if p.get('deferred') else ''} rate {rate:.1f}/h"
                     f"{expected_text(tp, width)}{needs_plan_text(counts, p.get('odir'))}"
@@ -558,6 +559,7 @@ def judge(p, prev, t_now, checks, events):
                     f"{'' if trend is None else ' trend ' + trend}"
                     f"{' ' + audit_text if audit_text else ''}"
                     f"{' failures ' + str(fails['total']) + ' top ' + fails['top'] if fails['total'] else ''}"
+                    f"{stacked_text(stacked)}"
                     f" reds: {text}"}
 
 
@@ -571,6 +573,25 @@ RATE_FIX = {
     "rework builds per land": "builds per land above 1.5: read the top failure reasons in log.jsonl and fix that "
                               "cause (brief, gate, plan) before adding builders",
     "landing queue": "lands are the ceiling: shorten the land gate or raise [harness] max_lands"}
+
+
+def stacked_counts(events):
+    """{"starts": builds started on an unlanded dep's reviewed branch, "resets": those sent back by stack_reset}."""
+    n = {"starts": 0, "resets": 0}
+    for e in events:
+        ev = e.get("event")
+        if ev == "stacked":
+            n["starts"] += 1
+        elif ev == "stack_reset":
+            n["resets"] += 1
+    return n
+
+
+def stacked_text(stacked):
+    """' stacked N (R reset)'; '' when nothing stacked."""
+    if not stacked or not (stacked["starts"] or stacked["resets"]):
+        return ""
+    return f" stacked {stacked['starts']}" + (f" ({stacked['resets']} reset)" if stacked["resets"] else "")
 
 
 def needs_plan_text(counts, odir):

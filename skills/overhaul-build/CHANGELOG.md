@@ -1,5 +1,25 @@
 # overhaul-build changelog
 
+## Stacked starts, 2026-11-09
+Owner 2026-11-09: 40 slots, at least 10 functions/h, prove it. rate_sim.py (overhaul-trial; the pilot project's real dependency
+graph and 58 measured cycles, briefs/rate-proof.md): with only proven deps the rate is width-bound at ~7.5/h whatever
+the slots; letting a dependent start once its dep's branch has passed review (dep-at 0.5-0.7) gives 14.5-15.8/h at 40
+slots with the cycle-time fixes.
+- `[harness] stacked_starts` (default false), scripts/stack.py: a planned row is READY when each blocking dep is proven
+  or `landing` (review passed, queued, landing or held on a main-flake fix). start_build merges main and then each such
+  fn/<dep> in plan order into the fresh worktree, records `stacked_on` {dep: sha} and tells the builder "Built on
+  unlanded deps: ...; do not edit them". A dep branch that does not merge logs `stack_conflict` and the row waits for
+  its deps to land (`no_stack`).
+- Land order: pump_land skips a queued row until every dep it stacked on is proven, then checks each recorded sha is
+  on main (else `stack_reset`). When a dep lands, each queued dependent merges the new main in its worktree (no
+  rebuild). When a dep leaves `landing` any other way (land failed, conflict pass, rebuilt, parked), every row built on
+  it (and, in turn, on those) is killed if running and goes back to planned with no attempt counted (`stack_reset`).
+- Review, the build checks (no change, protected files, visibility), plan-gap and footprint checks, and the land
+  footprint diff a stacked row against main + its dep shas (a merge-tree commit), so a reviewer never sees a dep's code.
+- `stacked` event per stacked start naming the deps; verdict `stacked N (R reset)` and a dash tile.
+- tests/test_stacked.py: start on a reviewed dep, review diff without dep code, dep lands first then dependent (unit and
+  a drive run), dep land fails -> stack_reset cascade, dep landed another sha -> reset, stack conflict waits.
+
 ## Remote builders, 2026-11-09
 Owner 2026-11-09: "we have 2 computers... USE THEM." Measured on the pilot project: 2 lands/h, against the harness's expected
 4.3/h with 13 laptop slots; every builder, review and test ran on the laptop and the desktop (16 logical CPUs) ran only the GPU
