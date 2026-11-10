@@ -236,3 +236,42 @@ class Dog(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CriticalPlan(Dog):
+    """A needs-plan row 80 rows wait on with no round in flight for 15 min: planfix-<id> requested + alert."""
+
+    def plan80(self) -> None:
+        rows = [("Q09", "-"), ("A1", "-")] + [(f"R{i:03d}", "Q09") for i in range(80)]
+        (self.repo / "spec").mkdir(exist_ok=True)
+        (self.repo / "spec" / "FUNCTIONS.md").write_text(
+            "# Functions\n\n| id | phase | module | deps | entry | acceptance | status |\n"
+            "|----|-------|--------|------|-------|------------|--------|\n"
+            + "".join(f"| {fid} | 1 | m | {deps} | `toy {fid}` | tests/acceptance/test_{fid}.py::t | planned |\n"
+                      for fid, deps in rows), encoding="utf-8")
+        fns = {f"R{i:03d}": {"status": "planned"} for i in range(80)}
+        self.state(functions={**fns, "Q09": {"status": "needs-plan"}, "A1": {"status": "needs-plan"}})
+        self.log((NOW - 60, "build_start", "x"), (NOW - 60, "plan_reload", "x"))
+
+    def test_an_80_waiter_row_with_no_round_for_15_min_gets_a_planfix_request(self):
+        self.plan80()
+        self.assertEqual(self.dog.check(), [])  # first seen now
+        self.now += 16 * 60
+        self.assertEqual(self.dog.check(), ["critical_plan"])
+        self.assertEqual(sorted(p.name for p in (self.ov / "requests").iterdir()), ["planfix-Q09"])  # not A1 (0 wait)
+        self.assertIn("critical_plan: Q09 needs-plan with 80 rows waiting and no plan round for 16 min; "
+                      "alert: requested planfix-Q09", self.alerts())
+
+    def test_a_round_in_flight_for_the_row_or_a_higher_threshold_fires_nothing(self):
+        self.plan80()
+        (self.ov / "supervise").mkdir()
+        (self.ov / "supervise" / "round.json").write_text(json.dumps({"round": "L3", "ids": ["Q09"]}))
+        self.dog.check()
+        self.now += 16 * 60
+        self.assertNotIn("critical_plan", self.dog.check())
+        (self.ov / "supervise" / "round.json").unlink()
+        (self.repo / "overhaul.toml").write_text("[harness]\ncritical_waiters = 81\n", encoding="utf-8")
+        self.dog.check()
+        self.now += 16 * 60
+        self.assertNotIn("critical_plan", self.dog.check())
+        self.assertFalse((self.ov / "requests").exists())

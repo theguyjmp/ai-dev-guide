@@ -8,11 +8,11 @@ supervise.py runs it as a thread (start()); by hand, --once checks once. Reads .
 (INVARIANTS: name, when it is due, the evidence that it is happening, the action when it is not):
 - something is wrong (starved, no_land, disk, stop, host_offline, audit_lock);
 - something that should be happening is not (phase_audit, arch_sweep, periodic, progress, reload, needs_plan,
-  proof_check, dashboard): owner 2026-11-10, "if a phase has gone from unfinished to finished, check that the
+  critical_plan, proof_check, dashboard): owner 2026-11-10, "if a phase has gone from unfinished to finished, check that the
   appropriate checkers have audited or are auditing, if not trigger them" (the per-phase audit and the arch sweep
   never ran for days and nothing noticed).
 Each breach writes a `watchdog` event to log.jsonl and acts: a request file drive honours at its next cycle
-(.overhaul/requests/audit-phase-<N>, arch-sweep, periodic-<gate>, reload-watchdog-<time>), a stale lock removed,
+(.overhaul/requests/audit-phase-<N>, arch-sweep, periodic-<gate>, reload-watchdog-<time>; planfix-<id> for supervise), a stale lock removed,
 incremental dirs pruned, a host held offline (.overhaul/remote/<name>.offline), the dashboard rewritten. A request
 and anything it cannot fix also append one line to .overhaul/ALERT.txt for the manager; nothing passes silently.
 A breach that persists repeats its event and alert at most every 30 min. Its memory (first seen, last fired, last
@@ -53,6 +53,8 @@ AUDIT_DUE_S = 15 * 60.0  # a phase audit or arch sweep starts within this of fal
 PROGRESS_S = 30 * 60.0  # some build/review/verify/land event within this while rows are ready and slots free
 RELOAD_S = 10 * 60.0  # drive applies a reset/reload request within this
 PLAN_ROUND_S = 30 * 60.0  # needs-plan rows: a plan round in flight or finished within this
+CRITICAL_ROUND_S = 15 * 60.0  # a needs-plan row with critical_waiters rows waiting: a round in flight within this
+CRITICAL_WAITERS = 10  # [harness] critical_waiters (supervise.py's default too)
 PROOF_DUE_S = 60 * 60.0  # a proof-check after a phase end
 DASH_S = 60 * 60.0  # the dashboard is rewritten within this while the build is live
 AUDIT_LOCK_S = 20 * 60.0  # a module held by an audit fix (st audit_locks) longer than this (pilot2026-11-10: 30+ min)
@@ -88,6 +90,8 @@ INVARIANTS = (
     ("reload", "a reset-/reload- request file", "drive removed it within 10 min", "alert (with the last refusal)"),
     ("needs_plan", "needs-plan rows for 30 min", "supervise round.json, or a plan reload/reset event in 30 min",
      "alert"),
+    ("critical_plan", "a needs-plan row with [harness] critical_waiters (10) not-proven rows waiting on it, 15 min",
+     "its id in supervise round.json", "request planfix-<id> (supervise starts its own round) + alert"),
     ("proof_check", "a phase finished 60 min ago", ".overhaul/proof-check.txt written after it", "alert"),
     ("dashboard", "log events in the last 60 min", "dash/index.html written in the last 60 min",
      "dash.py run, alert when still stale"),
@@ -171,17 +175,22 @@ class Watchdog:
     def harness(self) -> dict:
         return self.conf.get("harness") or {}
 
-    def phases(self, st: dict) -> dict[int, list[str]]:
-        """Phase number -> the ids of its active rows (the plan's FUNCTIONS.md, rows drive has in state.json)."""
-        import drive  # noqa: PLC0415 - heavy, and only this needs it
+    def plan_rows(self) -> list:
+        """The plan's active (not deferred) rows from its FUNCTIONS.md; [] when unreadable."""
+        import drive  # noqa: PLC0415 - heavy, and only the plan checks need it
         rel = (self.conf.get("paths") or {}).get("functions") or drive.DEFAULTS["paths"]["functions"]
         try:
             text = (self.repo / rel).read_text(encoding="utf-8")
         except OSError:
-            return {}
+            return []
+        return [f for f in drive.parse_functions(text) if f.status != drive.DEFERRED]
+
+    def phases(self, st: dict) -> dict[int, list[str]]:
+        """Phase number -> the ids of its active rows (the plan's FUNCTIONS.md, rows drive has in state.json)."""
+        import drive  # noqa: PLC0415
         recs, out = st.get("functions") or {}, {}
-        for f in drive.parse_functions(text):
-            if f.status != drive.DEFERRED and f.id in recs:
+        for f in self.plan_rows():
+            if f.id in recs:
                 out.setdefault(drive.phase_key(f)[0], []).append(f.id)
         return out
 
@@ -200,6 +209,7 @@ class Watchdog:
             "phase_audit": lambda: self.phase_audit(now, evs, st), "arch_sweep": lambda: self.arch_sweep(now, mem, st),
             "periodic": lambda: self.periodic(now, evs, st), "progress": lambda: self.progress(now, mem, evs, st),
             "reload": lambda: self.reload(now, mem, evs), "needs_plan": lambda: self.needs_plan(now, mem, evs, st),
+            "critical_plan": lambda: self.critical_plan(now, mem, st),
             "proof_check": lambda: self.proof_check(now, evs, st), "dashboard": lambda: self.dashboard(now, evs)}
         for name, *_ in INVARIANTS:
             try:
@@ -432,6 +442,30 @@ class Watchdog:
             return None
         return (f"{len(rows)} needs-plan rows ({' '.join(rows[:6])}) and no plan round for "
                 f"{(now - max(last, float(first['needs_plan']))) / 60:.0f} min", None)
+
+    def critical_plan(self, now, mem, st):
+        """A needs-plan row that critical_waiters or more not-proven rows wait on (drive.waiters, the same weight
+        drive and supervise rank by) is in a plan round within 15 min (pilot2026-11-10: Q09 blocked 80 rows and
+        sat needs-plan for hours while rounds fixed low-value rows)."""
+        import drive  # noqa: PLC0415
+        recs = st.get("functions") or {}
+        seen = mem.setdefault("critical", {})
+        needs = [fid for fid, r in recs.items() if isinstance(r, dict) and r.get("status") == "needs-plan"]
+        if not needs:
+            seen.clear()
+            return None
+        wait = drive.waiters(self.plan_rows(), recs)
+        limit = int(self.harness().get("critical_waiters") or CRITICAL_WAITERS)
+        flying = set(read_json(self.ov / "supervise" / "round.json").get("ids") or [])
+        crit = sorted((f for f in needs if wait.get(f, 0) >= limit and f not in flying), key=lambda f: (-wait[f], f))
+        for fid in [f for f in seen if f not in crit]:
+            del seen[fid]
+        late = [fid for fid in crit if now - float(seen.setdefault(fid, now)) >= CRITICAL_ROUND_S]
+        if not late:
+            return None
+        return ("; ".join(f"{fid} needs-plan with {wait[fid]} rows waiting and no plan round for "
+                          f"{(now - float(seen[fid])) / 60:.0f} min" for fid in late[:4]),
+                lambda: self.request(*[f"planfix-{fid}" for fid in late]))
 
     def proof_check(self, now, evs, st):
         """A blind proof-check after each phase end (the manager runs it; supervise.py runs it at the very end)."""

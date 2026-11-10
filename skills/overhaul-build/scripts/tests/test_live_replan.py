@@ -217,8 +217,10 @@ class Live(ts.Toy):
     def test_a_failed_live_round_leaves_the_function_to_one_exit3_round_never_both_at_once(self):
         sup = self.live(exits=[3], needs=["S01"], kinds={"S01": "none"}, wait=3)
         self.assertEqual(sup.supervise(), 1)
-        a, b = self.fixes()
-        self.assertGreaterEqual(b["start"], a["end"])  # never two rounds on one function
+        fixes = self.fixes()  # 1-3 live tries (live retries fit in drive's 3 s when a round is quick), then Exit 3
+        self.assertGreaterEqual(len(fixes), 2)
+        for a, b in zip(fixes, fixes[1:]):
+            self.assertGreaterEqual(b["start"], a["end"])  # never two rounds on one function
         self.assertIn("live round L1: round L1: no plan fix succeeded (S01); retried next poll: S01", self.log())
         self.assertIn("round 1: no plan fix succeeded (S01)", self.log())
 

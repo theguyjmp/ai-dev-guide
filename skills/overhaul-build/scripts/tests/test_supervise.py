@@ -483,3 +483,106 @@ class LiveRetryOnCrash(unittest.TestCase):
         supervise.Supervisor.live_round(sup, "L1", ["R1"])
         self.assertEqual(sup.live_tried, {})
         self.assertIn("retried next poll: R1", sup.log.call_args_list[-1].args[0])
+
+
+def plan_text(rows: list[tuple[str, str]]) -> str:
+    """FUNCTIONS.md for (id, deps) rows: Q09 blocks 80 rows (pilot2026-11-10), M1 blocks 3, A1..A3 block none."""
+    return ("# Functions\n\n| id | phase | module | deps | entry | acceptance | status |\n"
+            "|----|-------|--------|------|-------|------------|--------|\n"
+            + "".join(f"| {fid} | 1 | m | {deps} | `toy {fid}` | tests/acceptance/test_{fid}.py::t | planned |\n"
+                      for fid, deps in rows))
+
+
+CRIT_ROWS = ([("Q09", "-"), ("M1", "-"), ("A1", "-"), ("A2", "-"), ("A3", "-")]
+             + [(f"R{i:03d}", "Q09") for i in range(80)] + [(f"W{i}", "M1") for i in range(3)])
+
+
+class CriticalPath(unittest.TestCase):
+    """live_step: plan fixes go critical path first (drive.waiters), a critical row gets its own round at once."""
+
+    def setUp(self):
+        import threading
+        self.root = Path(tempfile.mkdtemp(prefix="sup-crit-")).resolve()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)
+        sup = supervise.Supervisor.__new__(supervise.Supervisor)
+        sup.ov, sup.parallel, sup.critical, sup.live_n = self.root / ".overhaul", 2, 10, 0
+        sup.flight, sup.rounds, sup.reserved, sup.flight_lock = {}, {}, {}, threading.Lock()
+        sup.live_tried, sup.live_fails, sup.live_starts, sup.ready_zero_since = {}, {}, {}, None
+        sup.logs = []
+        sup.log = sup.logs.append
+        rows = supervise.drive.parse_functions(plan_text(CRIT_ROWS))
+        sup.rows = lambda: rows
+        self.doc = {"functions": {fid: {"status": "planned"} for fid, _ in CRIT_ROWS}, "width": {"ready": 4}}
+        sup.state_doc = lambda: self.doc
+        sup.live_round = lambda label, fixing: self.release.wait(10)  # stays in flight until the test ends
+        self.sup = sup
+
+    def needs(self, *ids: str, resets: int = 0) -> None:
+        for fid in ids:
+            self.doc["functions"][fid] = {"status": "needs-plan", "resets": resets}
+
+    def started(self) -> list[tuple[str, list[str]]]:
+        return [(kind, ids) for _, ids, kind in self.sup.flight.values()]
+
+    def test_an_80_waiter_row_gets_its_own_round_and_the_batch_is_ranked_by_waiters(self):
+        self.needs("A2", "A1", "M1", "Q09")
+        self.sup.live_step()
+        self.assertEqual(self.started(), [("critical", ["Q09"]), ("batch", ["M1", "A1", "A2"])])
+        self.assertIn("live round L1 (critical: 80 rows wait): Q09", self.sup.logs)
+        self.sup.live_step()  # both in flight: nothing new, nothing twice
+        self.assertEqual(len(self.sup.flight), 2)
+
+    def test_a_critical_row_does_not_wait_behind_a_batched_round_in_flight(self):
+        self.needs("A1", "A2")
+        self.sup.live_step()
+        self.assertEqual(self.started(), [("batch", ["A1", "A2"])])
+        self.needs("Q09")
+        self.sup.live_step()
+        self.assertEqual(self.started(), [("batch", ["A1", "A2"]), ("critical", ["Q09"])])
+
+    def test_a_row_whose_reset_request_waits_for_drive_gets_no_round(self):
+        (self.sup.ov / "requests").mkdir(parents=True)
+        (self.sup.ov / "requests" / "reset-Q09").write_text("L1\n")
+        self.needs("Q09")
+        self.sup.live_step()
+        self.assertEqual(self.started(), [])
+
+    def test_ready_zero_for_10_min_retries_the_top_ranked_rows_whatever_their_live_tried_state(self):
+        self.sup.critical = 1000  # isolate the starvation rule
+        self.needs("A1", "M1", "Q09", "A2")
+        self.sup.live_tried = {"A1": 0, "M1": 0, "Q09": 0, "A2": 0}  # each had its live try
+        self.sup.live_starts = {"Q09": (0, supervise.LIVE_RETRIES + 1)}  # Q09's retry cap is used
+        self.doc["width"] = {"ready": 0}
+        self.sup.live_step()
+        self.assertEqual(self.started(), [])  # ready 0 first seen now
+        self.sup.ready_zero_since -= supervise.READY_ZERO_S + 1
+        self.sup.live_step()
+        self.assertEqual(self.started(), [("starved", ["M1", "A1"])])  # top-ranked up to plan_fix_parallel (2)
+        self.assertIn("ready 0 for 10 min", self.sup.logs[-1])
+
+    def test_a_watchdog_planfix_request_starts_a_dedicated_round_and_is_consumed(self):
+        req = self.sup.ov / "requests"
+        req.mkdir(parents=True)
+        for fid in ("A2", "A3"):
+            (req / f"planfix-{fid}").write_text("watchdog\n")
+        self.needs("A2")
+        self.sup.live_tried = {"A2": 0}
+        self.sup.live_step()
+        self.assertEqual(self.started(), [("critical", ["A2"])])
+        self.assertEqual(sorted(p.name for p in req.iterdir()), [])
+        self.assertIn("request planfix-A3: not needs-plan", self.sup.logs)
+
+    def test_round_json_names_every_round_in_flight_and_reserved_ids_never_overlap(self):
+        self.sup.round_file("L1", ["Q09"])
+        self.sup.round_file("L2", ["A1", "A2"])
+        doc = json.loads((self.sup.ov / "supervise" / "round.json").read_text())
+        self.assertEqual((doc["round"], doc["ids"]), ("L1+L2", ["Q09", "A1", "A2"]))
+        self.sup.reserved["L1"] = supervise.reserve([f for f, _ in CRIT_ROWS], ["Q09"])["Q09"]
+        taken = [f for f, _ in CRIT_ROWS] + self.sup.reserved["L1"]
+        self.assertFalse(set(supervise.reserve(taken, ["A1"])["A1"]) & set(self.sup.reserved["L1"]))
+        self.sup.round_file("L1", done=True)
+        self.assertNotIn("L1", self.sup.reserved)
+        self.sup.round_file("L2", done=True)
+        self.assertFalse((self.sup.ov / "supervise" / "round.json").exists())

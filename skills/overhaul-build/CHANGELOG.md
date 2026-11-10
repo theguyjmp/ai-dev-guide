@@ -1,5 +1,19 @@
 # overhaul-build changelog
 
+## Plan fixing critical path first, 2026-11-10
+the pilot project 2026-11-10: Q09 (store::ids::next_id) blocked 80 rows and sat needs-plan for hours while live rounds fixed
+low-value rows; ready rows were 0 most of the afternoon.
+- drive.waiters / drive.rank_key are module helpers (Drive.waiters and Drive.rank call them): one critical-path weight
+  for drive, supervise and the watchdog.
+- supervise.live_step orders needs-plan rows by waiters; a row with `[harness] critical_waiters` (default 10) or more
+  gets its own round at once, beside a batched round in flight (rounds run side by side: round.json names all of
+  them, reserved ids never overlap, lands stay serial under .overhaul/lock). Ready rows 0 for 10 min: one round for the
+  top-ranked rows up to plan_fix_parallel whatever their live_tried state; the cap stays 3 live rounds per row per
+  reset count, and a row whose reset request waits for drive gets none.
+- watchdog invariant critical_plan: such a row with no round in flight for 15 min -> `.overhaul/requests/planfix-<id>`
+  (supervise starts its round and consumes the file) + ALERT line.
+- Tests: test_supervise CriticalPath (6, an 80-waiter row), test_watchdog CriticalPlan (2).
+
 ## Audits lock nothing; a fix holds only its files, 2026-11-10
 - the pilot project 17:02-17:34: a phase-3 lands audit locked 10 modules (its scope plus plan-gap modules) for 30+ min; every
   deps-proven row waited (Q09: 80), 0 builds ran, and the manager set phase_audit = false (pilot01487f4).

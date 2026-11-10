@@ -594,6 +594,37 @@ def phase_key(f: Fn) -> tuple[int, int]:
     return (int(m.group()) if m else 0, f.order)
 
 
+def waiters(rows: list[Fn], recs: dict) -> dict[str, int]:
+    """fid -> how many not-proven rows wait on it through `blocking` deps, directly or through others: the
+    critical-path weight. One helper for drive's start/land order, supervise's plan-fix order and the watchdog."""
+    proven = {fid for fid, r in recs.items() if isinstance(r, dict) and r.get("status") == "proven"}
+    rdeps: dict[str, list[str]] = {}
+    for f in rows:
+        for d in f.blocking:
+            if d != f.id:
+                rdeps.setdefault(d, []).append(f.id)
+    out: dict[str, int] = {}
+    for f in rows:
+        seen: set[str] = set()
+        todo = list(rdeps.get(f.id, []))
+        while todo:
+            cur = todo.pop()
+            if cur not in seen and cur != f.id:
+                seen.add(cur)
+                todo.extend(rdeps.get(cur, []))
+        out[f.id] = sum(1 for x in seen if x not in proven)
+    return out
+
+
+def rank_key(fid: str, fns: dict[str, Fn], wait: dict[str, int]) -> tuple[int, int, int, str]:
+    """Start, land and plan-fix order: most rows waiting first, then phase, then plan order (id). Unknown ids (a
+    polish or fix pass) sort after the rows that unblock others, by id."""
+    f = fns.get(fid)
+    if f is None:
+        return (0, 1 << 30, 1 << 30, fid)
+    return (-wait.get(fid, 0), *phase_key(f), fid)
+
+
 def module_section(arch: str, module: str) -> str:
     """The ARCHITECTURE.md heading section that names this module, or ''."""
     if not module:
@@ -1180,38 +1211,18 @@ class Driver(mainred.MainRed):
             self.dep_paths([f.module]) if deps else [])
 
     def waiters(self) -> dict[str, int]:
-        """fid -> how many not-proven rows wait on it through `blocking` deps, directly or through others: the
-        critical-path weight. Cached until a row is proven or the plan's deps change."""
+        """waiters() over the plan's rows and state; cached until a row is proven or the plan's deps change."""
         recs = self.st["functions"]
         proven = frozenset(fid for fid, r in recs.items() if r.get("status") == "proven")
         key = (proven, tuple((f.id, tuple(f.blocking)) for f in self.order))
         if self.wait_cache[0] == key:
             return self.wait_cache[1]
-        rdeps: dict[str, list[str]] = {}
-        for f in self.order:
-            for d in f.blocking:
-                if d != f.id:
-                    rdeps.setdefault(d, []).append(f.id)
-        out: dict[str, int] = {}
-        for f in self.order:
-            seen: set[str] = set()
-            todo = list(rdeps.get(f.id, []))
-            while todo:
-                cur = todo.pop()
-                if cur not in seen and cur != f.id:
-                    seen.add(cur)
-                    todo.extend(rdeps.get(cur, []))
-            out[f.id] = sum(1 for x in seen if x not in proven)
+        out = waiters(self.order, recs)
         self.wait_cache = (key, out)
         return out
 
     def rank(self, fid: str) -> tuple[int, int, int, str]:
-        """Start and land order: most rows waiting first, then phase, then plan order (id). Unknown ids (a polish
-        or fix pass) sort after the rows that unblock others, by id."""
-        f = self.fns.get(fid)
-        if f is None:
-            return (0, 1 << 30, 1 << 30, fid)
-        return (-self.waiters().get(fid, 0), *phase_key(f), fid)
+        return rank_key(fid, self.fns, self.waiters())
 
     def startable(self, busy: set[str]) -> list[Fn]:
         """Planned rows that may build now, resumed builds first, then critical-path order (rank): every blocking

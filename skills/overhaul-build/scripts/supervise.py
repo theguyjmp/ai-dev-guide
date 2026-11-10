@@ -10,8 +10,10 @@ plan_validate, the tests they run) is capped too. Then, in a loop:
   integrator as Exit 3, ids L1, L2, ...). Its branch is not run (static plan_validate only while drive runs); under
   .overhaul/lock (no land in between) it is rebased onto main, passes PLAN OK and fast-forwards main; then supervise
   writes .overhaul/requests/reset-<id> per fixed row still active (reload-<round> when none is), which drive applies at
-  its next cycle boundary. One round at a time (live or Exit 3), so no two rounds touch one function; a function gets
-  one live try per reset count. .overhaul/supervise/round.json names the round in flight (verdict.py shows it);
+  its next cycle boundary. Critical path first (live_step): a row with `[harness] critical_waiters` rows waiting gets
+  its own round at once, the rest one batched round by waiters, ready 0 for 10 min a round for the top-ranked rows;
+  no two rounds touch one function, and an Exit-3 round waits for every live round. .overhaul/supervise/round.json
+  names the rounds in flight (verdict.py and watchdog.py read it);
 - exit 0: when every non-deferred row is proven, one blind proof-check (references/proof-check.md), then stop;
 - exit 3 (after a live round in flight finishes; a live round that landed reruns drive.py free): one Exit-3 round. Every needs-plan function gets its own `claude -p` plan-fix agent at once (up to
   `[harness] plan_fix_parallel`, default 12; template plan-fix-brief.md), in its own worktree on plan/fix-<id>, with a
@@ -76,6 +78,9 @@ BG_WAIT = {"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}  # headless claude waits
 NUM_ID = re.compile(r"^(.*?)(\d+)$")
 POLL_S = 0.5
 LIVE_POLL_S = 60.0  # how often a running drive's state.json is read for needs-plan functions (no tight loop)
+CRITICAL_WAITERS = 10  # [harness] critical_waiters: a needs-plan row with this many rows waiting gets its own round
+READY_ZERO_S = 600.0  # ready rows 0 this long: a round for the top-ranked needs-plan rows, tried or not
+PLANFIX_REQ = "planfix-"  # watchdog.py's .overhaul/requests/planfix-<id>: a dedicated round for that row
 LIVE_LOCK_WAIT_S = 1800.0  # a live plan land waits this long for land.py to release .overhaul/lock
 
 
@@ -125,7 +130,13 @@ class Supervisor:
         self.plan_land_cmd = plan_land_cmd or [sys.executable, str(HERE / "plan_land.py")]
         self.test_timeout = float(har.get("plan_land_timeout_s") or 1800)
         self._claude = claude_cmd
-        self.live: threading.Thread | None = None  # the live round in flight
+        self.critical = max(1, int(har.get("critical_waiters") or CRITICAL_WAITERS))
+        self.flight: dict[str, tuple[threading.Thread, list[str], str]] = {}  # live rounds: label -> (thread, ids, kind)
+        self.rounds: dict[str, dict] = {}  # every round in flight (live or Exit 3): label -> its round.json entry
+        self.reserved: dict[str, list[str]] = {}  # label -> new ids its agents may use (no two rounds share one)
+        self.flight_lock = threading.Lock()
+        self.live_starts: dict[str, tuple[int, int]] = {}  # fid -> (resets, live rounds started at that count)
+        self.ready_zero_since: float | None = None
         self.live_n = 0
         self.live_landed = False  # a live round landed on main during this drive run
         self.live_tried: dict[str, int] = {}  # fid -> its resets count at its last live try
@@ -181,12 +192,15 @@ class Supervisor:
     def rows(self) -> list[drive.Fn]:
         return drive.parse_functions(self.git("show", f"{self.main}:{self.functions}"))
 
-    def state(self) -> dict:
+    def state_doc(self) -> dict:
         try:
             data = json.loads(drive.read_text(self.ov / "state.json") or "{}")
         except ValueError:
             data = {}
-        return data.get("functions", {}) if isinstance(data, dict) else {}
+        return data if isinstance(data, dict) else {}
+
+    def state(self) -> dict:
+        return self.state_doc().get("functions", {})
 
     # ---- the loop ----
     def supervise(self) -> int:
@@ -209,10 +223,11 @@ class Supervisor:
             with router.watching(self):  # routed plan fixes (router.py) while drive runs; defers to live rounds
                 rc, tail = self.run_drive()
             self.log(f"drive exit {rc}: {tail}")
-            if self.live is not None:
-                self.log("waiting for the live round in flight")
-                self.live.join()
-                self.live = None
+            if self.flight:
+                self.log(f"waiting for the live round(s) in flight: {' '.join(self.flight)}")
+                for t, _, _ in list(self.flight.values()):
+                    t.join()
+                self.flight.clear()
             landed, self.live_landed = self.live_landed, False
             if rc == 0:
                 return self.proof()
@@ -261,21 +276,86 @@ class Supervisor:
         return proc.returncode, last_line(drive.read_text(out))
 
     def live_step(self) -> None:
-        """Start a live round for needs-plan functions not tried at their current reset count, if none is in flight."""
-        if self.live is not None and self.live.is_alive():
-            return
+        """Start live rounds while drive runs, critical path first (pilot2026-11-10: Q09 blocked 80 rows and sat
+        needs-plan for hours while live rounds fixed low-value rows, and ready rows were 0 most of the afternoon):
+        - a needs-plan row with >= critical_waiters not-proven rows waiting on it (drive.waiters) gets its own round
+          at once, beside any round in flight; so does a row the watchdog asks for (requests/planfix-<id>);
+        - the rest not tried at their reset count go in one batched round, most waiters first;
+        - ready rows 0 for READY_ZERO_S: one round for the top-ranked needs-plan rows up to plan_fix_parallel,
+          whatever their live_tried state.
+        A row is in one round at a time, never while its reset request waits for drive, and at most LIVE_RETRIES + 1
+        live rounds start for it per reset count."""
+        with self.flight_lock:
+            self.flight = {k: v for k, v in self.flight.items() if v[0].is_alive()}
+            busy = {fid for _, ids, _ in self.flight.values() for fid in ids}
+            kinds = Counter(kind for _, _, kind in self.flight.values())
         try:
-            needs, recs = self.needs_plan(), self.state()
+            rows, doc = self.rows(), self.state_doc()
         except Stop:
             return  # main unreadable for a moment: the next poll tries again
-        fixing = [fid for fid in needs if self.live_tried.get(fid) != int(recs[fid].get("resets", 0))]
-        if not fixing:
-            return
+        recs = doc.get("functions") or {}
+        active = [f for f in rows if f.status != drive.DEFERRED]
+        fns = {f.id: f for f in active}
+        req = self.ov / drive.REQUESTS_DIR
+        pending = {p.name[len("reset-"):] for p in req.glob("reset-*")} if req.is_dir() else set()
+        wait = drive.waiters(active, recs)
+        needs = sorted((fid for fid, r in recs.items() if fid in fns and r.get("status") == "needs-plan"),
+                       key=lambda fid: drive.rank_key(fid, fns, wait))
+        resets = {fid: int(recs[fid].get("resets", 0)) for fid in needs}
+        free = [fid for fid in needs if fid not in busy and fid not in pending and self.starts_left(fid, resets[fid])]
+        untried = [fid for fid in free if self.live_tried.get(fid) != resets[fid]]
+        asked = self.planfix_requests(needs, busy | pending, free)
+        for fid in free:
+            if fid in asked or (fid in untried and wait.get(fid, 0) >= self.critical
+                                and kinds["critical"] < self.parallel):
+                self.start_live([fid], resets, "critical",
+                                f"{wait.get(fid, 0)} rows wait" + ("; watchdog request" if fid in asked else ""))
+                kinds["critical"] += 1
+                busy.add(fid)
+        ready = (doc.get("width") or {}).get("ready")
+        if ready is None or int(ready) > 0 or not needs:
+            self.ready_zero_since = None
+        elif self.ready_zero_since is None:
+            self.ready_zero_since = time.time()
+        zero = time.time() - self.ready_zero_since if self.ready_zero_since is not None else 0.0
+        if zero >= READY_ZERO_S and not kinds["starved"]:
+            if top := [fid for fid in free if fid not in busy][:self.parallel]:
+                self.start_live(top, resets, "starved", f"ready 0 for {zero / 60:.0f} min")
+                busy.update(top)
+        if not kinds["batch"] and (rest := [fid for fid in untried if fid not in busy]):
+            self.start_live(rest, resets, "batch", "")
+
+    def starts_left(self, fid: str, resets: int) -> bool:
+        """The retry cap: at most LIVE_RETRIES + 1 live rounds for fid per reset count."""
+        at, n = self.live_starts.get(fid, (resets, 0))
+        return at != resets or n <= LIVE_RETRIES
+
+    def planfix_requests(self, needs: list[str], covered: set[str], free: list[str]) -> set[str]:
+        """The rows of watchdog.py's requests/planfix-<id> that get a round now; every request file is consumed."""
+        req = self.ov / drive.REQUESTS_DIR
+        out: set[str] = set()
+        for p in sorted(req.glob(PLANFIX_REQ + "*")) if req.is_dir() else []:
+            fid = p.name[len(PLANFIX_REQ):]
+            if fid in free:
+                out.add(fid)
+            else:
+                self.log(f"request {p.name}: " + ("not needs-plan" if fid not in needs else "a round is in flight"
+                                                  if fid in covered else "live retry cap used; left to Exit 3"))
+            p.unlink(missing_ok=True)
+        return out
+
+    def start_live(self, fixing: list[str], resets: dict[str, int], kind: str, why: str) -> None:
         for fid in fixing:
-            self.live_tried[fid] = int(recs[fid].get("resets", 0))
+            self.live_tried[fid] = resets[fid]
+            at, n = self.live_starts.get(fid, (resets[fid], 0))
+            self.live_starts[fid] = (resets[fid], n + 1 if at == resets[fid] else 1)
         self.live_n += 1
-        self.live = threading.Thread(target=self.live_round, args=(f"L{self.live_n}", fixing), daemon=True)
-        self.live.start()
+        label = f"L{self.live_n}"
+        t = threading.Thread(target=self.live_round, args=(label, fixing), daemon=True)
+        with self.flight_lock:
+            self.flight[label] = (t, list(fixing), kind)
+        self.log(f"live round {label} ({kind}{': ' + why if why else ''}): {' '.join(fixing)}")
+        t.start()
 
     def live_retry(self, fixing: list[str]) -> list[str]:
         """A live round that did not land (main moved, a dirty checkout, a refused fast-forward) leaves its rows
@@ -322,17 +402,27 @@ class Supervisor:
                      + (f"; retried next poll: {' '.join(retry)}" if retry else ""))
         finally:
             self.drop_worktrees(work)
-            self.round_file()
+            self.round_file(label, done=True)
 
-    def round_file(self, label: str = "", ids: list[str] | None = None) -> None:
-        """.overhaul/supervise/round.json names the plan-fix round in flight (verdict.py shows it); none: removed."""
+    def round_file(self, label: str, ids: list[str] | None = None, done: bool = False) -> None:
+        """.overhaul/supervise/round.json names the plan-fix rounds in flight (verdict.py and watchdog.py read it):
+        round = their labels joined by '+', ids = every row they fix; removed when none is. done: label finished,
+        its reserved ids freed."""
         path = self.ov / "supervise" / "round.json"
-        if not label:
-            path.unlink(missing_ok=True)
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"round": label, "ids": ids or [], "started": datetime.now().isoformat(
-            timespec="seconds")}), encoding="utf-8")
+        with self.flight_lock:
+            if done:
+                self.rounds.pop(label, None)
+                self.reserved.pop(label, None)
+            else:
+                self.rounds[label] = {"ids": list(ids or []), "started": datetime.now().isoformat(timespec="seconds")}
+            if not self.rounds:
+                path.unlink(missing_ok=True)
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"round": "+".join(self.rounds),
+                                        "ids": [i for r in self.rounds.values() for i in r["ids"]],
+                                        "started": min(r["started"] for r in self.rounds.values()),
+                                        "rounds": self.rounds}), encoding="utf-8")
 
     def land_live(self, branch: str, merge_wt: Path, work: Path, label: str) -> None:
         """Rebased onto main: dup/literals and the proven tests it touches (plan_land.py) outside the lock; then under
@@ -437,13 +527,15 @@ class Supervisor:
             self.land_plan(branch, merge_wt, work, rnd)
             self.drop_worktrees(work)
         finally:
-            self.round_file()
+            self.round_file(str(rnd), done=True)
         self.after_land(rows, fixing, fixed, replace)
 
     def fix_round(self, rnd: str, fixing: list[str], rows: list[drive.Fn], recs: dict,
                   work: Path) -> tuple[str, Path, list[str], set[str]]:
         """The plan-fix agents (in parallel) and the integrator: (plan branch, its worktree, fixed ids, replace)."""
-        ids = reserve([f.id for f in rows], fixing)
+        with self.flight_lock:  # rounds run side by side: never reserve another round's new ids
+            ids = reserve([f.id for f in rows] + [i for v in self.reserved.values() for i in v], fixing)
+            self.reserved[rnd] = [i for v in ids.values() for i in v]
         self.git("worktree", "prune", check=False)
         replace = {fid for fid in fixing if int(recs[fid].get("resets", 0)) >= drive.PLAN_FIXES}
         self.log(f"round {rnd}: plan-fix {' '.join(fixing)} ({min(len(fixing), self.parallel)} at once"
