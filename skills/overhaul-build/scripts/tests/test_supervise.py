@@ -392,3 +392,15 @@ class FreeBranch(unittest.TestCase):
             git("worktree", "add", "-q", "-f", "-B", "plan/fix-X", str(Path(d) / "new"), "main")
             self.assertTrue(any("removed stale worktree" in x for x in logs))
             self.assertFalse((Path(d) / "old").exists())
+
+
+class LiveRetry(unittest.TestCase):
+    def test_a_round_that_did_not_land_is_retried_twice_then_left(self):
+        sup = mock.Mock(live_tried={"R1": 0, "R2": 0}, live_fails={})
+        self.assertEqual(supervise.Supervisor.live_retry(sup, ["R1", "R2"]), ["R1", "R2"])
+        self.assertEqual(sup.live_tried, {})
+        sup.live_tried = {"R1": 0}
+        supervise.Supervisor.live_retry(sup, ["R1"])
+        sup.live_tried = {"R1": 0}
+        self.assertEqual(supervise.Supervisor.live_retry(sup, ["R1"]), [])
+        self.assertEqual(sup.live_tried, {"R1": 0})
