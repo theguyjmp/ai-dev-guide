@@ -45,6 +45,12 @@ class Classify(unittest.TestCase):
         self.assertEqual(router.classify("acceptance red in the worktree after merging main", b2,
                                          ["crates/kernel/src/solid_revolve.rs"]), "missing_dep")
 
+    def test_regression_in_a_1m_scale_test_is_a_retry_not_oversized(self):
+        node = "tests/acceptance/s110_cull_budget.rs::test_s110_cull_1m_under_budget_p19"
+        self.assertEqual(router.classify(f"land: regression: proven S110 {node} fails (exit 101)"), "other")
+        self.assertEqual(router.classify(f"regression before review: proven S110 {node} (exit 101) is red"), "other")
+        self.assertEqual(router.classify(f"acceptance still red after merge: {node} (exit 101)"), "oversized")
+
     def test_load_flake_and_reviewer_timeout(self):
         self.assertEqual(router.classify("land: regression: proven S02 bench failed in the batch, passed alone on "
                                          "rerun 1/2"), "load_flake")

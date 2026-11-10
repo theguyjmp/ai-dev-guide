@@ -11,7 +11,7 @@ change", "acceptance red ..."), from the builder's own output (its BLOCKED-BY / 
 - contract_defect  the builder reports the acceptance test or the row itself is wrong
 - main_flake       the red test fails on clean main too
 - load_flake       the red test passes when run alone
-- oversized        a builder, land or acceptance timeout, or a 1M fixture red
+- oversized        a builder, land or acceptance timeout, or a 1M fixture red (a regression of a proven test is a retry)
 - review_quality   verified blocking NOs inside its own cell
 - other            anything else (a regression the branch caused, a protected file touched, ...)
 
@@ -99,6 +99,8 @@ FILES = re.compile(r"outside (?:its|the|my) (?:files? cell|allowed (?:paths|file
 TIMEOUT = re.compile(r"(?<!reviewer )(?<!verifier )(?<!auditor )\btimed out\b|\btimeout model=|land\.py timed out", re.I)
 ONE_M = re.compile(r"(?:^|[^0-9a-z.])1m(?:[^0-9a-z]|$)|1_000_000|\b1M\b", re.I)
 NODE = re.compile(r"\S*tests/\S+")
+# a proven test this change broke (land.py, drive.py pre-review): a normal retry, whatever its fixture size
+REGRESSION = re.compile(r"\bregression(?: before review)?: proven ")
 DEP = re.compile(r"BLOCKED-BY|\bstub\b|todo!\(|unimplemented|not (?:yet )?proven|unproven|dependency fix \S+ failed|"
                  r"can(?:'|no)t build|has no \w+ kind|no \w+ kind", re.I)
 REVIEW = re.compile(r"verified blocking NO", re.I)
@@ -121,7 +123,7 @@ def classify(detail: str, builder: str = "", cell: tuple[str, ...] | list[str] =
         return "contract_defect"
     if FILES.search(d):
         return "files_gap"
-    if TIMEOUT.search(d) or any(ONE_M.search(n) for n in NODE.findall(d)):
+    if TIMEOUT.search(d) or (not REGRESSION.search(d) and any(ONE_M.search(n) for n in NODE.findall(d))):
         return "oversized"
     if DEP.search(d):
         return blocked_class(d, cell)
