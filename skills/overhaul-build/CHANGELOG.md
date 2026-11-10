@@ -4,6 +4,17 @@
 - Passes A (feasibility) and B (router files_gap) both grew a row's claim through state `files_extra`. One field, one
   reader (drive.extra, used by claims() and allowed_lists()) and one writer (router.add_files, which also logs
   `files_widened`); feasibility.py and router.widen both call it. SKILL.md lists `infeasible` with the router classes.
+- Main moves without dirtying the checkout (coordinator 2026-11-10; the pilot project 07:35-08:10, twice): a guard refusal of
+  `git merge --ff-only` came after git wrote the new files, so the live repo stayed dirty and blocked every land and
+  plan round. plan_land.fast_forward (and `plan_land.py --ff`): dry-run the checkout update, `git update-ref` main
+  (the one step the guard judges, no file touched), then `read-tree -m -u` old -> new; a refusal leaves main and
+  `git status --porcelain` as they were (checked). supervise.py's two `merge --ff-only` calls use it. Tests:
+  test_plan_land FastForward (3: fake refusing guard, allowed, overwriting local change).
+- router.on_park never widens mainred's dead-depfix `plan gap: <dep file>` (pass B widened it; test_main_red).
+- test_phase_audit Runs set pre_review_footprint = false: the toy's acceptance tests never pass, so every footprint
+  check ran pytest three times for nothing (drive run 130-190 s under load, 39 s without; the 180 s cap tripped).
+  Measured not a regression of last night's main fixes: fe88699 has the same events and took 189 s.
+- Merged arch-sweep-live (arch_step condition).
 
 ## Plan lands gated, remote heartbeat, watchdog, 2026-11-10
 Owner 2026-11-10 07:15: "Fix all of those permanently so those kinds won't happen again." Measured on the pilot project

@@ -63,6 +63,7 @@ sys.path.insert(0, str(HERE))
 import drivelock  # noqa: E402  one drive per repo
 import drive  # noqa: E402
 import memcap  # noqa: E402
+import plan_land  # noqa: E402  fast_forward: the one way main moves
 import router  # noqa: E402
 import watchdog  # noqa: E402  5-minute invariants beside the loop
 import worker  # noqa: E402
@@ -351,10 +352,17 @@ class Supervisor:
                 raise Stop(f"{branch} on {self.main} is not PLAN OK: {line}")
             if self.git("rev-parse", self.main).strip() != checked:
                 self.plan_tests(branch, merge_wt, work, label)
-            self.git("merge", "-q", "--ff-only", branch)
+            self.fast_forward(branch)
         finally:
             drive.release_lock(self.repo)
         self.log(f"main -> {branch} {self.git('rev-parse', '--short=12', self.main).strip()} (live)")
+
+    def fast_forward(self, branch: str) -> None:
+        """main -> branch via plan_land.fast_forward: a refusal (the guard, local changes) leaves main and the
+        checkout as they were and stops the round."""
+        ok, why = plan_land.fast_forward(self.repo, branch, self.main, harness=True)
+        if not ok:
+            raise Stop(f"{branch}: fast-forward {why}")
 
     def rebase(self, branch: str, merge_wt: Path) -> None:
         try:
@@ -515,7 +523,7 @@ class Supervisor:
             raise Stop(f"round {rnd}: {branch} is not PLAN OK: {line}")
         self.static_gates(branch, merge_wt, work, rnd)
         self.plan_tests(branch, merge_wt, work, rnd)
-        self.git("merge", "-q", "--ff-only", branch)
+        self.fast_forward(branch)
         self.log(f"main -> {branch} {self.git('rev-parse', '--short=12', 'HEAD').strip()}")
         out = work / "validate-run.txt"
         code, line = self.run([*self.validate_cmd, "--repo", str(self.repo), "--run",
