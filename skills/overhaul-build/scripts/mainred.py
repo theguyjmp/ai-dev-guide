@@ -26,6 +26,9 @@ _PATH = re.compile(r"(?<![\w.-])((?:[A-Za-z]:)?[\w.-]*(?:[\\/][\w.-]+)+\.\w+)")
 _FILE = re.compile(r"(?<![\w./\\-])((?:[\w.-]+[\\/])+[\w.-]+\.\w+)")
 
 
+NODE_RE = re.compile(r"tests/[\w./-]+\.(?:rs|py|js|ts)::\w+")
+
+
 def check_name(reason: str, names: set[str]) -> str:
     """The whole-tree check a pre-review or land failure names ('dup failed (exit 1) in the worktree ...',
     'land: test failed (exit 1) on merged tree: ...'), or '' when the reason is not one of `names`."""
@@ -104,7 +107,7 @@ class MainRed:
         self.red_window = Window(win) if win > 0 else None
         self.red_dead = Window(win) if win > 0 else None
         self.red_dead_modules: set[str] = set()
-        self.red_pending: tuple[str, str] | None = None  # (systemic key, its check) for red_step
+        self.red_pending: tuple[str, str, str] | None = None  # (systemic key, its check, one raw reason)
         self.red_cache: dict[tuple[str, str], tuple[bool, str]] = {}  # (main sha, check) -> (ok, output)
         self.red_review: set[str] = set()  # waiting before review: on green they go to review, not a rebuild
         self.red_stop_reason = ""
@@ -203,13 +206,16 @@ class MainRed:
     def red_step(self) -> bool:
         """Each loop: act on a systemic flag, and recheck a red main once it moved (cached per sha)."""
         if self.red_pending and not self.red_stop_reason:
-            key, check = self.red_pending
+            key, check, reason = self.red_pending
             self.red_pending = None
             if check:
                 ok, out, sha = self.main_check(check)
                 if not ok:
                     self.red_set(check, sha, out)
                     return True
+            node = None if check else NODE_RE.search(reason)  # a whole-tree check green on main still stops
+            if node and self.main_test_ok(node.group(0)):
+                return self.red_clear_systemic(key, f"{node.group(0)} is green on clean {self.main}")
             self.red_stop(f"systemic {key}")
             return True
         mr = self.st.get("main_red")
@@ -255,6 +261,29 @@ class MainRed:
         return bool(self.red_stop_reason) and not self.jobs and not self.land_jobs() and not self.periodic.busy()
 
     # ---- systemic ----
+    def red_clear_systemic(self, key: str, why: str) -> bool:
+        """A systemic reason whose check or test is green on clean main is per-branch (or flaky under load): each
+        function keeps its own retry and the build goes on (pilot2026-11-10 03:04: a proven test red in 3
+        worktrees, green on main 3 of 3, stopped every launch for 57 min)."""
+        self.log(None, "systemic_clear", f"{why}; not stopping: {key}"[:1500])
+        return True
+
+    def main_test_ok(self, node: str) -> bool:
+        """One acceptance test on clean main (the main-check worktree), cached per main sha; True when it passes or
+        cannot be run (only a measured failure on main stops the build)."""
+        tmpl = self.cfg.get("acceptance") or self.cfg["commands"].get("acceptance")
+        if not tmpl:
+            return False
+        sha = self.main_sha()
+        if (sha, node) not in self.red_cache:
+            wt = self.prepare_worktree("main-check")
+            subprocess.run(["git", "checkout", "-q", "-f", "--detach", sha], cwd=wt, capture_output=True,
+                           stdin=subprocess.DEVNULL)
+            cmd = land.acceptance_cmds(tmpl, [node])[0][1]
+            p = self.sh(cmd, wt, "main-check")
+            self.red_cache[(sha, node)] = (p is None or p.returncode == 0, "" if p is None else p.stdout[-2000:])
+        return self.red_cache[(sha, node)][0]
+
     def red_flag(self, key: str, count: int, check: str = "") -> bool:
         """Record a systemic reason in state.json (verdict.py shows it); True the first time."""
         rows = self.st.setdefault("systemic", [])
@@ -275,7 +304,7 @@ class MainRed:
         key = normalize(reason, set(self.fns))
         n = self.red_window.add(key, fid)
         if n >= SYSTEMIC_MIN and self.red_flag(key, n, check) and not self.red_pending:
-            self.red_pending = (key, check)
+            self.red_pending = (key, check, reason)
 
     def red_depfix(self, dfid: str, ok: bool, reason: str) -> bool:
         """Top of depfix_settled: the main fix settling, and a dead depfix ("builder left no committed change") a
