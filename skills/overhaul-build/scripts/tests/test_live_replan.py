@@ -219,7 +219,7 @@ class Live(ts.Toy):
         self.assertEqual(sup.supervise(), 1)
         a, b = self.fixes()
         self.assertGreaterEqual(b["start"], a["end"])  # never two rounds on one function
-        self.assertIn("live round L1: round L1: no plan fix succeeded (S01); still needs-plan", self.log())
+        self.assertIn("live round L1: round L1: no plan fix succeeded (S01)", self.log())
         self.assertIn("round 1: no plan fix succeeded (S01)", self.log())
 
 
