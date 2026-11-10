@@ -1,5 +1,19 @@
 # overhaul-build changelog
 
+## Live re-plan, 2026-11-09
+Measured 2026-11-09 15:07 CST on the pilot project under supervise.py: verdict "rate 1.7/h of expected 1.8/h (slots 3, build
+10.3m, 10 builds/land)". 7 functions sat needs-plan and most of 79 planned rows depended on them, so only 3 slots could
+run; supervise.py ran a plan-fix round only when drive.py exited 3, and drive kept running while lands trickled.
+- supervise.py: drive.py runs as a child; every 60 s, needs-plan functions with no plan fix in flight get a live round
+  (same agents and integrator, ids L1, L2...): `plan_validate --run` on its branch, then under `.overhaul/lock` a rebase
+  onto main, PLAN OK and a fast-forward, then `.overhaul/requests/reset-<id>` (or `reload-<round>`). One round at a
+  time; one live try per function per reset count; a drive exit 3 waits for the live round, and one that landed reruns
+  drive without using an Exit-3 round. `.overhaul/supervise/round.json` names the round in flight.
+- drive.py: applies reset requests at the next cycle boundary like `--reset` (event `reset_applied`; a third is refused,
+  `reset_refused`), re-reading the plan on main first (new and changed rows, no restart; `reload_refused` and no retry
+  on the same sha if plan_validate static fails).
+- verdict.py: the line shows `needs-plan N (round in flight: ids)`.
+
 ## Supervisor, 2026-11-09
 Measured on the pilot project vc5: the build sat at 44 proven for 4+ hours. drive.py was fine; everything around it was run by
 hand and failed: a bash launcher ran ONE serial headless manager per exit 3 (25+ min, one function at a time);

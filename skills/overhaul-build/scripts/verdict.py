@@ -532,7 +532,7 @@ def judge(p, prev, t_now, checks, events):
             "deferred": p.get("deferred", 0), "throughput": tp,
             "line": f"VERDICT {verdict} proven {proven}/{total}"
                     f"{' deferred ' + str(p['deferred']) if p.get('deferred') else ''} rate {rate:.1f}/h"
-                    f"{expected_text(tp)}"
+                    f"{expected_text(tp)}{needs_plan_text(counts, p.get('odir'))}"
                     f"{'' if pol is None else ' issues ' + ('?' if issues is None else str(issues))}"
                     f"{'' if pol is None else ' nits ' + str(as_int(nits))}"
                     f"{'' if trend is None else ' trend ' + trend}"
@@ -546,6 +546,16 @@ RATE_FIX = {
     "rework builds per land": "builds per land above 1.5: read the top failure reasons in log.jsonl and fix that "
                               "cause (brief, gate, plan) before adding builders",
     "landing queue": "lands are the ceiling: shorten the land gate or raise [harness] max_lands"}
+
+
+def needs_plan_text(counts, odir):
+    """' needs-plan N (round in flight: ids)' from supervise.py's .overhaul/supervise/round.json; '' when N is 0."""
+    n = counts.get("needs-plan", 0)
+    if not n:
+        return ""
+    rnd = load_json(os.path.join(odir, "supervise", "round.json"), {}) if odir else {}
+    ids = rnd.get("ids") if isinstance(rnd, dict) and isinstance(rnd.get("ids"), list) else []
+    return f" needs-plan {n} ({'round in flight: ' + ' '.join(map(str, ids)) if ids else 'no round in flight'})"
 
 
 def expected_text(tp):

@@ -5,9 +5,15 @@
 
 It caps itself first (memcap, `[limits] proc_mem_gb`), so every child (drive.py, plan-fix agents, the integrator,
 plan_validate, the tests they run) is capped too. Then, in a loop:
-- drive.py in the foreground (output in .overhaul/drive.out);
+- drive.py as a child (output in .overhaul/drive.out), its state.json read every LIVE_POLL_S (60 s). Live re-plan:
+  while drive runs, needs-plan functions with no plan fix in flight get one live round (the same plan-fix agents and
+  integrator as Exit 3, ids L1, L2, ...). Its branch passes `plan_validate --run` in its worktree, then under
+  .overhaul/lock (no land in between) is rebased onto main, passes PLAN OK and fast-forwards main; then supervise
+  writes .overhaul/requests/reset-<id> per fixed row still active (reload-<round> when none is), which drive applies at
+  its next cycle boundary. One round at a time (live or Exit 3), so no two rounds touch one function; a function gets
+  one live try per reset count. .overhaul/supervise/round.json names the round in flight (verdict.py shows it);
 - exit 0: when every non-deferred row is proven, one blind proof-check (references/proof-check.md), then stop;
-- exit 3: one Exit-3 round. Every needs-plan function gets its own `claude -p` plan-fix agent at once (up to
+- exit 3 (after a live round in flight finishes; a live round that landed reruns drive.py free): one Exit-3 round. Every needs-plan function gets its own `claude -p` plan-fix agent at once (up to
   `[harness] plan_fix_parallel`, default 12; template plan-fix-brief.md), in its own worktree on plan/fix-<id>, with a
   reserved range of new ids so splits never collide. One integrator (plan-fix-merge.md) cherry-picks the branches
   into plan/fixes-r<round>, keeping the phase cap. supervise.py checks PLAN OK itself, fast-forwards main to it (the
@@ -20,6 +26,10 @@ writes is under .overhaul/. Every headless claude it starts gets CLAUDE_CODE_PRI
 
 Exit: 0 every function proven and the proof-check found every one REAL; 4 the proof-check found some not REAL (its
 line is logged); 3 rounds used up; 1 error (the line is logged).
+
+Why live (measured 2026-11-09 15:07 CST on the pilot project): "rate 1.7/h of expected 1.8/h (slots 3, build 10.3m, 10
+builds/land)": 7 functions sat needs-plan with most of 79 planned rows behind them, but an Exit-3 round ran only when
+drive.py exited, and drive kept running while lands trickled, so those rows waited for hours.
 
 Why (measured 2026-11-09 on the pilot project vc5): 44 proven for 4+ hours while a bash launcher ran one serial headless
 manager per exit 3 (25+ min each), planners ran plan_validate --run and 1M-fixture tests outside the memory cap
@@ -34,6 +44,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
 from datetime import datetime
@@ -50,6 +61,8 @@ IDS_PER_FIX = 5
 BG_WAIT = {"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}  # headless claude waits for its own background work
 NUM_ID = re.compile(r"^(.*?)(\d+)$")
 POLL_S = 0.5
+LIVE_POLL_S = 60.0  # how often a running drive's state.json is read for needs-plan functions (no tight loop)
+LIVE_LOCK_WAIT_S = 1800.0  # a live plan land waits this long for land.py to release .overhaul/lock
 
 
 class Stop(Exception):
@@ -95,6 +108,10 @@ class Supervisor:
         self.drive_cmd = drive_cmd or [sys.executable, str(HERE / "drive.py")]
         self.validate_cmd = validate_cmd or [sys.executable, str(HERE / "plan_validate.py")]
         self._claude = claude_cmd
+        self.live: threading.Thread | None = None  # the live round in flight
+        self.live_n = 0
+        self.live_landed = False  # a live round landed on main during this drive run
+        self.live_tried: dict[str, int] = {}  # fid -> its resets count at its last live try
 
     # ---- plumbing ----
     def log(self, msg: str) -> None:
@@ -159,10 +176,19 @@ class Supervisor:
         while True:
             n += 1
             self.log(f"drive start (run {n})")
-            rc, tail = self.run([*self.drive_cmd, "--repo", str(self.repo)], self.ov / "drive.out")
+            rc, tail = self.run_drive()
             self.log(f"drive exit {rc}: {tail}")
+            if self.live is not None:
+                self.log("waiting for the live round in flight")
+                self.live.join()
+                self.live = None
+            landed, self.live_landed = self.live_landed, False
             if rc == 0:
                 return self.proof()
+            if rc == 3 and landed:  # its reset requests wait in .overhaul/requests/: drive applies them at start
+                self.log("drive exit 3 after a live plan land: drive again, no Exit-3 round used")
+                failed = False
+                continue
             if rc == 3:
                 if rounds >= self.max_rounds:
                     self.log(f"stop: {rounds} exit-3 rounds used (--max-rounds {self.max_rounds}); needs-plan: "
@@ -175,6 +201,117 @@ class Supervisor:
             if failed:
                 raise Stop(f"drive exit {rc} twice: {tail}")
             failed = True
+
+    def run_drive(self) -> tuple[int, str]:
+        """drive.py as a child; every LIVE_POLL_S, a live round for needs-plan functions. (exit code, last line)."""
+        out = self.ov / "drive.out"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "wb") as fo:
+            try:
+                proc = subprocess.Popen([*self.drive_cmd, "--repo", str(self.repo)], cwd=self.repo,
+                                        stdin=subprocess.DEVNULL, stdout=fo, stderr=subprocess.STDOUT, env=self.env())
+            except OSError as e:
+                raise Stop(f"cannot start {self.drive_cmd[0]}: {e}") from e
+            try:
+                while True:
+                    try:
+                        proc.wait(timeout=LIVE_POLL_S)
+                        break
+                    except subprocess.TimeoutExpired:
+                        self.live_step()
+            except BaseException:
+                drive.kill_tree(proc)
+                raise
+        return proc.returncode, last_line(drive.read_text(out))
+
+    def live_step(self) -> None:
+        """Start a live round for needs-plan functions not tried at their current reset count, if none is in flight."""
+        if self.live is not None and self.live.is_alive():
+            return
+        try:
+            needs, recs = self.needs_plan(), self.state()
+        except Stop:
+            return  # main unreadable for a moment: the next poll tries again
+        fixing = [fid for fid in needs if self.live_tried.get(fid) != int(recs[fid].get("resets", 0))]
+        if not fixing:
+            return
+        for fid in fixing:
+            self.live_tried[fid] = int(recs[fid].get("resets", 0))
+        self.live_n += 1
+        self.live = threading.Thread(target=self.live_round, args=(f"L{self.live_n}", fixing), daemon=True)
+        self.live.start()
+
+    def live_round(self, label: str, fixing: list[str]) -> None:
+        """One live round while drive runs; a failure is logged and the functions stay needs-plan for Exit 3."""
+        work = self.ov / "supervise" / f"{datetime.now():%Y%m%d-%H%M%S}-{label}"
+        work.mkdir(parents=True, exist_ok=True)
+        try:
+            rows, recs = self.rows(), self.state()
+            self.round_file(label, fixing)
+            branch, merge_wt, fixed, _ = self.fix_round(label, fixing, rows, recs, work)
+            self.land_live(branch, merge_wt, work, label)
+            active = {f.id for f in self.rows() if f.status != drive.DEFERRED}
+            new = [f.id for f in self.rows() if f.id not in {r.id for r in rows}]
+            req = self.ov / drive.REQUESTS_DIR
+            req.mkdir(parents=True, exist_ok=True)
+            resets = [fid for fid in fixed if fid in active]
+            for fid in resets:
+                (req / f"reset-{fid}").write_text(f"{label}\n", encoding="utf-8")
+            if not resets:  # every fixed row was replaced: drive must still reload the plan
+                (req / f"reload-{label}").write_text(f"{label}\n", encoding="utf-8")
+            self.live_landed = True
+            self.log(f"live round {label}: landed; reset requests {' '.join(resets) or '-'}"
+                     + (f"; new rows {' '.join(new)}" if new else "")
+                     + "".join(f"; {fid}: replaced" for fid in fixed if fid not in active))
+        except Stop as e:
+            self.log(f"live round {label}: {e}; still needs-plan for an Exit-3 round")
+        except Exception as e:  # never kill the supervisor from the side thread
+            self.log(f"live round {label}: error: {type(e).__name__}: {e}")
+        finally:
+            self.drop_worktrees(work)
+            self.round_file()
+
+    def round_file(self, label: str = "", ids: list[str] | None = None) -> None:
+        """.overhaul/supervise/round.json names the plan-fix round in flight (verdict.py shows it); none: removed."""
+        path = self.ov / "supervise" / "round.json"
+        if not label:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"round": label, "ids": ids or [], "started": datetime.now().isoformat(
+            timespec="seconds")}), encoding="utf-8")
+
+    def land_live(self, branch: str, merge_wt: Path, work: Path, label: str) -> None:
+        """--run in the round's worktree, then under .overhaul/lock: rebase onto main, PLAN OK, fast-forward main."""
+        if int(self.git("rev-list", "--count", f"{self.main}..{branch}").strip() or 0) == 0:
+            raise Stop(f"{branch} has no commit to land")
+        code, line = self.run([*self.validate_cmd, "--repo", str(merge_wt), "--run", "--timeout",
+                               str(self.validate_timeout)], work / "validate-run.txt")
+        self.log(f"plan_validate --run {branch}: {line}")
+        if code or not line.startswith("PLAN OK"):
+            raise Stop(f"{branch} plan_validate --run: {line}")
+        if not drive.acquire_lock(self.repo, LIVE_LOCK_WAIT_S, "supervise.py live plan land"):
+            raise Stop(f".overhaul/lock held by {drive.lock_holder(self.repo) or '?'} for {LIVE_LOCK_WAIT_S:.0f}s")
+        try:  # no land moves main while the plan is rebased, checked and fast-forwarded
+            self.check_main()
+            try:
+                self.git("rebase", "-q", self.main, cwd=merge_wt)
+            except Stop as e:
+                self.git("rebase", "--abort", cwd=merge_wt, check=False)
+                raise Stop(f"{branch} does not rebase onto {self.main} cleanly: {e}") from e
+            code, line = self.run([*self.validate_cmd, "--repo", str(merge_wt)], work / "validate-static.txt")
+            if code or not line.startswith("PLAN OK"):
+                raise Stop(f"{branch} on {self.main} is not PLAN OK: {line}")
+            self.git("merge", "-q", "--ff-only", branch)
+        finally:
+            drive.release_lock(self.repo)
+        self.log(f"main -> {branch} {self.git('rev-parse', '--short=12', self.main).strip()} (live)")
+
+    def check_main(self) -> None:
+        if self.git("status", "--porcelain", "--untracked-files=no").strip():
+            raise Stop(f"{self.repo} has uncommitted changes to tracked files; main cannot fast-forward")
+        if (head := self.git("rev-parse", "--abbrev-ref", "HEAD").strip()) != self.main:
+            raise Stop(f"{self.repo} is on {head}, not {self.main}; main cannot fast-forward")
 
     def needs_plan(self) -> list[str]:
         active = {f.id for f in self.rows() if f.status != drive.DEFERRED}
@@ -193,13 +330,22 @@ class Supervisor:
             # main red / systemic stops (mainred.py) name no function: hand the manager drive's own line
             raise Stop(f"drive exit 3 with no needs-plan function: {said[-1]}" if said else
                        "drive exit 3 with no needs-plan function (blocked on unproven deps; see drive.out)")
-        if self.git("status", "--porcelain", "--untracked-files=no").strip():
-            raise Stop(f"{self.repo} has uncommitted changes to tracked files; main cannot fast-forward")
-        if (head := self.git("rev-parse", "--abbrev-ref", "HEAD").strip()) != self.main:
-            raise Stop(f"{self.repo} is on {head}, not {self.main}; main cannot fast-forward")
-        ids = reserve([f.id for f in rows], fixing)
+        self.check_main()
         work = self.ov / "supervise" / f"{datetime.now():%Y%m%d-%H%M%S}-r{rnd}"  # a fresh folder: no stale reports
         work.mkdir(parents=True, exist_ok=True)
+        self.round_file(str(rnd), fixing)
+        try:
+            branch, merge_wt, fixed, replace = self.fix_round(str(rnd), fixing, rows, recs, work)
+            self.land_plan(branch, merge_wt, work, rnd)
+            self.drop_worktrees(work)
+        finally:
+            self.round_file()
+        self.after_land(rows, fixing, fixed, replace)
+
+    def fix_round(self, rnd: str, fixing: list[str], rows: list[drive.Fn], recs: dict,
+                  work: Path) -> tuple[str, Path, list[str], set[str]]:
+        """The plan-fix agents (in parallel) and the integrator: (plan branch, its worktree, fixed ids, replace)."""
+        ids = reserve([f.id for f in rows], fixing)
         self.git("worktree", "prune", check=False)
         replace = {fid for fid in fixing if int(recs[fid].get("resets", 0)) >= drive.PLAN_FIXES}
         self.log(f"round {rnd}: plan-fix {' '.join(fixing)} ({min(len(fixing), self.parallel)} at once"
@@ -234,10 +380,11 @@ class Supervisor:
             raise Stop(f"round {rnd}: no plan fix succeeded ({' '.join(skipped)})")
         branch = f"plan/fixes-r{rnd}"
         merge_wt = work / "wt" / "_merge"
-        self.git("worktree", "add", "-q", "-f", "-B", branch, str(merge_wt), self.main)
-        if len(fixed) == 1:  # nothing to integrate: its own branch already passed PLAN OK
-            self.git("merge", "-q", "--ff-only", f"plan/fix-{fixed[0]}", cwd=merge_wt)
-        else:
+        # one fix: nothing to integrate, its own branch already passed PLAN OK (main may have moved since: a live
+        # round's lands; land_live rebases it)
+        self.git("worktree", "add", "-q", "-f", "-B", branch, str(merge_wt),
+                 f"plan/fix-{fixed[0]}" if len(fixed) == 1 else self.main)
+        if len(fixed) > 1:
             report = work / "plan-fix-merge.md"
             listing = "\n".join(f"- `plan/fix-{fid}`: reserved {', '.join(ids[fid])}; report "
                                 f"`{(work / f'plan-fix-{fid}.md').as_posix()}`" for fid in fixed)
@@ -248,9 +395,7 @@ class Supervisor:
                 "branches": listing, "validate": (HERE / "plan_validate.py").as_posix()}), encoding="utf-8")
             self.agents([("merge", merge_wt, brief, work / "plan-fix-merge.json", self.merge_model)])
             self.log(f"integrator: {first_line(drive.read_text(report)) or 'no report'}")
-        self.land_plan(branch, merge_wt, work, rnd)
-        self.drop_worktrees(work)
-        self.after_land(rows, fixing, fixed, replace)
+        return branch, merge_wt, fixed, replace
 
     def agents(self, jobs: list[tuple[str, Path, Path, Path, str]]) -> None:
         """Run the agents, at most self.parallel at once; each one's output goes to its .json file."""
