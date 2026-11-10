@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import tests  # noqa: E402,F401  tests/__init__.py drops an inherited GIT_DIR & co (git hook, rebase -x, bisect run)
 import plan_validate as pv  # noqa: E402
 from tests.test_plan_validate import ARCH, Base  # noqa: E402
 

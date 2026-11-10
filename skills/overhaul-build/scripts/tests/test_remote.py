@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import tests  # noqa: E402,F401  tests/__init__.py drops an inherited GIT_DIR & co (git hook, rebase -x, bisect run)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import remote  # noqa: E402
