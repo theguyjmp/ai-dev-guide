@@ -131,6 +131,15 @@ STUB = re.compile(r"todo!\(|unimplemented|\bstub\b|not yet implemented|not (?:ye
 VIS_FILES = re.compile(r"^changed (.+?) beyond visibility")
 PATH = re.compile(r"(?<![\w./-])((?:[\w.-]+/)+[\w-]+\.\w+)")
 DEPFIX = re.compile(r"^depfix-(?:flake-)?")
+# infeasible: feasibility.py proved the row unbuildable BEFORE any build (a MISSING capability, a provider row neither
+# proven nor a dep, a file outside its module and its deps, or too big for one builder); parked with its evidence
+CLASSES += ("infeasible",)
+PLAN_CLASSES += ("infeasible",)
+PRIORITY += ("infeasible",)
+WORDS["infeasible"] = "the feasibility check found rows unbuildable before a build"
+FIX["infeasible"] = "plan fix: add the missing capability's row first, add the module dep, or split the row"
+HINT["infeasible"] = ("add a row for each MISSING capability in its owning module before this one, add the module "
+                      "dep a needed file belongs to, or split the row if it does not fit one builder")
 
 
 # ---- classification --------------------------------------------------------------------------------------------------
@@ -328,6 +337,14 @@ def gap_files(reason: str, builder: str = "") -> list[str]:
     return list(dict.fromkeys(PATH.findall(f"{reason} {line.group(0) if line else ''}")))
 
 
+def add_files(d, fid: str, files: list[str], why: str = "") -> None:
+    """The one writer of state `files_extra`: grow fid's claim by files (deduped, order kept) and log
+    `files_widened`. Used by widen() (a files_gap) and feasibility.py (a file the check found the row needs)."""
+    rec = d.st["functions"][fid]
+    d.set(fid, files_extra=list(dict.fromkeys([*(rec.get("files_extra") or []), *files])))
+    d.log(fid, "files_widened", (f"{', '.join(files)}: {why}" if why else ", ".join(files))[:600])
+
+
 def widen(d, fid: str, files: list[str], evidence: str, deps: bool = True) -> bool:
     """A files_gap the row may fix itself: every named file outside its claim lies in its own module (or, with deps,
     a module its module depends on) and was never widened for it. The claim grows (state `files_extra`, read by
@@ -341,10 +358,9 @@ def widen(d, fid: str, files: list[str], evidence: str, deps: bool = True) -> bo
     new = [p for p in dict.fromkeys(files) if not mod.in_paths(p, have)]
     if not new or not all(mod.in_paths(p, d.widen_scope(f, deps)) for p in new):
         return False
-    extra = list(dict.fromkeys([*(rec.get("files_extra") or []), *new]))
-    d.set(fid, status="planned", files_extra=extra, resume="building",
+    add_files(d, fid, new, evidence)
+    d.set(fid, status="planned", resume="building",
           widened=f"its files cell now also holds {', '.join(new)}, the files it needed: {evidence[:1200]}")
-    d.log(fid, "files_widened", f"{', '.join(new)}: {evidence}"[:600])
     record(d, fid, "files_gap", f"claim widened to {', '.join(new)}; build resumes at once, no attempt charged",
            evidence)
     return True

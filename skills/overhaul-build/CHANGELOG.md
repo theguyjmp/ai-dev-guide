@@ -1,5 +1,10 @@
 # overhaul-build changelog
 
+## Integration of passes A-D and live-retry, 2026-11-10
+- Passes A (feasibility) and B (router files_gap) both grew a row's claim through state `files_extra`. One field, one
+  reader (drive.extra, used by claims() and allowed_lists()) and one writer (router.add_files, which also logs
+  `files_widened`); feasibility.py and router.widen both call it. SKILL.md lists `infeasible` with the router classes.
+
 ## Plan lands gated, remote heartbeat, watchdog, 2026-11-10
 Owner 2026-11-10 07:15: "Fix all of those permanently so those kinds won't happen again." Measured on the pilot project
 (.overhaul/log.jsonl, 2026-11-09/10): a plan commit turned main red twice (23:08 stubs failed dup; the phase-10 stubs
@@ -66,6 +71,37 @@ add records) went to a one-shot depfix meant for bugs.
   "again after its dependency fix") instead of a charged "no committed change" retry.
 - router.builder_text reads the last `result` event of a stream-json run. Fixture R0408 ("no revolve kind") is now
   missing_capability. Tests: test_router PermanentRoutes (8), test_drive blocked/widen (3).
+
+## Feasibility check and work packet before the first build, 2026-11-10
+the pilot project overnight 2026-11-09 22:25 -> 11-10 07:00 (log.jsonl): 248 builds started, 69 went back to planning AFTER a
+builder spent 10-30 min: 16 needed a file outside the `files` cell, 13 BLOCKED on a capability no row provides, 8 real
+timeouts on rows too big for one builder. Builders also explored: median 24 turns, 18 min, 940k tokens per build.
+- scripts/feasibility.py: before a row's FIRST build (attempts 0, not a resume) one cheap agent call ([harness]
+  feasibility_model, default sonnet; read-only lean flags from worker.py; prompt on stdin, fixed instructions first so
+  calls share one cached prefix; DISABLE_PROMPT_CACHING* stripped; cache_read_input_tokens logged per check) gets the
+  row, its acceptance test, its ARCHITECTURE section, the rows it may call, the exact commands and a grep map of main's
+  definitions in its module and dep modules. It answers JSON `files`, `needs` (capability -> proven/dep row, `main`
+  or MISSING), `fits` and a work `packet`. Cached in .overhaul/feasibility/<id>.json, valid while the row text and the
+  blobs on main of its files cell, acceptance files and answered files are unchanged.
+- A MISSING capability, a provider row neither proven nor a dep, a file outside the row's module and its dep modules,
+  or fits=no parks the row needs-plan with router class `infeasible` and that exact evidence (route file, `routed`
+  event; the plan-fix hint says add the capability row first, add the dep, or split) before any build. A file outside
+  the cell but in its module or a dep module widens the claim: state `files_extra` (claims() and the allowed paths
+  include it), event `files_widened`.
+- Work packet: per file the symbol or line to edit after, the signatures to implement, the helpers to call (path::name
+  with signature) and the test command. drive puts it under the build brief's title ("start here; do not explore
+  beyond these files unless a test fails") and the first attempt runs with --max-turns [limits] packet_max_calls
+  (default 20); a retry keeps the packet with the full builder_max_calls. Events `packet`, `feasibility_ok`.
+- Checks run in daemon threads ([harness] feasibility_parallel, default 4; feasibility_timeout_s 300), up to 8 ready
+  rows ahead of a free slot; a row being checked counts as busy, so the loop never waits and drive never finishes
+  under it. A failed check logs `feasibility_error` and the build starts as before.
+- `[harness] feasibility = true` default; false = old behaviour. A project with a custom worker_cmd and no
+  feasibility_cmd has no agent to ask and skips it. `plan_validate.py --feasibility [ids]`: the same check for every
+  planned row against HEAD for planners before a plan lands; a problem or a file the cell lacks is a PLAN FAIL line.
+- tests/test_feasibility.py (fake agent command): parse/normalize, verdict, MISSING and too-big park before any build,
+  widening into claim and brief, agent failure builds as before, off switch, cache invalidation on a main file or row
+  change, prompt prefix and map, packet on top of the brief with the smaller --max-turns, retry budget,
+  plan_validate --feasibility.
 
 ## Stacked starts, 2026-11-09
 Owner 2026-11-09: 40 slots, at least 10 functions/h, prove it. rate_sim.py (overhaul-trial; the pilot project's real dependency

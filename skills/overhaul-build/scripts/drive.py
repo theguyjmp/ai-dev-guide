@@ -55,6 +55,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import drivelock  # noqa: E402  beside this script: one drive per repo, orphans, slot markers
+import feasibility  # noqa: E402  beside this script: a row is checked buildable before its first build
 import land as land_mod  # noqa: E402  the lock protocol is land.py's
 import mainred  # noqa: E402  beside this script: main red, systemic failures, dead depfixes
 import memcap  # noqa: E402  beside this script: [limits] proc_mem_gb
@@ -244,6 +245,7 @@ class Job:
     stream: worker.Stream | None = None  # a stream-json worker's live events (worker.py)
     idle: str = ""  # why the no-event watchdog killed it
     host: str = ""  # a build on a [harness.remote] slot: the host's name; "" = this machine
+    calls: int = 0  # its --max-turns when not builder_max_calls (a build from a feasibility work packet)
 
 
 def now_iso() -> str:
@@ -790,6 +792,7 @@ class Driver(mainred.MainRed):
         self.wait_cache: tuple[object, dict[str, int]] = (None, {})
         self.remote = remote.Pool.from_harness(har, self.log, self.say)  # slots on top of max_parallel
         self.stacked = bool(har.get("stacked_starts", False))  # rows start on deps' reviewed branches (stack.py)
+        self.feas = feasibility.Gate(self)  # [harness] feasibility: checked before a row's first build
 
     # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
@@ -1123,7 +1126,7 @@ class Driver(mainred.MainRed):
         """In flight: jobs, the land queue, lands, and functions waiting at landing on a main-flake fix."""
         waiting = {fid for fid, r in self.st["functions"].items()
                    if (r["status"] == "landing" and r.get("blocked_on")) or r.get("blocked_on") == mainred.MAIN_RED}
-        gates = {"periodic"} if self.periodic.busy() else set()
+        gates = ({"periodic"} if self.periodic.busy() else set()) | self.feas.busy()  # a feasibility check runs
         return (set(self.jobs) | set(self.gating) | set(self.land_queue) | {j.fn for j in self.land_jobs()} | waiting
                 | gates)
 
@@ -1132,8 +1135,9 @@ class Driver(mainred.MainRed):
         return [*([self.land_job] if self.land_job else []), *self.side_lands.values()]
 
     def extra(self, fid: str) -> list[str]:
-        """Files the router added to a row's claim (state `files_extra`, a files_gap in its own or a dep module)."""
-        return list(self.st["functions"].get(fid, {}).get("files_extra") or [])
+        """Files a row's claim grew by without a planning round (state `files_extra`, written only by
+        router.add_files): a files_gap widening and the feasibility check's widening."""
+        return list((self.st["functions"].get(fid) or {}).get("files_extra") or [])
 
     def claims(self, f: Fn) -> list[str]:
         """The files a function's build locks: its FUNCTIONS.md `files` cell, else its whole module's paths, plus
@@ -1254,7 +1258,10 @@ class Driver(mainred.MainRed):
         if self.red_hold():  # main red, or stopping for the manager
             return False
         local_ok: bool | None = None  # the disk guard, checked once, and only before a build on this machine
-        for f in self.ready():  # resumed work first, then critical-path order (startable)
+        self.feas.collect()
+        rows = self.ready()
+        self.feas.prefetch(rows)  # the next rows' feasibility checks run while slots are busy
+        for f in rows:  # resumed work first, then critical-path order (startable)
             if self.local_jobs() < self.max_parallel and local_ok is None:
                 local_ok = self.disk_guard("build start")
             if self.local_jobs() < self.max_parallel and local_ok:
@@ -1375,9 +1382,11 @@ class Driver(mainred.MainRed):
         return cmd + (["--model", model] if model else [])
 
     def start_job(self, fid: str, kind: str, attempt: int, brief: Path, cwd: Path, tag: str = "",
-                  rslot: int | None = None) -> None:
+                  rslot: int | None = None, max_calls: int | None = None) -> None:
         out = self.ov / "runs" / f"{fid}-a{attempt}-{tag or kind}.json"
         base = self.worker_cmd(kind)
+        if max_calls and "--max-turns" in base[:-1]:  # a build from a work packet: its own, smaller budget
+            base[base.index("--max-turns") + 1] = str(max_calls)
         cmd = [*base, f"Read and do {brief.as_posix()}"]
         try:
             if rslot is not None and self.remote:  # remote.py: push, build on the host, fetch fn/<id> back
@@ -1394,7 +1403,7 @@ class Driver(mainred.MainRed):
         model = base[base.index("--model") + 1] if "--model" in base[:-1] else (
             "custom" if self.custom_cmd(kind) else "default")
         start = time.monotonic()
-        job = Job(fid, kind, proc, out, start, start + self.timeout_s, attempt, model=model,
+        job = Job(fid, kind, proc, out, start, start + self.timeout_s, attempt, model=model, calls=max_calls or 0,
                   host=self.remote.name if rslot is not None and self.remote else "")
         # a remote build's output arrives at its end (remote.py), so only a local one gets the idle watchdog
         self.jobs[fid] = job if job.host else self.watch(job, cmd)
@@ -1716,6 +1725,8 @@ class Driver(mainred.MainRed):
         return f"{f.header}\n|{'---|' * len(cells(f.header))}\n{f.row}"
 
     def start_build(self, f: Fn, rslot: int | None = None) -> None:
+        if not self.feas.ok(f):  # its check runs, it was parked infeasible, or its widened claim must wait
+            return
         rec = self.st["functions"][f.id]
         attempt = rec["attempts"] + 1
         resume = rec.get("resume") == "building"
@@ -1731,15 +1742,17 @@ class Driver(mainred.MainRed):
                         f"`git log --oneline {self.main}..HEAD` and continue from that work; do not start over.\n"
                         + (f"Before that, attempt {attempt - 1} failed: {rec['last_reason']}" if rec["last_reason"]
                            else ""))
+        packet, calls = self.feas.packet(f, attempt)  # the feasibility work packet and its tool-call budget
         brief = render("build-brief.md", {
             "id": f.id, "attempt": str(attempt), "branch": f"fn/{f.id}",
             "worktree": (self.ov / "wt" / f.id).as_posix(), "row": self.row_table(f), "entry": f.entry,
             "module": f.module, "module_section": module_section(self.arch, f.module)
             or "(spec/ARCHITECTURE.md has no section naming this module)",
             "allowed_paths": self.allowed(f), "acceptance_source": self.acceptance_text(f),
-            "policies": self.policies(f), "commands": self.commands_text(f), "max_calls": str(self.max_calls),
+            "policies": self.policies(f), "commands": self.commands_text(f), "max_calls": str(calls),
             "footprint": self.footprint_text(f), "dup_check": self.dup_text(),
             "previous": previous + stack.brief_note(on), **self.standard_values(f)})
+        brief = feasibility.embed(brief, packet)  # under the title: the builder starts there
         tokens = len(brief) // 4
         if tokens > self.max_tokens:
             self.park(f.id, f"brief is {tokens} tokens, over brief_max_tokens {self.max_tokens}; "
@@ -1758,7 +1771,9 @@ class Driver(mainred.MainRed):
                 rec["stacked_on"] = shas
         path = self.ov / "briefs" / f"{f.id}.md"
         path.write_text(brief, encoding="utf-8")
-        self.start_job(f.id, "build", attempt, path, wt, rslot=rslot)
+        self.start_job(f.id, "build", attempt, path, wt, rslot=rslot, max_calls=calls)
+        if packet:
+            self.log(f.id, "packet", f"build starts from the work packet, max calls {calls}")
         host = self.jobs[f.id].host
         # a fresh branch from main: a fresh conflict budget; a resumed one keeps its own
         self.set(f.id, status="building", host=host or None, **({} if resume else {"conflicts": 0}))
@@ -1776,9 +1791,10 @@ class Driver(mainred.MainRed):
             self.set(job.fn, status="planned", host=None)  # the host was unusable: requeued, no attempt spent
             return
         tokens, turns, text = read_result(job.out)
-        flags = (" over-budget" if turns is not None and turns > self.max_calls else "") + \
+        cap = job.calls or self.max_calls
+        flags = (" over-budget" if turns is not None and turns > cap else "") + \
                 (" timeout" if job.timed_out else "")
-        self.log(job.fn, "build_end", f"rc={job.proc.returncode} turns={turns}/{self.max_calls}{flags} "
+        self.log(job.fn, "build_end", f"rc={job.proc.returncode} turns={turns}/{cap}{flags} "
                  f"model={job.model}", time.monotonic() - job.started, tokens)
         if self.blocked_by(job.fn, text):
             return
@@ -3484,6 +3500,7 @@ class Driver(mainred.MainRed):
         stage when the next drive starts (resume_mark). A detached build (pid file) is left running unless owner:
         the next drive re-adopts it."""
         self.periodic.stop()
+        self.feas.stop()  # feasibility checks in flight
         if self.remote:
             self.remote.abort()  # what remote slots run on their host
         jobs = [*self.jobs.values(), *self.land_jobs()]
