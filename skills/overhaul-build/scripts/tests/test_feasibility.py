@@ -114,7 +114,7 @@ class FeasToy(Toy):
         """Toy.drive_cli with room for the checks: four drive runs at -n 6 took over Toy's 180 s."""
         p = subprocess.run([sys.executable, str(SCRIPTS / "drive.py"), "--repo", str(repo), *args],
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           stdin=subprocess.DEVNULL, timeout=420)
+                           stdin=subprocess.DEVNULL, timeout=420, check=False)
         return p.returncode, p.stdout + p.stderr
 
     def calls(self) -> list[str]:
