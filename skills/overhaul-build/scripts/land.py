@@ -68,6 +68,13 @@ import priority  # beside this script: Windows process priority classes
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 os.environ.setdefault("OVERHAUL_HARNESS", "land")  # the main guard lets only the harness move main's code
+# Every git call here names its repo by cwd, so an inherited GIT_DIR (set by git for hooks and `rebase -x`) is always
+# wrong: it sent a test's `git init` into the caller's repo, set core.bare=true there and installed the guard (2026-11-10).
+GIT_LOCAL_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+                 "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS",
+                 "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX", "GIT_SHALLOW_FILE", "GIT_NAMESPACE")
+for _var in GIT_LOCAL_ENV:  # drive.py imports land first, so this covers drive and every child it starts
+    os.environ.pop(_var, None)
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WHOLE_TREE = ("test", "lint", "dup", "literals", "shape", "cycles", "entry_lint")
