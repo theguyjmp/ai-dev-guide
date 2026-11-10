@@ -1131,12 +1131,23 @@ class Driver(mainred.MainRed):
         """Lands in flight, the plain one (or a polish land) first, then the stacked ones in start order."""
         return [*([self.land_job] if self.land_job else []), *self.side_lands.values()]
 
+    def extra(self, fid: str) -> list[str]:
+        """Files the router added to a row's claim (state `files_extra`, a files_gap in its own or a dep module)."""
+        return list(self.st["functions"].get(fid, {}).get("files_extra") or [])
+
     def claims(self, f: Fn) -> list[str]:
-        """The files a function's build locks: its FUNCTIONS.md `files` cell, else its whole module's paths.
-        The module's `shared:` files are left out: a clash there goes to the conflict-fix pass."""
+        """The files a function's build locks: its FUNCTIONS.md `files` cell, else its whole module's paths, plus
+        the files the router widened it by. The module's `shared:` files are left out: a clash there goes to the
+        conflict-fix pass."""
         section = module_section(self.arch, f.module)
         shared = set(module_shared(section))
-        return [p for p in (f.files or module_paths(section, f.module)) if p not in shared]
+        own = f.files or module_paths(section, f.module)
+        return [p for p in dict.fromkeys([*own, *self.extra(f.id)]) if p not in shared]
+
+    def widen_scope(self, f: Fn, deps: bool = True) -> list[str]:
+        """Where the router may widen f's claim: its own module's paths and, with deps, its dep modules' paths."""
+        return module_paths(module_section(self.arch, f.module), f.module) + (
+            self.dep_paths([f.module]) if deps else [])
 
     def waiters(self) -> dict[str, int]:
         """fid -> how many not-proven rows wait on it through `blocking` deps, directly or through others: the
@@ -1471,7 +1482,8 @@ class Driver(mainred.MainRed):
     def allowed_lists(self, f: Fn) -> tuple[list[str], list[str]]:
         section = module_section(self.arch, f.module)
         paths = f.files + module_shared(section) if f.files else module_paths(section, f.module)
-        return list(dict.fromkeys(paths)), unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
+        tests = unit_dirs(self.cfg["commands"].get("test", "")) or ["tests/unit/"]
+        return list(dict.fromkeys([*paths, *self.extra(f.id)])), tests
 
     def dep_paths(self, modules: list[str]) -> list[str]:
         """The paths of the modules these modules depend on (ARCHITECTURE.md `Depends on:`), themselves excluded."""
@@ -1711,8 +1723,10 @@ class Driver(mainred.MainRed):
         previous = (f"Attempt {attempt - 1} failed: {rec['last_reason']}\n"
                     "The worktree was reset to main. Fix that cause first."
                     if rec["last_reason"] else "None. This is the first attempt.")
+        widened = rec.pop("widened", "")
         if resume:
-            previous = (f"Resumed: the drive stopped while this attempt ran. fn/{f.id} keeps its "
+            previous = ((f"Retried at once: {widened}." if widened else
+                         "Resumed: the drive stopped while this attempt ran.") + f" fn/{f.id} keeps its "
                         f"{self.ahead(f.id)} commits ahead of {self.main} and the worktree is as it was left. Read "
                         f"`git log --oneline {self.main}..HEAD` and continue from that work; do not start over.\n"
                         + (f"Before that, attempt {attempt - 1} failed: {rec['last_reason']}" if rec["last_reason"]
@@ -1783,11 +1797,12 @@ class Driver(mainred.MainRed):
     def blocked_by(self, fid: str, text: str) -> bool:
         """A builder's BLOCKED-BY line: its acceptance fails on a landed dependency's bug outside its paths, which
         no retry of it can fix. The owning module gets one fix pass (fid depfix-<id>, built, reviewed and landed
-        like a probe fix) and the function waits for it without spending an attempt. One per function; a second
-        BLOCKED-BY is an ordinary failed attempt."""
+        like a probe fix) and the function waits for it without spending an attempt. One per function. Before
+        that, router.on_blocked routes a missing capability to a plan fix (never a depfix), widens the claim by a
+        file of its own module, and routes a second BLOCKED-BY to a plan fix (never "no committed change")."""
         m = BLOCKED_BY.search(text or "")
         rec = self.st["functions"][fid]
-        if not m or rec.get("depfixes", 0) >= 1:
+        if not m:
             return False
         path, line, why = m.group(1).strip("`"), m.group(2) or "?", m.group(3).strip() or "(no detail)"
         if path.startswith(self.protected):  # the contract itself is wrong: only a plan fix helps, so stop now
@@ -1795,8 +1810,12 @@ class Driver(mainred.MainRed):
             self.park(fid, f"contract defect reported by the builder in {path}:{line}: {why}")
             return True
         module, dfid = self.owner_module(path), f"{DEPFIX_PREFIX}{fid}"
-        if (not module or module == self.fns[fid].module or dfid in self.jobs or dfid in self.polish_lands
-                or any(paths_overlap([path], [c]) for c in self.claims(self.fns[fid]))):
+        if fid in self.fns and router.on_blocked(self, fid, path, f"{path}:{line} in {module or '?'}: {why}",
+                                                 rec.get("depfixes", 0) >= 1):
+            self.log(fid, "blocked_by", f"{path}:{line} in {module or '?'}: {why}"[:REASON_MAX])
+            return True
+        if (rec.get("depfixes", 0) >= 1 or not module or module == self.fns[fid].module or dfid in self.jobs
+                or dfid in self.polish_lands or any(paths_overlap([path], [c]) for c in self.claims(self.fns[fid]))):
             return False
         if self.red_dead_block(fid, module, f"{path}:{line} {why}"):
             return True
@@ -3396,6 +3415,8 @@ class Driver(mainred.MainRed):
 
     def park(self, fid: str, reason: str) -> None:
         reason = router.on_park(self, fid, reason)  # classed and, for a plan class, routed to a plan fix
+        if not reason:  # a files gap the router widened the claim for: the build resumes at once instead
+            return
         self.set(fid, status="needs-plan", last_reason=reason[:REASON_MAX])
         self.log(fid, "needs_plan", reason)
         self.say(f"needs-plan {fid}: {reason}")

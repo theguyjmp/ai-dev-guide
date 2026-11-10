@@ -14,7 +14,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 import router  # noqa: E402
-from drive import module_paths, module_section, paths_overlap  # noqa: E402,F401  reruns() reads them from here
+from drive import in_paths, module_paths, module_section, paths_overlap  # noqa: E402,F401  the hooks read them here
 from tests import test_supervise as ts  # noqa: E402
 from tests import test_verdict as tv  # noqa: E402
 
@@ -121,13 +121,20 @@ class FakeDrive:
 
     def park(self, fid, reason):
         reason = router.on_park(self, fid, reason)
-        self.set(fid, status="needs-plan", last_reason=reason)
+        if reason:  # '' when the router widened the claim instead
+            self.set(fid, status="needs-plan", last_reason=reason)
 
     def say(self, msg):
         pass
 
     def claims(self, f):
-        return f.files
+        return f.files + list(self.st["functions"][f.id].get("files_extra") or [])
+
+    def allowed_lists(self, f):
+        return self.claims(f), ["tests/unit/"]
+
+    def widen_scope(self, f, deps=True):  # module jobs depends on store; view on nothing
+        return [f"crates/{f.module}/"] + (["crates/store/"] if deps and f.module == "jobs" else [])
 
     def footprint(self, fid):
         return self.fns[fid].files
@@ -150,8 +157,8 @@ class Hooks(unittest.TestCase):
     def routed(self):
         return [e for e in self.d.events if e[1] == "routed"]
 
-    def test_files_gap_parks_at_once_and_asks_for_a_plan_fix(self):
-        self.d.fail("S39", "changed crates/jobs/src/worker.rs beyond visibility: outside its files cell")
+    def test_files_gap_in_another_module_parks_at_once_and_asks_for_a_plan_fix(self):
+        self.d.fail("S39", "changed crates/view/src/worker.rs beyond visibility: outside its files cell")
         rec = self.d.st["functions"]["S39"]
         self.assertEqual((rec["status"], rec["attempts"]), ("needs-plan", 0))
         self.assertTrue(rec["last_reason"].startswith("router files_gap: builders cannot edit a needed file"))
@@ -202,6 +209,105 @@ class Hooks(unittest.TestCase):
         router.on_depfix_settled(self.d, "depfix-flake-S13", True)
         router.hold_lands(self.d)
         self.assertEqual(self.d.land_queue, ["S50", "S43"])
+
+
+# real the pilot project BLOCKED-BY lines (2026-11-09 overnight): four missing capabilities, three wrong results or stubs
+CAPS = ["crates/core/src/telemetry.rs:10 input `do variable.set --stats`; wrong result: the stats line can only hold "
+        "u64 counters, so it cannot carry write_mode",
+        "crates/doc/src/sheet/set.rs:40 `Cell` (cells.rs:135, no formula kind) can't store a formula cell",
+        "crates/store/src/element_set.rs:74 refuses not-found; right result: a journal-append store edit that adds "
+        "a new record that readers and compaction see",
+        "crates/store/src/paged/journal.rs:122 a journal op for a new id is dropped, so a new part record cannot be "
+        "created"]
+BUGS = ["crates/kernel/src/solid_box.rs:54 `solid.box` prints `{solid, volume}` with no `body` key; it should "
+        "also print `body`",
+        "crates/sketch/src/sketch_create.rs:210 input with no plane, wrong result: exit 3, right result: exit 0 "
+        "with a default plane",
+        "crates/kernel/src/engine.rs:53 the engine has no revolve kind (todo!())"]
+
+
+class PermanentRoutes(unittest.TestCase):
+    """Pass B 2026-11-10: a files_gap the row can fix itself widens its claim; a missing capability and a second
+    BLOCKED-BY go to a plan fix at once (pilotovernight: 16 files_gap, 13 BLOCKED/no-change builds lost)."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="router-pf-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.d = FakeDrive(self.root)
+
+    def rec(self, fid):
+        return self.d.st["functions"][fid]
+
+    def test_capability_words_are_told_from_wrong_results_and_stubs(self):
+        for text in CAPS:
+            self.assertTrue(router.capability(text), text)
+        for text in BUGS:
+            self.assertFalse(router.capability(text), text)
+        b = f"BLOCKED S43 abc\nBLOCKED-BY: {CAPS[3]}"
+        self.assertEqual(router.classify("builder left no committed change on fn/S43", b, ["crates/x/"]),
+                         "missing_capability")
+
+    def test_files_gap_in_its_own_or_a_dep_module_widens_the_claim_and_resumes_free(self):
+        self.d.fail("S39", "changed crates/jobs/src/worker.rs, crates/store/src/c.rs beyond visibility: outside "
+                           "its files cell (module jobs and the modules it depends on) a function may only ...")
+        rec = self.rec("S39")
+        self.assertEqual((rec["status"], rec["attempts"], rec["resume"]), ("planned", 0, "building"))
+        self.assertEqual(rec["files_extra"], ["crates/jobs/src/worker.rs", "crates/store/src/c.rs"])
+        self.assertIn("crates/jobs/src/worker.rs", rec["widened"])
+        self.assertFalse(router.route_file(self.d.ov, "S39").exists())
+        self.assertTrue(any(e[1] == "files_widened" for e in self.d.events))
+        self.assertIn("claim widened", [e for e in self.d.events if e[1] == "routed"][-1][2])
+
+    def test_a_review_plan_gap_widens_once_per_file_then_goes_to_a_plan_fix(self):
+        gap = ("review asks for a change outside the allowed paths (plan gap): PLAN-GAP: C26: "
+               "[C26 crates/jobs/src/rename.rs:83] delete_in must also remove the enum")
+        self.d.park("S39", gap)
+        self.assertEqual((self.rec("S39")["status"], self.rec("S39")["files_extra"]),
+                         ("planned", ["crates/jobs/src/rename.rs"]))
+        self.d.park("S39", gap)  # the same file again: already in the claim, so the plan has to change
+        self.assertEqual(self.rec("S39")["status"], "needs-plan")
+        self.assertEqual(json.loads(router.route_file(self.d.ov, "S39").read_text())["class"], "files_gap")
+
+    def test_a_gap_naming_a_file_of_a_module_it_may_not_use_still_goes_to_a_plan_fix(self):
+        self.d.fail("S50", "changed crates/store/src/c.rs beyond visibility: outside its files cell")
+        self.assertEqual(self.rec("S50")["status"], "needs-plan")
+        self.assertNotIn("files_extra", self.rec("S50"))
+
+    def test_blocked_by_a_missing_capability_is_a_plan_fix_never_a_depfix(self):
+        self.assertTrue(router.on_blocked(self.d, "S39", "crates/store/src/paged/journal.rs",
+                                          CAPS[3].replace(":122", ":122 in store:", 1), spent=False))
+        rec = self.rec("S39")
+        self.assertEqual(rec["status"], "needs-plan")
+        self.assertTrue(rec["last_reason"].startswith("router missing_capability: builders need a capability"))
+        route = json.loads(router.route_file(self.d.ov, "S39").read_text())
+        self.assertEqual(route["class"], "missing_capability")
+        self.assertIn("owning module", router.HINT["missing_capability"])
+
+    def test_blocked_by_its_own_module_widens_a_dep_module_bug_goes_to_its_depfix(self):
+        self.assertTrue(router.on_blocked(self.d, "S39", "crates/jobs/src/info.rs", "crates/jobs/src/info.rs:43 "
+                                          "in jobs: prints no locale; it should print `locale`", spent=False))
+        self.assertEqual(self.rec("S39")["files_extra"], ["crates/jobs/src/info.rs"])
+        self.assertFalse(router.on_blocked(self.d, "S39", "crates/store/src/open.rs", f"crates/store/src/open.rs:22"
+                                           f" in store: {BUGS[0]}", spent=False))  # drive's depfix route
+        self.assertNotIn("crates/store/src/open.rs", self.rec("S39")["files_extra"])
+
+    def test_a_second_blocked_by_is_a_plan_fix_not_no_committed_change(self):
+        self.assertTrue(router.on_blocked(self.d, "S43", "crates/kernel/src/solid_box.rs",
+                                          f"crates/kernel/src/solid_box.rs:54 in kernel: {BUGS[0]}", spent=True))
+        rec = self.rec("S43")
+        self.assertEqual((rec["status"], rec["attempts"]), ("needs-plan", 0))
+        self.assertIn("again after its dependency fix", rec["last_reason"])
+        self.assertEqual(json.loads(router.route_file(self.d.ov, "S43").read_text())["class"], "missing_dep")
+
+    def test_builder_text_reads_a_stream_json_run(self):
+        runs = self.d.ov / "runs"
+        runs.mkdir()
+        lines = [{"type": "system"}, {"type": "assistant", "message": {}},
+                 {"type": "result", "result": f"BLOCKED S43 abc\nBLOCKED-BY: {CAPS[0]}"}, {"type": "rate_limit"}]
+        (runs / "S43-a1-build.json").write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+        self.assertIn("can only hold", router.builder_text(self.d.ov, "S43"))
+        self.d.fail("S43", "builder left no committed change on fn/S43")
+        self.assertEqual(json.loads(router.route_file(self.d.ov, "S43").read_text())["class"], "missing_capability")
 
 
 class Round(ts.Toy):
