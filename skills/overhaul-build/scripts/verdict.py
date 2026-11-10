@@ -13,7 +13,8 @@ GOOD only when all of these hold:
   6 when the log has probe_mutation events, each module's latest mutation score is at or above its floor
     (the event's floor, else [limits] mutation_floor, default 0.9);
   7 main is not red for the harness (state.json main_red, set by drive.py when a whole-tree check fails on clean
-    main too) and no systemic failure was flagged in the last [harness] systemic_window_min (default 30);
+    main too), no systemic failure was flagged in the last [harness] systemic_window_min (default 30), and the
+    disk is not low (state.json disk_low, set by drive.py when free space stays under [limits] min_free_gb);
   8 the throughput tripwire holds: while builders ran through the last 60 min, the lands in it reach half the
     expected rate and [harness] min_rate_per_hour (0 = off). Expected = min(slots x 60 / build minutes /
     builds per land, 60 / land minutes): slots = max_parallel capped by the ready functions that can run at once
@@ -462,6 +463,10 @@ def judge(p, prev, t_now, checks, events):
         reds.append((0, "main", f"main red: {mr.get('check', '?')} at {str(mr.get('sha') or '?')[:12]}"
                      + (f" in {', '.join(mr['files'][:3])}" if mr.get("files") else ""),
                      mr.get("action") or "drive.py holds builds and lands and sends one fix for main"))
+    dl = state.get("disk_low") if isinstance(state.get("disk_low"), dict) else None
+    if dl:  # drive.py: under [limits] min_free_gb after pruning cargo's incremental dirs, so no build starts
+        reds.append((0, "disk", f"disk low: {dl.get('free_gb', '?')} GB free < min_free_gb {dl.get('min_gb', '?')}",
+                     "drive.py pruned .overhaul/target incremental dirs and starts no build; free space on the drive"))
     har = p["cfg"].get("harness") if isinstance(p["cfg"].get("harness"), dict) else {}
     win = float(har.get("systemic_window_min", 30) or 0)
     for s in state.get("systemic") or []:

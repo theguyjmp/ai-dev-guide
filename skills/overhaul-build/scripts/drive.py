@@ -155,6 +155,10 @@ GATE_PRIORITY = priority.popen_kwargs(priority.NORMAL)  # the pre-review gate: a
 REQUEST_POLL_S = 30.0  # how often the loop looks for .overhaul/requests/reset-<id> (live re-plan)
 REQUESTS_DIR = "requests"
 LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py's lock
+# [limits] min_free_gb: under it, cargo's incremental dirs under .overhaul/target are pruned and no build starts
+# (pilot2026-11-09: 20 slot target dirs of ~10 GB filled Z: to 0 GB and ENOSPC killed the drive)
+MIN_FREE_GB = 40.0
+INCREMENTAL = ("*/debug/incremental/*", "*/release/incremental/*")
 DEFAULTS = {
     "limits": {"builder_max_calls": 60, "brief_max_tokens": 40000,
                "retries_per_function": 1, "conflict_retries": 2, "builder_timeout_min": 30,
@@ -740,6 +744,7 @@ class Driver(mainred.MainRed):
         self.red_init(har)
         self.last_request_check = 0.0  # live re-plan: .overhaul/requests/ is looked at every REQUEST_POLL_S
         self.refused_plan = ""  # the main sha whose plan failed plan_validate: not reloaded again
+        self.min_free_gb = float(lim.get("min_free_gb", MIN_FREE_GB) or 0)  # 0: no disk guard
 
     # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
@@ -844,10 +849,11 @@ class Driver(mainred.MainRed):
         for f in self.order:
             rec = recs.setdefault(f.id, {"status": "planned", "attempts": 0, "conflicts": 0, "last_reason": "",
                                          "branch": f"fn/{f.id}", "updated": now_iso()})
+            stage = rec.pop("resume", "")
             if f.status == "proven":
                 rec["status"] = "proven"
-            elif rec["status"] in IN_FLIGHT:
-                rec["status"] = "planned"  # a previous drive stopped mid-flight
+            elif rec["status"] in IN_FLIGHT or (stage and rec["status"] == "planned"):
+                self.resume_mark(f.id, rec, stage or rec["status"])  # a previous drive stopped mid-flight
             rec.pop("blocked_on", None)  # its dependency fix died with the previous drive
         self.flush()
 
@@ -872,6 +878,138 @@ class Driver(mainred.MainRed):
             hist.append([now_iso(), n])
             self.save()
 
+    # ---- resume: a restart keeps the work on fn/<id> (pilot2026-11-09: 87 of 324 builds never ended, every
+    # restart turned them back to planned and `worktree add -B` reset their branches to main) ----
+    def ahead(self, fid: str) -> int:
+        """Commits on fn/<id> that main does not have; 0 when the branch is missing."""
+        p = run(["git", "rev-list", "--count", f"{self.main}..fn/{fid}"], self.repo)
+        out = p.stdout.strip()
+        return int(out) if p.returncode == 0 and out.isdigit() else 0
+
+    def commit_leftovers(self, fid: str) -> None:
+        """A builder killed mid-edit: commit what its worktree holds on fn/<id>, so the resumed builder keeps it."""
+        wt, branch = self.ov / "wt" / fid, f"fn/{fid}"
+        if not (wt / ".git").is_file():
+            return
+        try:
+            if git(wt, "rev-parse", "--abbrev-ref", "HEAD").strip() != branch:
+                return
+            if run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], wt).returncode == 0:
+                run(["git", "merge", "--abort"], wt)  # a pre-review merge the stop cut short
+            if git(wt, "status", "--porcelain").strip():
+                git(wt, "add", "-A")
+                git(wt, "commit", "-q", "-m", f"{fid}: work in progress when the drive stopped (committed by drive.py)")
+        except DriveError:
+            pass
+
+    def resume_mark(self, fid: str, rec: dict, stage: str) -> None:
+        """A function the previous drive left at stage (building, review or landing). With commits on fn/<id> it
+        resumes there: review and landing go back to review and the land queue (resume_step), building restarts its
+        builder on the same branch and worktree (start_build). A branch with no commits starts over."""
+        if stage == "building":
+            self.commit_leftovers(fid)
+        n = self.ahead(fid) if stage in IN_FLIGHT else 0
+        if not n:
+            rec["status"] = "planned"
+            self.log(fid, "resume", f"{stage} when the last drive stopped; fn/{fid} has no commits ahead of "
+                     f"{self.main}: starts over")
+            return
+        rec["status"], rec["resume"] = ("planned" if stage == "building" else stage), stage
+        self.log(fid, "resume", f"{stage} when the last drive stopped; fn/{fid} keeps {n} commits: resumes at {stage}")
+
+    def resume_worktree(self, fid: str) -> Path:
+        """fn/<id>'s worktree on its own branch as the stopped drive left it: never reset to main."""
+        wt, branch = self.ov / "wt" / fid, f"fn/{fid}"
+        if (wt / ".git").is_file():
+            try:
+                top = git(wt, "rev-parse", "--show-toplevel").strip()
+                if os.path.normcase(os.path.abspath(top)) == os.path.normcase(os.path.abspath(wt)):
+                    if git(wt, "rev-parse", "--abbrev-ref", "HEAD").strip() != branch:
+                        git(wt, "checkout", "-q", "-f", branch)
+                    return self.lint_hook(wt)
+            except DriveError:
+                pass
+        if wt.exists():
+            shutil.rmtree(wt, onexc=force_remove)
+        git(self.repo, "worktree", "prune")
+        git(self.repo, "worktree", "add", "-q", "-f", str(wt), branch)
+        return self.lint_hook(wt)
+
+    def resume_step(self) -> None:
+        """At start: functions resumed at review or landing go straight back to review or the land queue."""
+        for f in self.order:
+            rec = self.st["functions"][f.id]
+            stage = rec.get("resume")
+            if stage not in ("review", "landing") or rec["status"] != stage:
+                continue
+            rec.pop("resume")
+            try:
+                self.resume_worktree(f.id)
+            except DriveError as e:
+                self.set(f.id, status="planned")
+                self.log(f.id, "resume", f"worktree for fn/{f.id} failed ({e}): starts over")
+                continue
+            if stage == "review":
+                self.start_review(f.id, rec["attempts"] + 1)
+            else:
+                self.land_queue.append(f.id)
+                self.set(f.id, status="landing")
+            self.say(f"resumed {f.id} at {stage}")
+
+    # ---- disk guard ----
+    def free_gb(self) -> float:
+        try:
+            return shutil.disk_usage(self.repo).free / 1e9
+        except OSError:
+            return float("inf")
+
+    def incremental_dirs(self) -> list[Path]:
+        """Cargo's incremental caches under .overhaul/target, oldest first; a running job's or land's dir is kept."""
+        root = self.ov / "target"
+        busy = [self.slot_dir(self.slots[fid]) for fid in self.jobs if fid in self.slots]
+        busy += [root / f"land-{j.slot}" for j in self.land_jobs()]
+        found = [d for pat in INCREMENTAL for d in root.glob(pat)
+                 if d.is_dir() and not any(d.is_relative_to(b) for b in busy)]
+
+        def age(d: Path) -> float:
+            try:
+                return d.stat().st_mtime
+            except OSError:
+                return 0.0
+        return sorted(found, key=age)
+
+    def disk_guard(self, why: str) -> bool:
+        """Before a build start and every cycle: under [limits] min_free_gb free on the repo's drive, delete cargo's
+        incremental dirs oldest first until above it. False (log disk_low, state disk_low for the verdict) when still
+        under: no new build starts."""
+        if self.min_free_gb <= 0:
+            return True
+        free = before = self.free_gb()
+        if free < self.min_free_gb:
+            n = 0
+            for d in self.incremental_dirs():
+                shutil.rmtree(d, ignore_errors=True)
+                n += 1
+                free = self.free_gb()
+                if free >= self.min_free_gb:
+                    break
+            if n:
+                self.log(None, "disk_pruned", f"freed {max(0.0, free - before):.1f} GB from {n} incremental dirs "
+                         f"({why}); free {free:.1f} GB")
+        if free >= self.min_free_gb:
+            if self.st.pop("disk_low", None):
+                self.log(None, "disk_ok", f"free {free:.1f} GB >= min_free_gb {self.min_free_gb:g}: builds start again")
+                self.save()
+            return True
+        line = (f"disk low: {free:.1f} GB free < min_free_gb {self.min_free_gb:g} on {self.repo.anchor or self.repo} "
+                "after pruning incremental dirs; no new build starts")
+        if not self.st.get("disk_low") or why == "cycle":
+            self.log(None, "disk_low", line)
+            self.say(line)
+        self.st["disk_low"] = {"free_gb": round(free, 1), "min_gb": self.min_free_gb, "t": now_iso()}
+        self.save()
+        return False
+
     # ---- the loop ----
     def run(self) -> int:
         main_wt = land_mod.checked_out_at(str(self.repo), self.main)
@@ -885,6 +1023,7 @@ class Driver(mainred.MainRed):
                 self.park(f.id, problem)
         self.record_proven()
         try:
+            self.resume_step()
             self.cycle("start")
             while True:
                 changed = self.replan_step()
@@ -965,7 +1104,11 @@ class Driver(mainred.MainRed):
         launched = False
         if self.red_hold():  # main red, or stopping for the manager
             return False
-        for f in self.ready():
+        recs = self.st["functions"]
+        ready = sorted(self.ready(), key=lambda f: not recs[f.id].get("resume"))  # resumed work first
+        if ready and len(self.jobs) < self.max_parallel and not self.disk_guard("build start"):
+            return False
+        for f in ready:
             if len(self.jobs) >= self.max_parallel:
                 break
             self.start_build(f)
@@ -1183,9 +1326,16 @@ class Driver(mainred.MainRed):
     def start_build(self, f: Fn) -> None:
         rec = self.st["functions"][f.id]
         attempt = rec["attempts"] + 1
+        resume = rec.get("resume") == "building"
         previous = (f"Attempt {attempt - 1} failed: {rec['last_reason']}\n"
                     "The worktree was reset to main. Fix that cause first."
                     if rec["last_reason"] else "None. This is the first attempt.")
+        if resume:
+            previous = (f"Resumed: the drive stopped while this attempt ran. fn/{f.id} keeps its "
+                        f"{self.ahead(f.id)} commits ahead of {self.main} and the worktree is as it was left. Read "
+                        f"`git log --oneline {self.main}..HEAD` and continue from that work; do not start over.\n"
+                        + (f"Before that, attempt {attempt - 1} failed: {rec['last_reason']}" if rec["last_reason"]
+                           else ""))
         brief = render("build-brief.md", {
             "id": f.id, "attempt": str(attempt), "branch": f"fn/{f.id}",
             "worktree": (self.ov / "wt" / f.id).as_posix(), "row": self.row_table(f), "entry": f.entry,
@@ -1199,12 +1349,15 @@ class Driver(mainred.MainRed):
             self.park(f.id, f"brief is {tokens} tokens, over brief_max_tokens {self.max_tokens}; "
                             "split the function or trim its acceptance test or ARCHITECTURE section")
             return
-        wt = self.prepare_worktree(f.id)
+        rec.pop("resume", None)
+        wt = self.resume_worktree(f.id) if resume else self.prepare_worktree(f.id)
         path = self.ov / "briefs" / f"{f.id}.md"
         path.write_text(brief, encoding="utf-8")
         self.start_job(f.id, "build", attempt, path, wt)
-        self.set(f.id, status="building", conflicts=0)  # a fresh branch from main: a fresh conflict budget
-        self.log(f.id, "build_start", f"attempt {attempt} model={self.jobs[f.id].model}")
+        # a fresh branch from main: a fresh conflict budget; a resumed one keeps its own
+        self.set(f.id, status="building", **({} if resume else {"conflicts": 0}))
+        self.log(f.id, "build_start", f"attempt {attempt} model={self.jobs[f.id].model}"
+                 + (" resumed" if resume else ""))
         self.say(f"build {f.id} attempt {attempt}")
 
     def after_build(self, job: Job) -> None:
@@ -2847,6 +3000,7 @@ class Driver(mainred.MainRed):
     def cycle(self, why: str) -> None:
         """A heartbeat: count it, log it, run verdict.py and dash.py."""
         self.st["cycle"] += 1
+        self.disk_guard("cycle")
         self.save()
         self.log(None, "cycle", f"{self.st['cycle']} {why}: {self.summary()}")
         line = self.script("verdict.py")
@@ -2878,7 +3032,8 @@ class Driver(mainred.MainRed):
         return code
 
     def abort(self) -> None:
-        """Kill every worker tree this run started; their functions go back to planned."""
+        """Kill every worker tree this run started; their functions go back to planned, marked to resume at their
+        stage when the next drive starts (resume_mark)."""
         self.periodic.stop()
         jobs = [*self.jobs.values(), *self.land_jobs()]
         for job in jobs:
@@ -2886,7 +3041,7 @@ class Driver(mainred.MainRed):
         for fid in [*(j.fn for j in jobs), *self.land_queue]:
             rec = self.st["functions"].get(fid)
             if rec and rec["status"] in IN_FLIGHT:
-                rec["status"] = "planned"
+                rec["resume"], rec["status"] = rec["status"], "planned"
         self.jobs.clear()
         self.land_queue.clear()
         self.land_job = None

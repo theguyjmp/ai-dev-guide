@@ -1,5 +1,17 @@
 # overhaul-build changelog
 
+## Restart keeps work, disk guard, 2026-11-09
+Measured on the pilot project 2026-11-09 (log.jsonl): 324 build_start, 237 build_end; 87 builds never ended, because every drive
+restart turned building/review/landing back to planned and `worktree add -B` reset fn/<id> to main. Z: then filled to
+0 GB from 20 slot target dirs of ~10 GB each and ENOSPC killed drive at 19:21.
+- drive.py resume: on start a function left building, in review or landing (or marked by abort()) whose fn/<id> has
+  commits ahead of main resumes at its stage: review and landing go straight back to review and the land queue,
+  building restarts the builder on its own branch and worktree (leftover edits committed first; the brief says
+  "Resumed"; resumed builds start first). Only a branch with no commits starts over. Event `resume`.
+- drive.py disk guard: `[limits] min_free_gb` (default 40, 0 = off), checked before a build start and every cycle.
+  Under it, cargo's incremental dirs under .overhaul/target are deleted oldest first, never a running job's or land's
+  (`disk_pruned`, GB freed); still under, no build starts (`disk_low`; state.json `disk_low`, a verdict red).
+
 ## Live re-plan, 2026-11-09
 Measured 2026-11-09 15:07 CST on the pilot project under supervise.py: verdict "rate 1.7/h of expected 1.8/h (slots 3, build
 10.3m, 10 builds/land)". 7 functions sat needs-plan and most of 79 planned rows depended on them, so only 3 slots could

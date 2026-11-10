@@ -74,6 +74,10 @@ Per-gate cadence: make `every_lands` or `every_min` a table (`[gates.periodic.ev
 `[limits] proc_mem_gb` (default 12, 0 = off): on Windows drive.py runs in a Job Object that caps every process it
 starts (builders, lands, checks, gates, and their cargo and test binaries) at that much memory; a process over it
 fails its allocation and the failure reads `process memory cap N GB hit`; shrink the fixture, do not raise the cap.
+`[limits] min_free_gb` (default 40, 0 = off): before a build start and every cycle, under it drive.py deletes cargo's
+`*/debug|release/incremental` dirs under `.overhaul/target` oldest first (`disk_pruned`); still under, no build starts
+(`disk_low`, a verdict red with the number). A restart keeps work: a function left building, in review or landing
+whose `fn/<id>` has commits ahead of main resumes there (event `resume`); only a branch with no commits starts over.
 Rolling plans: a `deferred` row is never started and counts apart (`proven N/T deferred D`); polish waits until
 no row is deferred. Tests a later `plan:` commit adds, or FUNCTIONS names on main, are anchors too. `drive.py --repolish`
 reruns the polish audit (at most polish_rounds times, default 3; each fix gets `[limits] fix_retries`, default 2);
