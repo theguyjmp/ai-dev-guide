@@ -174,6 +174,17 @@ class Units(Base):
             self.assertFalse(drv2.arch_step())
             start.assert_not_called()
 
+    def test_the_sweep_runs_after_a_finished_final_polish(self):
+        """the pilot project 2026-11-10: a polish that finished on Nov 8 (status done) blocked every sweep after it."""
+        drv = self.driver(functions=THREE)
+        drv.arch_every = 2
+        drv.st["polish"] = {"round": 3, "status": "done"}
+        with mock.patch.object(drv, "start_arch_audit") as start:
+            drv.st["functions"]["F1"]["status"] = "proven"
+            drv.st["functions"]["F2"]["status"] = "proven"
+            self.assertTrue(drv.arch_step())
+            start.assert_called_once()
+
     def test_the_sweep_verifies_then_routes_fixes_and_ends_idle(self):
         drv = self.driver(functions=THREE)
         drv.sweep_state().update(at=25, status="audit")
