@@ -255,8 +255,21 @@ def read_text(path: Path) -> str:
 
 
 def run(cmd: list[str], cwd: Path, timeout: float | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=timeout)
+    """cmd with captured output. On timeout the whole process tree is killed before TimeoutExpired is raised:
+    subprocess.run only kills the child, and a grandchild (git, cargo) holding the pipes made the drive's main loop
+    wait forever (pilot2026-11-10 10:58-11:18, a verdict.py past its 300 s timeout)."""
+    proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace")
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_tree(proc)
+        try:
+            proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass  # a grandchild outlived the kill; its pipe is abandoned, never waited on
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 def git(cwd: Path, *args: str) -> str:
