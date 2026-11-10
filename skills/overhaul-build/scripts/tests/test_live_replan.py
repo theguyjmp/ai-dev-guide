@@ -222,6 +222,15 @@ class Live(ts.Toy):
         self.assertIn("live round L1: round L1: no plan fix succeeded (S01); still needs-plan", self.log())
         self.assertIn("round 1: no plan fix succeeded (S01)", self.log())
 
+    def test_a_red_plan_land_keeps_main_and_leaves_the_row_to_exit3(self):
+        sup = self.live(exits=[3], needs=["S01"], kinds={"S01": "acceptance"})
+        sup.plan_land_cmd = [sys.executable, "-c", ts.PlanLandGate.RED]
+        head = ts.git(self.repo, "rev-parse", "main")
+        sup.supervise()
+        self.assertIn("live round L1: round L1: plan/fixes-rL1 fails proven tests", self.log())
+        self.assertEqual(ts.git(self.repo, "rev-parse", "main"), head)
+        self.assertEqual(self.calls("requests")[0]["names"], [])
+
 
 class VerdictLine(unittest.TestCase):
     def test_needs_plan_names_the_round_in_flight(self):

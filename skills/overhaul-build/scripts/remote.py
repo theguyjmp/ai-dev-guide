@@ -17,7 +17,16 @@ slot left on the host (`python -` with a kill job: the pid file of the slot, its
 dir the laptop pushes to), git (the laptop's remote name or URL for it, default name), work (host dir for worktrees,
 briefs, slot targets and pid files, default <repo>.work), python (default "py -3"), claude (default "claude"),
 ssh (command list), env (table), path_prefix (dirs put before PATH), path_map (laptop -> host path prefixes for the
-brief), offline_min (default 10).
+brief), offline_min (default 10), remote_idle_min (default 5), heartbeat_s (default 30).
+
+Host log and heartbeat: the host program appends its notes and one line per builder event to <work>/logs/<id>.log,
+writes <work>/logs/<id>.hb every heartbeat_s and prints a `remote-hb` line on stderr; the builder's events go to stdout
+as they come (drive's run file fills live). The laptop wrapper counts any line on the ssh stdout or stderr as life: none
+for remote_idle_min means the host hung, so it kills the ssh session and exits OFFLINE (host offline, no attempt). On
+any failure it fetches the host log into <runs>/<id>-host.log. A host the watchdog holds offline
+(.overhaul/remote/<name>.offline, {"until": epoch, "why": ...}) is refused at once with OFFLINE.
+Why (pilot2026-11-10 05:57-06:10): five desk builds in 13 min timed out with no output and no host-side trace, so the
+hang could not be diagnosed; the builder's output came back only after it exited.
 """
 import base64
 import hashlib
@@ -29,6 +38,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -46,12 +56,55 @@ AUTH_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 NO_ACCOUNT = re.compile(r"hit your (?:\w+ )?limit|usage limit|Invalid API key|Please run /login|OAuth token (?:has )?"
                         r"expired|authentication_error|Not logged in|Credit balance is too low", re.I)
 SHIP_SKIP = ("tests", "legacy", "__pycache__")
+HB_S = 30.0  # host heartbeat interval
+IDLE_MIN = 5.0  # no line from the host for this long: the host hung
+HB_TAG = "remote-hb"
+LOG_FETCH_S = 60
+HOST_LOG = []  # host side: the job's log path, once known
 
 
 # ---- host side: runs on the second machine as `python -`, stdlib only ----------------------------------------------
 
 def say(msg):
     print(f"remote: {msg}", file=sys.stderr, flush=True)
+    host_log(f"remote: {msg}")
+
+
+def host_log(line):
+    """Append one timestamped line to the host log (host side; a no-op before the job names it)."""
+    if not HOST_LOG:
+        return
+    try:
+        with open(HOST_LOG[0], "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {line}\n")
+    except OSError:
+        pass
+
+
+def event_line(raw):
+    """One short log line for a builder stream-json event."""
+    text = raw.decode("utf-8", errors="replace").strip()
+    try:
+        ev = json.loads(text)
+    except ValueError:
+        return f"builder: {text[:200]}"
+    if not isinstance(ev, dict):
+        return f"builder: {text[:200]}"
+    kind = "/".join(str(ev[k]) for k in ("type", "subtype") if ev.get(k))
+    msg = ev.get("message") if isinstance(ev.get("message"), dict) else {}
+    tools = [c.get("name", "") for c in msg.get("content") or [] if isinstance(c, dict) and c.get("type") == "tool_use"]
+    return f"builder: {kind}" + (f" tools={','.join(tools)}" if tools else "")
+
+
+def heartbeat(hb_path, every, stats, stop):
+    """Host side: every `every` s write the heartbeat file and a `remote-hb` stderr line, until stop is set."""
+    while not stop.wait(every):
+        line = f"{HB_TAG} {time.strftime('%Y-%m-%dT%H:%M:%S')} events={stats['events']} pid={stats['pid']}"
+        try:
+            Path(hb_path).write_text(line + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        print(line, file=sys.stderr, flush=True)
 
 
 def hgit(*args):
@@ -146,6 +199,21 @@ def host_build(job):
     if job["auth"] and not env.get(AUTH_ENV):
         say(f"no Claude auth on {job['name']}: set {AUTH_ENV} there; build requeued")
         return OFFLINE
+    (work / "logs").mkdir(parents=True, exist_ok=True)
+    HOST_LOG[:] = [str(work / "logs" / f"{job['fid']}.log")]
+    host_log(f"start {job['fid']} attempt {job['attempt']} slot {job['slot']} sha {job['sha'][:12]}")
+    stats, stop = {"events": 0, "pid": 0}, threading.Event()
+    threading.Thread(target=heartbeat, args=(work / "logs" / f"{job['fid']}.hb", float(job.get("hb_s") or HB_S),
+                                             stats, stop), daemon=True).start()
+    try:
+        return host_run(job, work, wt, pidfile, env, stats)
+    finally:
+        stop.set()
+        host_log("end")
+
+
+def host_run(job, work, wt, pidfile, env, stats):
+    """host_build after the auth check: worktree, brief, the builder (its events streamed), leftovers committed."""
     unship(work, job["ship"])
     if why := fresh_worktree(job["repo"], wt, job["branch"], job["sha"]):
         say(why)
@@ -166,11 +234,19 @@ def host_build(job):
         return OFFLINE
     Path(pidfile).parent.mkdir(parents=True, exist_ok=True)
     Path(pidfile).write_text(str(proc.pid), encoding="utf-8")
-    out = proc.communicate()[0]
-    code = proc.returncode
+    stats["pid"] = proc.pid
+    host_log(f"builder pid {proc.pid}: {' '.join(cmd[:3])} ...")
+    tail = b""
+    for raw in proc.stdout:  # each event at once: drive's run file fills live, the log gets one line per event
+        sys.stdout.buffer.write(raw)
+        sys.stdout.flush()
+        stats["events"] += 1
+        host_log(event_line(raw))
+        tail = (tail + raw)[-65536:]
+    code = proc.wait()
+    out = tail
+    host_log(f"builder exit {code} after {stats['events']} events")
     Path(pidfile).unlink(missing_ok=True)
-    sys.stdout.buffer.write(out)  # the builder's JSON: drive's run file
-    sys.stdout.flush()
     if job["auth"] and (why := account_problem(code, out)):
         say(f"Claude account on {job['name']} refused the builder: {why}; build requeued")
         return OFFLINE
@@ -185,6 +261,12 @@ def host_build(job):
 def host_main(job):
     if job["action"] == "kill":
         kill_slot(job["pidfile"])
+        return 0
+    if job["action"] == "log":  # the laptop fetches a failed job's host log
+        try:
+            sys.stdout.buffer.write(Path(job["log"]).read_bytes())
+        except OSError as e:
+            print(f"no host log {job['log']}: {e}")
         return 0
     return host_build(job)
 
@@ -215,6 +297,8 @@ class Pool:
         self.path_map = {str(k).replace("\\", "/"): str(v).replace("\\", "/")
                          for k, v in (conf.get("path_map") or {}).items()}
         self.offline_s = float(conf.get("offline_min", OFFLINE_MIN)) * 60
+        self.idle_s = float(conf.get("remote_idle_min", IDLE_MIN)) * 60
+        self.hb_s = float(conf.get("heartbeat_s", HB_S))
         self.offline_until = 0.0
         self.busy: dict[int, str] = {}  # slot -> fid
         self.killers: list[subprocess.Popen] = []
@@ -292,7 +376,7 @@ class Pool:
         host_cmd = list(cmd) if custom else [self.claude, *cmd[1:]]
         job = {"action": "build", "fid": fid, "attempt": attempt, "slot": k, "name": self.name, "host": self.host,
                "repo": self.repo, "work": self.work, "wt": self.wt(fid), "branch": f"fn/{fid}", "sha": sha,
-               "pidfile": self.pidfile(k),
+               "pidfile": self.pidfile(k), "hb_s": self.hb_s,
                "env": {**ident, **(lean_env or {}), **self.env, "CARGO_TARGET_DIR": f"{self.work}/target/slot-{k}"},
                "path_prefix": self.path_prefix, "auth": not custom, "cmd": host_cmd,
                "brief": self.map_text(Path(brief).read_text(encoding="utf-8"), pairs),
@@ -300,7 +384,7 @@ class Pool:
                "lint_hook": f"{self.work}/skill/scripts/lint_hook.py" if lint.is_file() else "",
                # laptop side only
                "local": {"repo": str(repo), "wt": str(wt), "main": main, "git": self.git, "ssh": self.ssh,
-                         "python": self.python}}
+                         "python": self.python, "idle_s": self.idle_s}}
         path = Path(out_dir) / f"{fid}-a{attempt}-remote.json"
         path.write_text(json.dumps(job), encoding="utf-8")
         proc = spawn([sys.executable, str(Path(__file__).resolve()), "build", str(path)])
@@ -398,23 +482,108 @@ def fetch(loc, fid):
     return "" if p.returncode == 0 else f"reset of the worktree to fetched fn/{fid} failed: {p.stderr.strip()[:300]}"
 
 
+def hold_path(repo, name):
+    """The file the watchdog writes to hold a host offline: <repo>/.overhaul/remote/<name>.offline."""
+    return Path(repo) / ".overhaul" / "remote" / f"{re.sub(r'[^\w.-]', '_', name)}.offline"
+
+
+def held(repo, name, now=None):
+    """Why the watchdog holds host `name` offline right now, else ''."""
+    try:
+        doc = json.loads(hold_path(repo, name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    until = float(doc.get("until") or 0) if isinstance(doc, dict) else 0
+    if until <= (now if now is not None else time.time()):
+        return ""
+    return f"held offline by the watchdog until {time.strftime('%H:%M', time.localtime(until))}: {doc.get('why', '')}"
+
+
+def relay(cmd, program, idle_s, poll_s=1.0):
+    """Run cmd with program on stdin; its stdout goes to ours as it comes, its stderr to ours minus heartbeat lines.
+    Any line on either stream is life; none for idle_s kills cmd. (exit code, stderr text, hung)."""
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    last, err = [time.monotonic()], []
+
+    def pump(stream, out, keep):
+        for raw in iter(stream.readline, b""):
+            last[0] = time.monotonic()
+            if keep and raw.startswith(HB_TAG.encode()):
+                continue
+            out.write(raw)
+            out.flush()
+            if keep:
+                err.append(raw)
+    readers = [threading.Thread(target=pump, args=(proc.stdout, sys.stdout.buffer, False), daemon=True),
+               threading.Thread(target=pump, args=(proc.stderr, sys.stderr.buffer, True), daemon=True)]
+    for t in readers:
+        t.start()
+    try:
+        proc.stdin.write(program)
+        proc.stdin.close()
+    except OSError:
+        pass
+    hung = False
+    while True:
+        try:
+            proc.wait(timeout=poll_s)
+            break
+        except subprocess.TimeoutExpired:
+            if time.monotonic() - last[0] > idle_s:
+                hung = True
+                proc.kill()
+                proc.wait()
+                break
+    for t in readers:
+        t.join(timeout=5)
+    return proc.returncode, b"".join(err).decode("utf-8", errors="replace"), hung
+
+
+def fetch_log(loc, job, dest):
+    """Copy the job's host log to dest (laptop) over ssh; True when something came back."""
+    log = f"{job['work']}/logs/{job['fid']}.log"
+    try:
+        p = subprocess.run([*loc["ssh"], job["host"], *loc["python"], "-"], input=host_program(
+            {"action": "log", "log": log}), capture_output=True, timeout=LOG_FETCH_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if not p.stdout:
+        return False
+    Path(dest).write_bytes(p.stdout)
+    return True
+
+
 def run_build(job_path):
-    """The wrapper drive spawns: push, run the build on the host, fetch. Builder JSON to stdout, notes to stderr."""
-    import land
+    """The wrapper drive spawns: push, run the build on the host, fetch. Builder events to stdout as they come,
+    notes to stderr; on any failure the host log is fetched into <runs>/<id>-host.log."""
     job = json.loads(Path(job_path).read_text(encoding="utf-8"))
     loc = job.pop("local")
+    if why := held(loc["repo"], job["name"]):
+        say(why)
+        return OFFLINE
+    code = build_on_host(job, loc)
+    if code:
+        dest = Path(job_path).parent / f"{job['fid']}-host.log"
+        if fetch_log(loc, job, dest):  # untagged: the `remote:` line naming the cause stays the last one
+            print(f"host log: {dest.as_posix()}", file=sys.stderr, flush=True)
+    return code
+
+
+def build_on_host(job, loc):
+    import land
     if why := push(loc, job["sha"], job["fid"]):
         say(why)
         return OFFLINE
-    p = subprocess.run([*loc["ssh"], job["host"], *loc["python"], "-"], input=host_program(job),
-                       stderr=subprocess.PIPE)
-    err = p.stderr.decode("utf-8", errors="replace")
-    sys.stderr.write(err)
-    if p.returncode == SSH_DROP or (p.returncode not in (0, OFFLINE) and land.UNREACHABLE.search(err)):
-        say(f"{job['name']} unreachable or the session dropped (ssh exit {p.returncode}); build requeued")
+    idle_s = float(loc.get("idle_s") or IDLE_MIN * 60)
+    code, err, hung = relay([*loc["ssh"], job["host"], *loc["python"], "-"], host_program(job), idle_s)
+    if hung:
+        say(f"{job['name']} sent nothing (no event, no heartbeat) for {idle_s / 60:g} min: host hung; build requeued")
         return OFFLINE
-    if p.returncode:
-        return p.returncode
+    if code == SSH_DROP or (code not in (0, OFFLINE) and land.UNREACHABLE.search(err)):
+        say(f"{job['name']} unreachable or the session dropped (ssh exit {code}); build requeued")
+        return OFFLINE
+    if code:
+        return code
     if why := fetch(loc, job["fid"]):
         say(why)
         return OFFLINE
