@@ -64,6 +64,7 @@ import remote  # noqa: E402  beside this script: [harness.remote] builder slots 
 import router  # noqa: E402  beside this script: failure classes routed to their fix
 import stack  # noqa: E402  beside this script: [harness] stacked_starts, builds on reviewed dep branches
 import worker  # noqa: E402  beside this script: lean claude launch, stream-json watch
+from write_guard import in_paths  # noqa: E402  beside this script: the per-pass write limits hook
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 os.environ.setdefault("OVERHAUL_HARNESS", "drive")  # the main guard (guard/reference-transaction) lets only the harness move main's code
@@ -618,12 +619,6 @@ def paths_overlap(a: list[str], b: list[str]) -> bool:
             return sp.startswith(sq) or sq.startswith(sp) or fnmatch.fnmatchcase(q, p) or fnmatch.fnmatchcase(p, q)
         return (p.endswith("/") and q.startswith(p)) or (q.endswith("/") and p.startswith(q))
     return any(one(p, q) for p in a for q in b)
-
-
-def in_paths(path: str, allowed: list[str]) -> bool:
-    """Whether a repo-relative file is under one of the allowed paths (a dir ends in /, * ? [ make a glob)."""
-    return any(fnmatch.fnmatchcase(path, p) if any(c in p for c in "*?[") else
-               path.startswith(p) if p.endswith("/") else path == p for p in allowed)
 
 
 VIS_PREFIX = re.compile(r"^(?:pub(?:\s*\([^)]*\))?\s+|export\s+)")  # Rust pub / pub(crate) / pub(in ..), TS/JS export
@@ -1388,10 +1383,14 @@ class Driver(mainred.MainRed):
                 "you can import a helper instead of duplicating it (C05). Nothing else in those files: drive.py "
                 "refuses any other change there before review, and the review checks it too"]
 
+    def vis_lists(self, f: Fn, paths: list[str]) -> tuple[list[str], list[str]]:
+        """Where f may make only visibility edits: the rest of its module (outside paths), its deps' modules."""
+        own = [p for p in module_paths(module_section(self.arch, f.module), f.module) if p not in paths]
+        return own, self.dep_paths([f.module])
+
     def allowed(self, f: Fn) -> str:
         paths, tests = self.allowed_lists(f)
-        own = [p for p in module_paths(module_section(self.arch, f.module), f.module) if p not in paths]
-        deps = self.dep_paths([f.module])
+        own, deps = self.vis_lists(f, paths)
         where = (f"the rest of module `{f.module}`" if own else f"module `{f.module}`") + (
             " and in the modules it depends on" if deps else "")
         return "\n".join([f"- `{p}`" for p in paths] + [f"- `{t}` (unit tests for this module only)" for t in tests]
@@ -1645,6 +1644,7 @@ class Driver(mainred.MainRed):
                 rec["stacked_on"] = shas
         path = self.ov / "briefs" / f"{f.id}.md"
         path.write_text(brief, encoding="utf-8")
+        self.limit_writes(wt, f, "build")
         self.start_job(f.id, "build", attempt, path, wt, rslot=rslot)
         host = self.jobs[f.id].host
         # a fresh branch from main: a fresh conflict budget; a resumed one keeps its own
@@ -1967,6 +1967,7 @@ class Driver(mainred.MainRed):
             "commands": self.commands_text(f), "max_calls": str(self.max_calls)})
         path = self.ov / "briefs" / f"conflict-{fid}-{n}.md"
         path.write_text(brief, encoding="utf-8")
+        self.limit_writes(wt, f, "conflict pass")
         self.start_job(fid, "conflict", rec["attempts"] + 1, path, wt, tag=f"conflict{n}")
         self.jobs[fid].base = base
         self.set(fid, status="building", conflicts=n)
@@ -3240,25 +3241,19 @@ class Driver(mainred.MainRed):
             self.save()
 
     def lint_hook(self, wt: Path) -> Path:
-        """Lint on every edit: a PostToolUse hook (lint_hook.py) in the worktree's .claude/settings.json,
-        kept out of git through the repo's info/exclude. Skipped when the project tracks its own settings.json."""
-        script = self.scripts / "lint_hook.py"
-        target = wt / ".claude" / "settings.json"
-        if not script.is_file() or run(["git", "ls-files", "--error-unmatch", ".claude/settings.json"],
-                                       wt).returncode == 0:
-            return wt
-        hook = {"type": "command", "command": f'"{Path(sys.executable).as_posix()}" "{script.as_posix()}"',
-                "timeout": 90}
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps({"hooks": {"PostToolUse": [{"matcher": "Edit|Write|MultiEdit",
-                                                                 "hooks": [hook]}]}}, indent=2), encoding="utf-8")
-        exclude = Path(git(wt, "rev-parse", "--git-path", "info/exclude").strip())
-        exclude = exclude if exclude.is_absolute() else wt / exclude
-        if "/.claude/settings.json" not in read_text(exclude):
-            exclude.parent.mkdir(parents=True, exist_ok=True)
-            with exclude.open("a", encoding="utf-8") as fh:
-                fh.write("\n/.claude/settings.json\n")
+        """Lint on every edit and the write limits hook: a PostToolUse hook (lint_hook.py) and a PreToolUse one
+        (write_guard.py) in the worktree's .claude/settings.json, kept out of git through the repo's info/exclude
+        (remote.lint_hook, shared with a build host). Skipped when the project tracks its own settings.json."""
+        remote.lint_hook(wt, self.scripts / "lint_hook.py", self.scripts / "write_guard.py")
         return wt
+
+    def limit_writes(self, wt: Path, f: Fn, job: str) -> None:
+        """This pass's write limits for write_guard.py: f's claim and unit-test dirs, plus the files where only a
+        visibility edit is allowed (the rest of its module and the modules it depends on)."""
+        paths, tests = self.allowed_lists(f)
+        own, deps = self.vis_lists(f, paths)
+        remote.set_limits(wt, {"job": f"{job} {f.id}", "allowed": [*paths, *tests],
+                               "visibility": list(dict.fromkeys(own + deps))})
 
 
     # ---- outcomes ----

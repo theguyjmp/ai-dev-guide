@@ -1,5 +1,15 @@
 # overhaul-build changelog
 
+## Write limits per worker, 2026-11-10
+Pi-harness gap 23: nothing capped a builder's writes until the post-build visibility check and the review.
+- scripts/write_guard.py: a PreToolUse hook (Edit, Write, MultiEdit, NotebookEdit) that refuses, exit 2 with the
+  allowed list, a write outside the worktree (temp dir excepted) or to a path in neither `allowed` (claim + unit-test
+  dirs) nor `visibility` (rest of the module, deps' modules) of `.claude/write-limits.json`. No limits file: allows.
+- drive.py writes the limits before each build and conflict pass (limit_writes) and installs the hook beside the lint
+  hook; remote.lint_hook is now the one settings writer (laptop and host), clears stale limits on a fresh worktree,
+  keeps the limits file out of git, and a remote build carries the laptop worktree's limits to the host.
+- in_paths moved to write_guard.py (drive.py imports it). Bash writes stay covered only by the post-build checks.
+
 ## Stacked starts, 2026-11-09
 Owner 2026-11-09: 40 slots, at least 10 functions/h, prove it. rate_sim.py (overhaul-trial; the pilot project's real dependency
 graph and 58 measured cycles, briefs/rate-proof.md): with only proven deps the rate is width-bound at ~7.5/h whatever
