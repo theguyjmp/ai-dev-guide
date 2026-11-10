@@ -52,6 +52,22 @@ land.py also refuses any branch that edits them, so such an edit can never reach
 
 {{commands}}
 
+## Proven tests your change can break (run from `{{worktree}}`; each must exit 0 before DONE)
+
+Already proven rows in your footprint: your module, every module that depends on it, and rows of modules
+ARCHITECTURE.md does not list, picked the way land.py picks them. drive.py runs these same commands after your
+DONE, before review; a red one fails the attempt with the test named, and land.py fails the land on it.
+
+{{footprint}}
+
+## Duplication check (the reviewer's top blocking item, C05)
+
+Most failed reviews are C05: a helper, constant, message or 4+ line block that already exists elsewhere in the
+tree. Run these on your diff (`git diff --stat main...HEAD` lists your files) before DONE; fix every hit in
+your files by importing the existing copy:
+
+{{dup_check}}
+
 ## What to do
 
 1. Implement the function inside the allowed paths so the acceptance test above passes through the REAL entry,
@@ -69,19 +85,23 @@ land.py also refuses any branch that edits them, so such an edit can never reach
 5. No duplication. Before you write a helper, constant or message, search for one (`git grep -n "<words>"`) and
    import it through the owning module's public API (its `Public:` line or `__init__` exports). Never import a
    name from inside another module's package. A message or format string is written once, as a named constant.
-6. Run the commands above and make them all pass, lint (line length included) and literals too. Do not stop
-   while one fails. drive.py runs cycles itself before review: a failure there is a failed attempt. Once your
-   module's package exists, every name on its Public line must exist in it.
+6. Before DONE, all of these pass, in this order: (a) your own acceptance test and the Commands above, lint
+   (line length included), dup and literals too; (b) every command under "Proven tests your change can break";
+   (c) the Duplication check, with no hit left in your files. Do not stop while one fails. drive.py runs cycles,
+   your acceptance and (b) itself before review: a failure there is a failed attempt. Once your module's package
+   exists, every name on its Public line must exist in it. A proven test you cannot keep green without editing
+   outside the allowed paths is a defect outside them: rule 9 (BLOCKED-BY), never a workaround.
 7. If the acceptance test is already green before you change anything, change nothing, commit nothing and say
    "acceptance already green before change" in your final message.
 8. Commit all your work on `{{branch}}` in `{{worktree}}` (`git add -A` then `git commit`). Then merge main
-   into it (`git merge main`), resolve any conflict inside the allowed paths, and rerun the commands above until
-   they pass, so a land conflict can only come from the seconds between. drive.py merges main and reruns the gate
-   again before review. Do not push, do not switch branches, do not touch any other worktree or the main checkout.
+   into it (`git merge main`), resolve any conflict inside the allowed paths, and rerun the commands above and
+   the proven tests until they pass, so a land conflict can only come from the seconds between. drive.py merges
+   main and reruns the gate again before review. Do not push, do not switch branches, do not touch any other
+   worktree or the main checkout.
    Code that calls a dependency still raising NotImplementedError (Rust: `todo!()` or `unimplemented!()`) builds
    against its stub's signature and docstring; do not implement another function's stub.
-9. If the acceptance test fails because code OUTSIDE the allowed paths is wrong (a landed dependency's bug,
-   not a stub), do not work around it and do not edit it. Prove it with the failing test output, then end your
+9. If the acceptance test, or a proven test of rule 6 (b), fails because code OUTSIDE the allowed paths is
+   wrong (a landed dependency's bug, not a stub), do not work around it and do not edit it. Prove it with the failing test output, then end your
    final message with a third line `BLOCKED-BY: <path>:<line> <the input, the wrong result, the right result>`.
    drive.py sends that defect to the owning module's fix pass and rebuilds this function after it lands; the
    attempt is not counted.

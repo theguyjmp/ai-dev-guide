@@ -1,5 +1,18 @@
 # overhaul-build changelog
 
+## Builders prove before DONE (throughput pass B), 2026-11-09
+Measured 2026-11-09 on the pilot project (log.jsonl): 18 of 49 lands failed, mostly regressions of proven tests
+(s15_occurrences, s21_cpu_culling) and "test failed on merged tree"; 37 of 118 reviews failed, almost all C05.
+- land.py: `footprint_rows(arch, rows, mods, fid)`, the regate's footprint rule, now shared with drive.py.
+- build-brief.md: a "Proven tests your change can break" section with the exact batched commands of every proven
+  test in the function's footprint (over its allowed paths), and a C05 section (`git grep -n`, dup, literals); rule 6
+  makes own acceptance, the footprint tests and the dup check pass before DONE; a proven test it cannot keep green
+  inside its paths is a BLOCKED-BY.
+- drive.py pre-review gate: after the function's own acceptance, the footprint of its real diff runs batched on its
+  slot (event `footprint`); a red test fails the attempt `regression before review: proven <row> <test>` with
+  `.overhaul/runs/<id>-footprint.out`; a [tiers] test reruns alone up to 2 more times; a test red on clean main
+  too is skipped (`footprint_main_red`); a timeout is left to land. `[harness] pre_review_footprint` (default true).
+
 ## Live re-plan, 2026-11-09
 Measured 2026-11-09 15:07 CST on the pilot project under supervise.py: verdict "rate 1.7/h of expected 1.8/h (slots 3, build
 10.3m, 10 builds/land)". 7 functions sat needs-plan and most of 79 planned rows depended on them, so only 3 slots could
