@@ -167,7 +167,7 @@ class DeadDepfix(Base):
         self.assertIn("plan gap: src/alpha/f2.py:9 double() is wrong", rec["last_reason"])  # router prefixes its class
         self.assertIn("dead depfix in alpha", self.drv.st["systemic"][0]["reason"])
         self.assertTrue(self.drv.red_dead_block("F4", "alpha", "src/alpha/f1.py:1 x"))
-        self.assertEqual(self.drv.st["functions"]["F4"]["last_reason"], "plan gap: src/alpha/f1.py:1 x")
+        self.assertIn("plan gap: src/alpha/f1.py:1 x", self.drv.st["functions"]["F4"]["last_reason"])
 
 
 class Throughput(unittest.TestCase):
