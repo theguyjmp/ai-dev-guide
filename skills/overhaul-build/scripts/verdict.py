@@ -205,7 +205,7 @@ def function_view(rows, state):
         view.append({"id": fid, "module": r.get("module", ""), "phase": r.get("phase", ""), "status": status,
                      "deps": r.get("deps", ""), "files": r.get("files", ""), "blocked_on": s.get("blocked_on"),
                      "attempts": as_int(s.get("attempts")), "last_reason": str(s.get("last_reason") or ""),
-                     "updated": s.get("updated"), "cycle": s.get("cycle")})
+                     "updated": s.get("updated"), "cycle": s.get("cycle"), "host": s.get("host")})
     return view
 
 

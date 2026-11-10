@@ -61,6 +61,14 @@ it cannot reach (exit 255, ssh/git connection errors) is retried once, then the 
 land_timeout_min` (default 20, 0 = off; lock waits excluded) stops a land and logs `land_timeout` with the slowest
 test (`slowest`, `slowest_s`): the first is requeued without charging an attempt, the next fails as usual; split that
 test or move it to heavy_tests.
+Remote builders: `[harness.remote]` (host, name, slots, repo = the host's git dir, git = the laptop's remote for it,
+work, python, env, path_prefix, path_map, offline_min) adds build slots on a second machine on top of max_parallel; a
+READY function goes there once the local slots are full (scripts/remote.py). It pushes the start sha and main, runs the
+same builder command over ssh in a host worktree on fn/<id> with a per-slot CARGO_TARGET_DIR, then fetches fn/<id>
+back; review, the pre-review gate and land stay local. An unusable host (ssh drop, push or fetch failure, no
+CLAUDE_CODE_OAUTH_TOKEN, a spent Claude account) logs `remote_offline`, goes offline for offline_min (default 10) and
+requeues the function without an attempt; a timed-out or dropped build is killed on the host by its slot's pid file.
+`build_start ... host=<name>` and the dashboard name the host.
 `[gates.periodic]` (scripts/periodic.py): slow gates (CI parity matrix via `periodic.py ci`, full scale tier, GPU over ssh)
 run on main in the background every N lands or M minutes and once at the end; `BENCH` lines are judged against
 spec/BUDGETS.toml (CI at ci_factor 2x, macOS record-only); each gate keeps its own green, so a red gate bisects to

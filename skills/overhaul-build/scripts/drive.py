@@ -58,6 +58,7 @@ import mainred  # noqa: E402  beside this script: main red, systemic failures, d
 import memcap  # noqa: E402  beside this script: [limits] proc_mem_gb
 import periodic  # noqa: E402  beside this script: [gates.periodic]
 import priority  # noqa: E402  beside this script: Windows process priority classes
+import remote  # noqa: E402  beside this script: [harness.remote] builder slots on a second machine
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
 os.environ.setdefault("PROPTEST_RNG_SEED", "0")  # fixed seed: a property green at land stays green on main (vc1)
 os.environ.setdefault("OVERHAUL_HARNESS", "drive")  # the main guard (guard/reference-transaction) lets only the harness move main's code
@@ -220,6 +221,7 @@ class Job:
     base: str = ""  # a conflict pass: the sha of main when it started (the branch must contain it)
     model: str = ""  # the --model a claude worker got; "custom" for a worker_cmd without one
     slot: int = -1  # a land: k of its CARGO_TARGET_DIR .overhaul/target/land-<k>
+    host: str = ""  # a build on a [harness.remote] slot: the host's name; "" = this machine
 
 
 def now_iso() -> str:
@@ -738,6 +740,7 @@ class Driver(mainred.MainRed):
         self.red_init(har)
         self.last_request_check = 0.0  # live re-plan: .overhaul/requests/ is looked at every REQUEST_POLL_S
         self.refused_plan = ""  # the main sha whose plan failed plan_validate: not reloaded again
+        self.remote = remote.Pool.from_harness(har, self.log, self.say)  # slots on top of max_parallel
 
     # ---- state, shared with land.py under .overhaul/lock (see acquire_lock) ----
     def disk_state(self) -> dict:
@@ -964,11 +967,18 @@ class Driver(mainred.MainRed):
         if self.red_hold():  # main red, or stopping for the manager
             return False
         for f in self.ready():
-            if len(self.jobs) >= self.max_parallel:
+            if self.local_jobs() < self.max_parallel:
+                self.start_build(f)
+            elif self.remote and (k := self.remote.free_slot()) is not None:
+                self.start_build(f, rslot=k)
+            else:
                 break
-            self.start_build(f)
             launched = True
         return launched
+
+    def local_jobs(self) -> int:
+        """Jobs on this machine's max_parallel slots ([harness.remote] builds count on their host)."""
+        return sum(not j.host for j in self.jobs.values())
 
     def reap(self) -> bool:
         """Handle finished or timed-out jobs; True if any finished."""
@@ -1016,18 +1026,26 @@ class Driver(mainred.MainRed):
         model = {"review": self.review_model, "verify": self.verify_model}.get(kind, self.builder_model)
         return cmd + (["--model", model] if model else [])
 
-    def start_job(self, fid: str, kind: str, attempt: int, brief: Path, cwd: Path, tag: str = "") -> None:
+    def start_job(self, fid: str, kind: str, attempt: int, brief: Path, cwd: Path, tag: str = "",
+                  rslot: int | None = None) -> None:
         out = self.ov / "runs" / f"{fid}-a{attempt}-{tag or kind}.json"
         base = self.worker_cmd(kind)
         cmd = [*base, f"Read and do {brief.as_posix()}"]
         try:
-            proc = spawn(cmd, cwd, out, self.slot_env(fid))
+            if rslot is not None and self.remote:  # remote.py: push, build on the host, fetch fn/<id> back
+                env = {k: v for k, v in os.environ.items() if k != "OVERHAUL_HARNESS"}
+                proc = self.remote.start(rslot, fid, attempt, base, bool(self.custom_cmd(kind)), brief, cwd,
+                                         self.repo, self.main, self.ov / "runs", self.scripts, STANDARD.parent,
+                                         lambda c: spawn(c, self.repo, out, env))
+            else:
+                proc = spawn(cmd, cwd, out, self.slot_env(fid))
         except OSError as e:
             raise DriveError(f"cannot start the {kind} worker {cmd[0]}: {e}") from e
         model = base[base.index("--model") + 1] if "--model" in base[:-1] else (
             "custom" if self.custom_cmd(kind) else "default")
         start = time.monotonic()
-        self.jobs[fid] = Job(fid, kind, proc, out, start, start + self.timeout_s, attempt, model=model)
+        self.jobs[fid] = Job(fid, kind, proc, out, start, start + self.timeout_s, attempt, model=model,
+                             host=self.remote.name if rslot is not None and self.remote else "")
 
     def prepare_worktree(self, fid: str) -> Path:
         """A clean worktree on fn/<id> at main (reset on a retry)."""
@@ -1178,7 +1196,7 @@ class Driver(mainred.MainRed):
     def row_table(self, f: Fn) -> str:
         return f"{f.header}\n|{'---|' * len(cells(f.header))}\n{f.row}"
 
-    def start_build(self, f: Fn) -> None:
+    def start_build(self, f: Fn, rslot: int | None = None) -> None:
         rec = self.st["functions"][f.id]
         attempt = rec["attempts"] + 1
         previous = (f"Attempt {attempt - 1} failed: {rec['last_reason']}\n"
@@ -1200,12 +1218,18 @@ class Driver(mainred.MainRed):
         wt = self.prepare_worktree(f.id)
         path = self.ov / "briefs" / f"{f.id}.md"
         path.write_text(brief, encoding="utf-8")
-        self.start_job(f.id, "build", attempt, path, wt)
-        self.set(f.id, status="building", conflicts=0)  # a fresh branch from main: a fresh conflict budget
-        self.log(f.id, "build_start", f"attempt {attempt} model={self.jobs[f.id].model}")
-        self.say(f"build {f.id} attempt {attempt}")
+        self.start_job(f.id, "build", attempt, path, wt, rslot=rslot)
+        host = self.jobs[f.id].host
+        self.set(f.id, status="building", conflicts=0, host=host or None)  # a fresh branch: a fresh conflict budget
+        on = f" host={host}" if host else ""
+        self.log(f.id, "build_start", f"attempt {attempt} model={self.jobs[f.id].model}{on}")
+        self.say(f"build {f.id} attempt {attempt}{on}")
 
     def after_build(self, job: Job) -> None:
+        if job.host and self.remote and self.remote.after(job.fn, job.proc.returncode, job.timed_out,
+                                                          job.out.with_suffix(".err")):
+            self.set(job.fn, status="planned", host=None)  # the host was unusable: requeued, no attempt spent
+            return
         tokens, turns, text = read_result(job.out)
         flags = (" over-budget" if turns is not None and turns > self.max_calls else "") + \
                 (" timeout" if job.timed_out else "")
@@ -1952,7 +1976,7 @@ class Driver(mainred.MainRed):
         if self.land_job and self.land_job.kind == "polish_land":
             held.append(self.land_job.fn)
         taken = [self.polish_claims(self.polish_meta[fid][0]) for fid in held if fid in self.polish_meta]
-        out, free = [], self.max_parallel - len(self.jobs)
+        out, free = [], self.max_parallel - self.local_jobs()
         queued = {m for m, _ in self.polish_queue}
         for item in self.polish_queue:
             if len(out) >= free:
@@ -2535,7 +2559,7 @@ class Driver(mainred.MainRed):
         proven = sum(1 for f in self.order if recs[f.id]["status"] == "proven")
         final = self.st.get("polish") or {}
         if (proven - sw["at"] < self.arch_every or proven == len(self.order) or self.polish_phase() is not None
-                or self.polish_queue or final.get("status", "idle") != "idle" or len(self.jobs) >= self.max_parallel):
+                or self.polish_queue or final.get("status", "idle") != "idle" or self.local_jobs() >= self.max_parallel):
             return False
         sw.update(at=proven, status="audit")
         self.start_arch_audit(SWEEP_FID, None, self.ov / "polish" / f"arch-sweep-{proven}.json")
@@ -2603,7 +2627,7 @@ class Driver(mainred.MainRed):
                 continue
             if any(recs[f.id]["status"] != "proven" for f in self.order if f.module == module):
                 continue
-            if len(self.jobs) >= self.max_parallel:
+            if self.local_jobs() >= self.max_parallel:
                 break
             self.start_probe(fid, module)
             started = True
@@ -2825,6 +2849,8 @@ class Driver(mainred.MainRed):
     def abort(self) -> None:
         """Kill every worker tree this run started; their functions go back to planned."""
         self.periodic.stop()
+        if self.remote:
+            self.remote.abort()  # what remote slots run on their host
         jobs = [*self.jobs.values(), *self.land_jobs()]
         for job in jobs:
             kill_tree(job.proc)

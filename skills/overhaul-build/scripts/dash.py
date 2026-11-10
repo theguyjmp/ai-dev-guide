@@ -77,6 +77,11 @@ def status_chip(status):
     return f'<span class="st st-{re.sub(r"[^a-z-]", "", status)}">{esc(status)}</span>'
 
 
+def on_host(f):
+    """' on <host>' after the status of a function building on a [harness.remote] host, else ''."""
+    return f' <span class="act">on {esc(f["host"])}</span>' if f.get("host") and f["status"] == "building" else ""
+
+
 def table(head, rows, empty):
     th = "".join(f'<th class="{c}">{esc(h)}</th>' if c else f"<th>{esc(h)}</th>" for h, c in head)
     body = "".join(f"<tr>{r}</tr>" for r in rows) or f'<tr><td colspan="{len(head)}" class="empty">{esc(empty)}</td></tr>'
@@ -129,7 +134,10 @@ def render(p, events, v, t_now):
     order = [s for s in vd.STATUSES if s in counts] + sorted(s for s in counts if s not in vd.STATUSES)
     chips = "".join(f"{status_chip(s)} <span class='act'>{counts[s]}</span> " for s in order)
     fn_rows = [f'<td class="mono nowrap">{esc(f["id"])}</td><td>{esc(f["module"])}</td><td>{status_chip(f["status"])}'
-               f'</td><td class="num">{f["attempts"]}</td><td>{esc(f["last_reason"])}</td>' for f in view]
+               f'{on_host(f)}</td><td class="num">{f["attempts"]}</td><td>{esc(f["last_reason"])}</td>' for f in view]
+    remote = sum(1 for f in view if f.get("host") and f["status"] == "building")
+    if remote:
+        tiles.append((str(remote), "building on remote hosts ([harness.remote])"))
     ev_rows = []
     for e in reversed(events[-EVENTS_SHOWN:]):
         t = vd.parse_t(e.get("t"))
