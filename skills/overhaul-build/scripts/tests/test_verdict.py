@@ -167,6 +167,23 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual((len(doc["reds"]), doc["reds_total"]), (5, 7))
         self.assertTrue(line.endswith("(+2 more)"), line)
 
+    def test_width_red_and_ready_beside_slots(self):
+        width = {"ready": 1, "free": 3, "slots": 4, "short_min": 35, "red": True,
+                 "unblock": [{"id": "F3", "waiting": 7, "status": "building"}]}
+        state = {"cycle": 2, "functions": {}, "width": width}
+        d = self.repo(["proven", "planned", "planned"], state=state, prev={"proven": 0})
+        code, line, doc = self.verdict(d, "--no-checks")
+        self.assertIn("width", self.kinds(doc))
+        self.assertIn("(ready 1)", line)
+        self.assertIn("width red: ready 1 < free slots 3 for 35 min; unblock most: F3 (7 waiting, building)", line)
+        self.assertEqual(doc["width"]["ready"], 1)
+        self.assertIn("ready 1, build", vd.expected_text({"expected": 2.0, "slots": 4, "build_min": 11,
+                                                          "builds_per_land": 2}, width))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(dash.main(["--repo", d]), 0)
+        with open(os.path.join(d, "dash", "index.html"), encoding="utf-8") as f:
+            self.assertIn("ready, 3 of 4 slots free", f.read())
+
     def test_dash_renders(self):
         events = [{"t": ago(minutes=30), "fn": "F1", "event": "landed", "detail": "<script>alert(1)</script>",
                    "seconds": 300, "tokens": 1000},

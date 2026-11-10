@@ -472,6 +472,13 @@ def judge(p, prev, t_now, checks, events):
                          "fix the shared cause in a plan commit (drive.py stops with needs-plan: systemic), "
                          "not each function"))
     tp = throughput(p, events, t_now)
+    width = state.get("width") if isinstance(state.get("width"), dict) else None
+    if width and width.get("red"):  # drive.py: ready rows under free slots for [harness] width_red_min
+        names = ", ".join(f"{u.get('id')} ({as_int(u.get('waiting'))} waiting, {u.get('status')})"
+                          for u in width.get("unblock") or [] if isinstance(u, dict)) or "none"
+        reds.append((1, "width", f"width red: ready {as_int(width.get('ready'))} < free slots "
+                     f"{as_int(width.get('free'))} for {as_int(width.get('short_min'))} min; unblock most: {names}",
+                     WIDTH_FIX))
     floor = float(har.get("min_rate_per_hour", 0) or 0)
     if tp and tp["builders_ran"] and total and proven < total:
         under_floor = bool(floor) and tp["landed_60m"] < floor
@@ -537,10 +544,10 @@ def judge(p, prev, t_now, checks, events):
             "reds": [{"kind": k, "what": w, "action": a} for _, k, w, a in shown], "reds_total": len(reds),
             "checks": checks if checks is not None else "skipped", "needs_plan_since": since,
             "polish_issues": issues, "nits": nits, "trend": trend, "phase_audits": audits,
-            "deferred": p.get("deferred", 0), "throughput": tp, "failures": fails,
+            "deferred": p.get("deferred", 0), "throughput": tp, "width": width, "failures": fails,
             "line": f"VERDICT {verdict} proven {proven}/{total}"
                     f"{' deferred ' + str(p['deferred']) if p.get('deferred') else ''} rate {rate:.1f}/h"
-                    f"{expected_text(tp)}{needs_plan_text(counts, p.get('odir'))}"
+                    f"{expected_text(tp, width)}{needs_plan_text(counts, p.get('odir'))}"
                     f"{'' if pol is None else ' issues ' + ('?' if issues is None else str(issues))}"
                     f"{'' if pol is None else ' nits ' + str(as_int(nits))}"
                     f"{'' if trend is None else ' trend ' + trend}"
@@ -548,6 +555,9 @@ def judge(p, prev, t_now, checks, events):
                     f"{' failures ' + str(fails['total']) + ' top ' + fails['top'] if fails['total'] else ''}"
                     f" reds: {text}"}
 
+
+WIDTH_FIX = ("the named rows gate the most work: drive.py already starts and lands them first; fix, unpark or split "
+             "them, and split wide modules or rows so more are buildable at once")
 
 RATE_FIX = {
     "idle slots": "slots sit idle with ready work: check that drive.py runs and is not holding (main red, a stop)",
@@ -568,11 +578,13 @@ def needs_plan_text(counts, odir):
     return f" needs-plan {n} ({'round in flight: ' + ' '.join(map(str, ids)) if ids else 'no round in flight'})"
 
 
-def expected_text(tp):
+def expected_text(tp, width=None):
+    """' of expected R/h (slots S, ready N, ...)'; ready N is drive.py's count of rows it could start now."""
+    ready = f"ready {as_int(width.get('ready'))}" if width else ""
     if not tp:
-        return ""
-    return (f" of expected {tp['expected']:.1f}/h (slots {tp['slots']}, build {tp['build_min']:g}m, "
-            f"{tp['builds_per_land']:g} builds/land)")
+        return f" ({ready})" if ready else ""
+    return (f" of expected {tp['expected']:.1f}/h (slots {tp['slots']}{', ' + ready if ready else ''}, "
+            f"build {tp['build_min']:g}m, {tp['builds_per_land']:g} builds/land)")
 
 
 def write_atomic(path, text):
