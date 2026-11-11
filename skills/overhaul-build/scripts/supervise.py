@@ -631,6 +631,19 @@ class Supervisor:
         self.git("worktree", "prune", check=False)
 
     def land_plan(self, branch: str, merge_wt: Path, work: Path, rnd: int) -> None:
+        """land_plan_unlocked under plan_land.py's per-repo lock, so a live round, the manager's plan_land and an
+        agent's plan_land never race to fast-forward main (pilot2026-11-10 22:33: 3 plan lands at once)."""
+        repo = str(self.repo)
+        if not plan_land.land.acquire_lock(repo, wait=3600.0, owner=f"supervise round {rnd} {branch}",
+                                           name=plan_land.LOCK_NAME,
+                                           on_wait=lambda who: self.log(f"round {rnd}: waiting for plan_land of {who}")):
+            raise Stop(f"round {rnd}: plan_land lock busy for an hour")
+        try:
+            self.land_plan_unlocked(branch, merge_wt, work, rnd)
+        finally:
+            plan_land.land.release_lock(repo, name=plan_land.LOCK_NAME)
+
+    def land_plan_unlocked(self, branch: str, merge_wt: Path, work: Path, rnd: int) -> None:
         """Check PLAN OK on the merged branch, fast-forward main to it, then plan_validate --run once on main."""
         if int(self.git("rev-list", "--count", f"{self.main}..{branch}").strip() or 0) == 0:
             raise Stop(f"round {rnd}: {branch} has no commit to land")

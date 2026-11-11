@@ -586,3 +586,20 @@ class CriticalPath(unittest.TestCase):
         self.assertNotIn("L1", self.sup.reserved)
         self.sup.round_file("L2", done=True)
         self.assertFalse((self.sup.ov / "supervise" / "round.json").exists())
+
+
+class LandPlanTakesThePlanLandLock(unittest.TestCase):
+    def test_land_plan_runs_under_the_plan_land_lock(self):
+        sup = mock.Mock(repo=Path("."))
+        with mock.patch.object(supervise.plan_land.land, "acquire_lock", return_value=True) as acq, \
+                mock.patch.object(supervise.plan_land.land, "release_lock") as rel:
+            supervise.Supervisor.land_plan(sup, "plan/fixes-rL1", Path("."), Path("."), 1)
+        self.assertEqual(acq.call_args.kwargs["name"], supervise.plan_land.LOCK_NAME)
+        sup.land_plan_unlocked.assert_called_once()
+        rel.assert_called_once()
+
+    def test_busy_lock_stops_the_round(self):
+        sup = mock.Mock(repo=Path("."))
+        with mock.patch.object(supervise.plan_land.land, "acquire_lock", return_value=False):
+            with self.assertRaises(supervise.Stop):
+                supervise.Supervisor.land_plan(sup, "b", Path("."), Path("."), 1)
