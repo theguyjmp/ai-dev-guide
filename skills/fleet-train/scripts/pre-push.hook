@@ -1,0 +1,15 @@
+#!/bin/sh
+# fleet-train quality guard (owner 2026-11-11): nothing reaches origin with duplicate blocks/literals, long functions,
+# cycles, strict-clippy errors or a second copy of a core-owned helper. Checks the exact commit being pushed.
+H=<harness>/harness.py
+while read lref lsha rref rsha; do
+  case "$rref" in refs/heads/main) ;; *) continue ;; esac
+  if [ "$(git -C <worktrees>/train rev-parse HEAD 2>/dev/null)" = "$lsha" ]; then dir=<worktrees>/train
+  else
+    dir=<worktrees>/hook
+    [ -e "$dir/.git" ] || git worktree add -q -f --detach "$dir" "$lsha" || exit 1
+    git -C "$dir" checkout -q -f --detach "$lsha" || exit 1
+  fi
+  py -3 "$H" quality-check --dir "$dir" || { echo "pre-push: quality check failed for $lsha; push refused"; exit 1; }
+done
+exit 0

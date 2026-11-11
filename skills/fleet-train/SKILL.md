@@ -38,9 +38,19 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
 - Blame before bisect: files named in the failure output (clippy paths, failing unit crates, failing rows' declared
   files) eject only the branches that touched them.
 - Unit failures that main already has (state/unit-baseline.json, per main sha) are not blamed. Retries re-run unit.
-- Quality: every claim carries `must_also_before_commit` (dup_blocks, dup_literals, shape_check, check_cycles, strict
-  clippy). `touch state/quality-gate.on` makes the train reject branches that add any of these; turn it on once main
-  is clean (run workflows/cleanup.js first).
+- Quality is NOT optional and has no switch (owner 2026-11-11, after a run without it put ~54 duplicate functions on
+  main in 4 hours). Enforced in code, three layers:
+  1. Every claim carries `must_also_before_commit`: search spec/index + ARCHITECTURE owners before writing any
+     function, and run dup_blocks, dup_literals, shape_check, check_cycles and strict clippy.
+  2. The train's gate always runs those checks plus the owner guard (`owner_copies`: no fn outside crates/core named
+     like a core-owned math/param/refusal helper; the allowlist stays EMPTY - replace or rename, never grandfather),
+     on full gates and on retries. After the tests pass, `batch_review` runs a headless `claude -p` reviewer over the
+     functions the batch adds and rejects branches that duplicate an existing owner (different names included).
+  3. `scripts/pre-push.hook` -> `<repo>/.git/hooks/pre-push`: refuses any push to main whose exact commit fails the
+     quality check, including manual pushes.
+  The train also regenerates spec/INDEX.md on every land, so the index builders search is never stale.
+- Before the first run on a codebase that grew without these checks, run workflows/cleanup.js, then a semantic
+  duplicate review, then targeted refactors until the reviewer reports 0 duplicates; only then start builders.
 - Claim limits: at most 3 kernel rows / 6 rows per module in flight, no two rows with overlapping declared files;
   rows that unblock 8+ others skip the module cap; state/priority.json rows go first and skip caps.
 - Stacked starts: a row whose deps are queued (not yet landed) starts on main + those branches.

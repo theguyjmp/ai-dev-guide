@@ -38,8 +38,19 @@ def iso() -> str:
 
 
 def sh(cmd, cwd=REPO, check=True, env=None, timeout=None) -> subprocess.CompletedProcess:
-    r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", env=env, timeout=timeout, shell=isinstance(cmd, str))
+    p = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                         errors="replace", env=env, shell=isinstance(cmd, str))
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # kill the whole tree: a grandchild (app.exe under a test) keeps the pipes open and would hang us forever
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+        try:
+            out, err = p.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err)
+    r = subprocess.CompletedProcess(cmd, p.returncode, out, err)
     if check and r.returncode != 0:
         raise RuntimeError(f"{cmd} -> {r.returncode}\n{(r.stdout + r.stderr)[-3000:]}")
     return r
@@ -60,7 +71,7 @@ def lock(name: str, wait: float = 600):
             os.close(fd)
             break
         except FileExistsError:
-            if now() - p.stat().st_mtime > 3600:  # stale
+            if now() - p.stat().st_mtime > (120 if name == "state" else 3600):  # stale (state sections are short)
                 p.unlink(missing_ok=True)
                 continue
             if now() - t0 > wait:
@@ -217,7 +228,7 @@ def cmd_claim(a):
             for k in [k for k, c in claims.items() if now() - c["ts"] > CLAIM_TTL]:
                 event("claim_expired", **claims.pop(k))
             claims.pop(str(a.slot), None)
-            f = frontier(rows, claims, queue, attempts)
+            f = [] if (ST / "pause").exists() else frontier(rows, claims, queue, attempts)
             if f:
                 rid = f[0]
                 r = rows[rid]
@@ -425,7 +436,11 @@ QUALITY_CMDS = [f"py -3 {QS}/dup_blocks.py crates src", f"py -3 {QS}/dup_literal
                 f"py -3 {QS}/shape_check.py crates src", f"py -3 {QS}/check_cycles.py crates src"]
 CLIPPY_STRICT = ("cargo clippy -q --workspace --all-targets -- -D warnings -D clippy::too_many_lines "
                  "-D clippy::unwrap_used -D clippy::cognitive_complexity")
-QUALITY_BRIEF = ("Clean code is part of done. Before committing, from your worktree run each of: "
+QUALITY_BRIEF = ("The plan forbids second copies (spec/STANDARDS.md S1, S5, S6, S44): before writing ANY function, "
+                 "private helpers included, grep spec/index/*.md and spec/ARCHITECTURE.md for an owner that already has it "
+                 "(core owns refusals and error builders, geom owns maths; vectors, param parsing, not_found/malformed/"
+                 "invalid builders must come from their owner, never a local copy) and extend the owner instead. "
+                 "Clean code is part of done. Before committing, from your worktree run each of: "
                  + " ; ".join(QUALITY_CMDS) + " ; and " + CLIPPY_STRICT.replace("--workspace", "-p <each crate you touched>")
                  + ". Fix every problem they report in files you changed (extract repeated blocks into one named fn, "
                  "name repeated literals as consts, split functions over 30 lines into named steps). Before writing a "
@@ -433,18 +448,48 @@ QUALITY_BRIEF = ("Clean code is part of done. Before committing, from your workt
 
 
 def quality_on() -> bool:
-    return (ST / "quality-gate.on").exists()
+    return True  # owner 2026-11-11: never optional. No flag file; removing this needs a code change and a commit.
+
+
+OWNED_FN = re.compile(r"^\s*(?:pub(?:\([a-z]+\))?\s+)?fn\s+(unit|unit_above|unit_scaled|cross|cross2|dot|norm|point2|point3|"
+                      r"not_found|malformed|conflict|positive|finite)\s*[<(]", re.M)
+
+
+def owner_copies(cwd) -> set:
+    """`file::fn` for every fn outside crates/core named like a capability core owns (math, params, refusals)."""
+    found = set()
+    for f in Path(cwd).glob("crates/*/src/**/*.rs"):
+        rel = f.relative_to(cwd).as_posix()
+        if rel.startswith("crates/core/"):
+            continue
+        for m in OWNED_FN.finditer(f.read_text(encoding="utf-8", errors="replace")):
+            found.add(f"{rel}::{m.group(1)}")
+    return found
 
 
 def quality_problems(cwd) -> str:
     """Output of every quality check that fails (empty = clean)."""
     out = []
+    allow = set((ST / "owner-allowlist.txt").read_text(encoding="utf-8").split()) if (ST / "owner-allowlist.txt").exists() else set()
+    new_copies = sorted(owner_copies(cwd) - allow)
+    if new_copies:
+        out.append("second copy of a capability core owns (STANDARDS S1/S6; use app_core::math/param/refusal): "
+                   + " ".join(c.split("::")[0] + ":1: " + c.split("::")[1] for c in new_copies))
     env = run_env(TRAIN_ENV)
     for c in QUALITY_CMDS + [CLIPPY_STRICT]:
         r = sh(c, cwd=cwd, check=False, env=env, timeout=1800)
         if r.returncode != 0:
             out.append((r.stdout + r.stderr)[-4000:])
     return chr(10).join(out)
+
+
+def cmd_quality_check(a):
+    """Used by app-rebuild/.git/hooks/pre-push: refuse to publish a tree with quality problems."""
+    q = quality_problems(Path(a.dir) if a.dir else REPO)
+    if q:
+        print(q[-3000:])
+        sys.exit(1)
+    print("QUALITY OK")
 
 
 def cmd_clean_start(a):
@@ -481,6 +526,9 @@ def gate(new_rows, rows, quick=False):
             failing = set(re.findall(r"^(\S+) --- FAILED$", o, re.M))
             if not (failing and failing <= main_unit_baseline()):
                 return False, ["unit"], o[-6000:]
+        q = quality_problems(TRAIN)
+        if q:
+            return False, ["quality"], q
         t0 = now()
         tests = [t for i in new_rows for t in rows[i]["tests"]] + [t for r_ in rows.values() if r_["status"] == "proven" for t in r_["tests"]]
         fails = run_tests(sorted(set(tests)))
@@ -542,6 +590,9 @@ def build_train(batch, rows):
 def finish_spec(ids):
     p = TRAIN / SPEC
     p.write_text(mark_proven(p.read_text(encoding="utf-8"), set(ids)), encoding="utf-8")
+    # keep spec/INDEX.md + spec/index/* current: builders search them before writing any function (STANDARDS S6)
+    sh(["py", "-3", f"{QS}/index_api.py"], cwd=TRAIN, check=False, timeout=600)
+    git("add", "-A", "spec", cwd=TRAIN, check=False)
     git("commit", "-qam", f"train: proven {' '.join(ids)}", cwd=TRAIN, check=False)
 
 
@@ -550,6 +601,46 @@ def reject(q, reason):
     rj.setdefault(q["row"], []).append({"t": iso(), "by": "train", "sha": q["sha"], "reason": reason[:1500]})
     save("rejects.json", rj)
     event("reject", row=q["row"], reason=reason[:300])
+
+
+def branch_files(q) -> set:
+    return set(git("diff", "--name-only", f"main...{q['sha']}", check=False).stdout.split())
+
+
+REVIEW_PROMPT = """You are the duplicate-capability reviewer for the rebuild (Rust). Your cwd is the merged train tree.
+These functions were ADDED by the batch about to land (file: signature):
+{added}
+For each one, decide whether the codebase ALREADY has a function doing the same job (same input meaning, same output,
+possibly different name/wording): search spec/index/*.md and grep crates/ src/, and read both bodies before deciding.
+Owners to prefer: app_core::math, app_core::param, app_core::refusal (+ core::invalid), and the owners in
+spec/ARCHITECTURE.md. Report ONLY verified duplicates. Thin wrappers that call the owner are fine. Be fast: at most 40 tool calls.
+Final answer: ONLY a JSON object {{"duplicates": [{{"file": "<path of the NEW copy>", "fn": "<name>", "existing": "<file:line>", "why": "<short>"}}]}}"""
+
+
+def batch_review(merged) -> list:
+    """Headless reviewer over the functions this batch adds. Fail-open (logged) so a reviewer outage never stalls lands."""
+    diff = git("diff", "-U0", "main", "HEAD", "--", "crates", "src", cwd=TRAIN, check=False).stdout
+    added, cur = [], ""
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            cur = line[6:]
+        elif line.startswith("+") and re.match(r"^\+\s*(pub(\([a-z]+\))?\s+)?fn\s+\w+", line) and "/tests/" not in cur:
+            added.append(f"{cur}: {line[1:].strip()[:160]}")
+    if not added:
+        return []
+    t0 = now()
+    try:
+        r = sh(["claude", "-p", REVIEW_PROMPT.format(added=chr(10).join(added[:300])), "--output-format", "json",
+                "--model", "sonnet", "--max-turns", "60", "--dangerously-skip-permissions"], cwd=TRAIN, check=False, timeout=1500)
+        res = json.loads(r.stdout).get("result", "")
+        m = re.search(r"\{.*\}", res, re.S)
+        dups = json.loads(m.group(0)).get("duplicates", []) if m else []
+        dups = [d for d in dups if isinstance(d, dict) and d.get("file") and d.get("fn")]
+        event("review", added=len(added), duplicates=len(dups), secs=round(now() - t0))
+        return dups
+    except Exception as e:  # noqa: BLE001
+        event("review_error", error=str(e)[-400:], secs=round(now() - t0))
+        return []
 
 
 def try_batch(batch, rows, depth=0, quick=False):
@@ -562,6 +653,16 @@ def try_batch(batch, rows, depth=0, quick=False):
     ids = [q["row"] for q in merged]
     ok, fails, log = gate(ids, rows, quick)
     if ok:
+        dups = batch_review(merged)
+        guilty = [q for q in merged if any(d["file"] in branch_files(q) for d in dups)]
+        if guilty:
+            for q in guilty:
+                why = "; ".join(f"{d['file']}::{d['fn']} duplicates {d['existing']} ({d.get('why', '')[:120]})"
+                                for d in dups if d["file"] in branch_files(q))
+                reject(q, "duplicate capability (STANDARDS S1/S6): reuse or extend the owner, delete your copy: " + why)
+            event("review_reject", rows=[q["row"] for q in guilty])
+            rest = [q for q in merged if q not in guilty]
+            return try_batch(rest, rows, depth + 1, quick=True) if rest else []
         finish_spec(ids)
         return merged
     own = {i for i in ids for t in rows[i]["tests"] if t in fails}
@@ -645,6 +746,10 @@ def train_once():
             with lock("state"):
                 queue = [q for q in load("queue.json", []) if q["row"] not in proven]
                 save("queue.json", queue)
+        if (ST / "clean-only").exists():  # owner: land the cleanup before anything else
+            queue = [q for q in queue if q["row"].startswith("CLEAN-")]
+            if not queue:
+                return False
         batch = sorted(queue, key=lambda q: q["ts"])[:80]
         for q in batch:
             if q["row"] not in rows:
@@ -683,12 +788,13 @@ def main():
     p = sp.add_parser("release"); p.add_argument("--slot", type=int, required=True); p.add_argument("--row", required=True); p.add_argument("--reason", required=True)
     p = sp.add_parser("train"); p.add_argument("--loop", action="store_true")
     sp.add_parser("status")
+    p = sp.add_parser("quality-check"); p.add_argument("--dir", default="")
     p = sp.add_parser("clean-start"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
     p = sp.add_parser("clean-submit"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
     a = ap.parse_args()
     {"frontier": cmd_frontier, "claim": cmd_claim, "submit": cmd_submit, "release": cmd_release,
      "train": cmd_train, "status": cmd_status,
-     "clean-start": cmd_clean_start, "clean-submit": cmd_clean_submit}[a.cmd](a)
+     "clean-start": cmd_clean_start, "quality-check": cmd_quality_check, "clean-submit": cmd_clean_submit}[a.cmd](a)
 
 
 if __name__ == "__main__":
