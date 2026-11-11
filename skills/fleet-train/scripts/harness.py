@@ -604,6 +604,12 @@ def reject(q, reason):
     event("reject", row=q["row"], reason=reason[:300])
 
 
+def adds_fn(q, d) -> bool:
+    """True when branch q itself adds fn d["fn"] in d["file"] (not merely touches the file)."""
+    diff = git("diff", "-U0", f"main...{q['sha']}", "--", d["file"], check=False).stdout
+    return re.search(r"^\+.*\bfn\s+" + re.escape(d["fn"]) + r"\b", diff, re.M) is not None
+
+
 def branch_files(q) -> set:
     return set(git("diff", "--name-only", f"main...{q['sha']}", check=False).stdout.split())
 
@@ -660,11 +666,11 @@ def try_batch(batch, rows, depth=0, quick=False):
     ok, fails, log = gate(ids, rows, quick)
     if ok:
         dups = batch_review(merged)
-        guilty = [q for q in merged if any(d["file"] in branch_files(q) for d in dups)]
+        guilty = [q for q in merged if any(adds_fn(q, d) for d in dups)]
         if guilty:
             for q in guilty:
                 why = "; ".join(f"{d['file']}::{d['fn']} duplicates {d['existing']} ({d.get('why', '')[:120]})"
-                                for d in dups if d["file"] in branch_files(q))
+                                for d in dups if adds_fn(q, d))
                 reject(q, "duplicate capability (STANDARDS S1/S6): reuse or extend the owner, delete your copy: " + why)
             event("review_reject", rows=[q["row"] for q in guilty])
             rest = [q for q in merged if q not in guilty]
@@ -740,6 +746,10 @@ def cmd_train(a):
             time.sleep(30)
 
 
+MIN_BATCH = 8
+BATCH_WAIT = 600
+
+
 def train_once():
     with lock("train", wait=5):
         with lock("state"):
@@ -756,6 +766,9 @@ def train_once():
             queue = [q for q in queue if q["row"].startswith("CLEAN-")]
             if not queue:
                 return False
+        # a gate run costs ~15-20 min whatever the size: wait for a real batch (8 rows) or 10 min since the oldest
+        if not queue or (len(queue) < MIN_BATCH and now() - min(q["ts"] for q in queue) < BATCH_WAIT):
+            return False
         batch = sorted(queue, key=lambda q: q["ts"])[:80]
         for q in batch:
             if q["row"] not in rows:
