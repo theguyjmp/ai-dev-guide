@@ -13,7 +13,7 @@ bisect on red).
 """
 from __future__ import annotations
 
-import argparse, json, os, re, subprocess, sys, time
+import argparse, json, os, re, shutil, subprocess, sys, time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,11 +37,12 @@ def iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def sh(cmd, cwd=REPO, check=True, env=None, timeout=None) -> subprocess.CompletedProcess:
+def sh(cmd, cwd=REPO, check=True, env=None, timeout=None, stdin=None) -> subprocess.CompletedProcess:
     p = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
-                         errors="replace", env=env, shell=isinstance(cmd, str))
+                         errors="replace", env=env, shell=isinstance(cmd, str),
+                         stdin=subprocess.PIPE if stdin is not None else None)
     try:
-        out, err = p.communicate(timeout=timeout)
+        out, err = p.communicate(input=stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
         # kill the whole tree: a grandchild (app.exe under a test) keeps the pipes open and would hang us forever
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
@@ -617,6 +618,10 @@ spec/ARCHITECTURE.md. Report ONLY verified duplicates. Thin wrappers that call t
 Final answer: ONLY a JSON object {{"duplicates": [{{"file": "<path of the NEW copy>", "fn": "<name>", "existing": "<file:line>", "why": "<short>"}}]}}"""
 
 
+CLAUDE_BIN = (shutil.which("claude.exe")
+              or str(Path.home() / "AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe"))
+
+
 def batch_review(merged) -> list:
     """Headless reviewer over the functions this batch adds. Fail-open (logged) so a reviewer outage never stalls lands."""
     diff = git("diff", "-U0", "main", "HEAD", "--", "crates", "src", cwd=TRAIN, check=False).stdout
@@ -630,8 +635,9 @@ def batch_review(merged) -> list:
         return []
     t0 = now()
     try:
-        r = sh(["claude", "-p", REVIEW_PROMPT.format(added=chr(10).join(added[:300])), "--output-format", "json",
-                "--model", "sonnet", "--max-turns", "60", "--dangerously-skip-permissions"], cwd=TRAIN, check=False, timeout=1500)
+        r = sh([CLAUDE_BIN, "-p", "--output-format", "json", "--model", "sonnet", "--max-turns", "60",
+                "--dangerously-skip-permissions"], cwd=TRAIN, check=False, timeout=1500,
+               stdin=REVIEW_PROMPT.format(added=chr(10).join(added[:300])))
         res = json.loads(r.stdout).get("result", "")
         m = re.search(r"\{.*\}", res, re.S)
         dups = json.loads(m.group(0)).get("duplicates", []) if m else []
