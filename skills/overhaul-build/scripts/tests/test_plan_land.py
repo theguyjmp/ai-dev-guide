@@ -278,3 +278,16 @@ class StaticCheckReadsStdout(unittest.TestCase):
         done = subprocess.CompletedProcess([], 0, "notes\nPLAN OK 3 functions\n", "warning: row X has no packet\n")
         with tempfile.TemporaryDirectory() as d, mock.patch.object(plan_land.subprocess, "run", return_value=done):
             self.assertEqual(plan_land.static_check(Path(d), {"commands": {}}, Path(d) / "out"), "")
+
+
+class TestsOnlyStillLints(unittest.TestCase):
+    def test_a_red_lint_refuses_even_with_tests_only(self):
+        red = subprocess.CompletedProcess([], 1, "error: this function has too many lines (38/30)\n", "")
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(plan_land.subprocess, "run", return_value=red):
+            why = plan_land.lint_check(Path(d), {"commands": {"lint": "cargo clippy"}}, Path(d) / "out")
+        self.assertIn("lint red", why)
+        self.assertIn("too many lines", why)
+
+    def test_no_lint_configured_passes(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(plan_land.lint_check(Path(d), {"commands": {}}, Path(d) / "out"), "")

@@ -150,6 +150,21 @@ def drop_tree(repo: Path, wt: Path) -> None:
     land.git(str(repo), "worktree", "prune", check=False)
 
 
+def lint_check(tree: Path, conf: dict, out_dir: Path) -> str:
+    """'' when the repo's [commands] lint passes in tree (or none is configured), else the first output line."""
+    cmd = (conf.get("commands") or {}).get("lint")
+    if not isinstance(cmd, str) or not cmd.strip():
+        return ""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    p = subprocess.run(land.fill(cmd), shell=True, check=False, cwd=tree, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+    (out_dir / "lint.out").write_text(p.stdout + p.stderr, encoding="utf-8")
+    if p.returncode == 0:
+        return ""
+    first = next((ln for ln in (p.stdout + p.stderr).splitlines() if "error" in ln.lower()), _last(p.stdout + p.stderr))
+    return f"lint red (main would go red): {first[:300]}"
+
+
 def check(repo: Path, branch: str, main: str, wt: Path | None, tests_only: bool, timeout: float) -> tuple[int, str]:
     out = repo / ".overhaul" / "plan-land" / "tests.out"
     tree, why = (wt, "") if wt else merged_tree(repo, branch, main)
@@ -159,6 +174,8 @@ def check(repo: Path, branch: str, main: str, wt: Path | None, tests_only: bool,
         conf = load_conf(tree)
         if not tests_only and (why := static_check(tree, conf, out.parent)):
             return 1, f"{RED}: {branch} {why}"
+        if tests_only and (why := lint_check(tree, conf, out.parent)):  # --tests-only never skips lint: two plan lands
+            return 1, f"{RED}: {branch} {why}"  # without it turned main lint-red (pilot2026-11-10 20:36, 21:20)
         green, line = proven_check(tree, main, conf, timeout, out)
         if not green:
             return 1, f"{RED}: {branch}: {line}"
