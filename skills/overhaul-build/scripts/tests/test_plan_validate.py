@@ -693,7 +693,7 @@ class WorkPackets(Base):
         self.assertFalse(self.has(p, "names 4 files"), p)
         self.assertTrue(any("names 4 files" in n and "(warning)" in n for n in notes), notes)
 
-    def test_rows_unchanged_since_main_only_warn_and_a_changed_row_fails(self):
+    def test_existing_rows_only_warn_even_when_changed(self):
         root = self.make(arch=ARCH.replace(F002_PACKET, ""))
         self.git(root, "init", "-q", "-b", "main")
         self.git(root, "add", "-A")
@@ -704,4 +704,6 @@ class WorkPackets(Base):
         fun = root / "spec" / "FUNCTIONS.md"
         fun.write_text(fun.read_text(encoding="utf-8").replace(R2, R2.replace("| stub |", "| F001:behaviour |")),
                        encoding="utf-8")
-        self.only(self.checked(root)[0], "F002", "no work packet")
+        p2, notes2 = self.checked(root)  # an edited existing row warns (pilot2026-11-10: dep renames over 49 rows)
+        self.assertEqual(p2, [])
+        self.assertTrue(any("F002" in n and "(warning)" in n for n in notes2), notes2)

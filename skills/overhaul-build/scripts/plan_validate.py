@@ -1376,7 +1376,10 @@ def check_packets(rows, arch_text, cfg, repo, problems, notes, flabel):
             why.append(gap)
         if not why:
             continue
-        kept = old is not None and fid in old and same_row(old[fid], r)
+        # only a NEW row (absent from the baseline) must carry its packet: an edited existing row warns, so a plan fix
+        # that renames a dep across 49 rows or rebases onto a moved main is not refused (pilot2026-11-10 20:49:
+        # R0501 PLAN FAIL 51, R1333 PLAN FAIL 17 on untouched rows; every plan-fix round failed)
+        kept = old is not None and fid in old
         hard = on and st != "proven" and not kept
         for w in why:
             line = f"{flabel}:{r['line']} {fid}: {w}" + ("" if hard else " (warning)")
