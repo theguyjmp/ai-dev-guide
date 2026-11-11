@@ -1,4 +1,5 @@
 """plan_land.py: a plan commit reruns the proven acceptance tests its files can break before main moves to it."""
+import os
 import shutil
 import subprocess
 import sys
@@ -149,6 +150,33 @@ class Cli(unittest.TestCase):
         self.assertTrue(all(f.startswith("spec/index/") or f == "spec/INDEX.md" for f in files), files)
         self.assertIn("parse_query", git(self.repo, "show", "plan/idx:spec/index/beta.md"))
         self.assertEqual(git(wt, "status", "--porcelain", "--untracked-files=no"), "")
+
+    def test_a_second_run_waits_for_the_first_instead_of_running_in_parallel(self):
+        self.branch("plan/one", {"src/beta/stub.py": "def f():\n    raise NotImplementedError\n"})
+        import land
+        import time
+        self.assertTrue(land.acquire_lock(str(self.repo), 5, "plan_land.py branch plan/first", plan_land.LOCK_NAME))
+        p = subprocess.Popen([sys.executable, str(Path(plan_land.__file__)), "--repo", str(self.repo), "--branch",
+                              "plan/one", "--tests-only", "--timeout", "120"], stdout=subprocess.PIPE, text=True)
+        try:
+            time.sleep(2)
+            self.assertIsNone(p.poll(), "ran while the lock was held")
+        finally:
+            land.release_lock(str(self.repo), plan_land.LOCK_NAME)
+        out = p.communicate(timeout=120)[0]
+        self.assertEqual(p.returncode, 0, out)
+        self.assertIn(f"waiting for plan_land of plan/first (pid {os.getpid()})", out)
+        self.assertIn("PLAN LAND OK", out)
+        self.assertFalse(os.path.exists(land.lock_path(str(self.repo), plan_land.LOCK_NAME)))
+
+    def test_a_dead_holders_lock_is_broken(self):
+        self.branch("plan/two", {"src/beta/stub.py": "def f():\n    raise NotImplementedError\n"})
+        import land
+        lp = land.lock_path(str(self.repo), plan_land.LOCK_NAME)
+        os.makedirs(os.path.dirname(lp), exist_ok=True)
+        Path(lp).write_text("plan_land.py branch plan/x pid 999999 since now\n")
+        code, line = self.run_cli("plan/two")
+        self.assertEqual(code, 0, line)
 
     def test_a_branch_that_does_not_merge_with_main_is_red(self):
         self.branch("plan/clash", {"src/gamma/schema.json": '{"a": 1}\n'})

@@ -44,6 +44,11 @@ STATIC_GATES = ("dup", "literals")
 OK, RED = "PLAN LAND OK", "PLAN LAND RED"
 
 
+LOCK_NAME = "plan_land.lock"
+LOCK_WAIT_S = 6 * 3600.0
+LOCK_NOTE_S = 60.0
+
+
 def load_conf(tree: Path) -> dict:
     try:
         return tomllib.loads((tree / "overhaul.toml").read_text(encoding="utf-8"))
@@ -263,11 +268,23 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["CARGO_TARGET_DIR"] = str(repo / ".overhaul" / "target" / "plan")
     if not os.environ.get(memcap.ENV):  # run by a planner by hand: the same [limits] proc_mem_gb cap as a land
         memcap.cap_self(land.proc_mem_gb(str(repo)))
-    code, line = check(repo, a.branch, a.main, Path(os.path.abspath(a.wt)) if a.wt else None, a.tests_only,
-                       a.timeout)
-    if code == 0 and a.ff:
-        ok, why = fast_forward(repo, a.branch, a.main)
-        code, line = (0, f"{line}; {why}") if ok else (1, f"{RED}: {a.branch}: fast-forward {why}")
+    # One plan_land per repo at a time: parallel runs collided on shared test binaries (pilot2026-11-10, 80 min).
+    def note(holder):
+        m = re.search(r"branch (\S+) pid (\d+)", holder)
+        print(f"waiting for plan_land of {m.group(1) if m else '?'} (pid {m.group(2) if m else '?'})", flush=True)
+
+    if not land.acquire_lock(str(repo), wait=LOCK_WAIT_S, owner=f"plan_land.py branch {a.branch}", name=LOCK_NAME,
+                             on_wait=note, every=LOCK_NOTE_S):
+        print(f"{RED}: {a.branch}: plan_land lock busy", flush=True)
+        return 1
+    try:
+        code, line = check(repo, a.branch, a.main, Path(os.path.abspath(a.wt)) if a.wt else None, a.tests_only,
+                           a.timeout)
+        if code == 0 and a.ff:
+            ok, why = fast_forward(repo, a.branch, a.main)
+            code, line = (0, f"{line}; {why}") if ok else (1, f"{RED}: {a.branch}: fast-forward {why}")
+    finally:
+        land.release_lock(str(repo), LOCK_NAME)
     print(line, flush=True)
     return code
 

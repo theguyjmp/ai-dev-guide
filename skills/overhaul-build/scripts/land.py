@@ -147,8 +147,8 @@ def git(cwd, *args, check=True):
 
 # ---- lock -----------------------------------------------------------------------------------------------------------
 
-def lock_path(repo):
-    return os.path.join(repo, ".overhaul", "lock")
+def lock_path(repo, name="lock"):
+    return os.path.join(repo, ".overhaul", name)
 
 
 def pid_alive(pid):
@@ -188,12 +188,13 @@ def lock_is_stale(path):
         return False
 
 
-def acquire_lock(repo, wait=30.0, owner="land.py"):
+def acquire_lock(repo, wait=30.0, owner="land.py", name="lock", on_wait=None, every=60.0):
     """Create .overhaul/lock exclusively, waiting up to `wait` seconds. Returns False if another holder keeps it.
     A lock whose holder is dead is broken."""
-    path = lock_path(repo)
+    path = lock_path(repo, name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     deadline = time.monotonic() + max(wait, 0)
+    next_note = time.monotonic()
     while True:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -206,6 +207,13 @@ def acquire_lock(repo, wait=30.0, owner="land.py"):
                     pass
             if time.monotonic() >= deadline:
                 return False
+            if on_wait and time.monotonic() >= next_note:
+                next_note = time.monotonic() + every
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        on_wait(f.read().strip())
+                except OSError:
+                    pass
             time.sleep(0.2)
             continue
         with os.fdopen(fd, "w") as f:
@@ -213,9 +221,9 @@ def acquire_lock(repo, wait=30.0, owner="land.py"):
         return True
 
 
-def release_lock(repo):
+def release_lock(repo, name="lock"):
     try:
-        os.remove(lock_path(repo))
+        os.remove(lock_path(repo, name))
     except FileNotFoundError:
         pass
 
