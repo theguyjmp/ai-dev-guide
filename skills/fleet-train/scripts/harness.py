@@ -655,16 +655,15 @@ def batch_review(merged) -> list:
         return []
 
 
-def try_batch(batch, rows, depth=0, quick=False):
+def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     """Land as much of batch as possible. Returns list of landed queue entries."""
     merged, conflicted = build_train(batch, rows)
     for q in conflicted:
         reject(q, "merge conflict with main or another branch in the same train; merge main into your branch and resolve")
     if not merged:
         return []
-    ids = [q["row"] for q in merged]
-    ok, fails, log = gate(ids, rows, quick)
-    if ok:
+    # review first (about a minute): a duplicate found after a 15-min gate would cost a whole second gate run
+    if not quick and not reviewed:
         dups = batch_review(merged)
         guilty = [q for q in merged if any(adds_fn(q, d) for d in dups)]
         if guilty:
@@ -674,7 +673,10 @@ def try_batch(batch, rows, depth=0, quick=False):
                 reject(q, "duplicate capability (STANDARDS S1/S6): reuse or extend the owner, delete your copy: " + why)
             event("review_reject", rows=[q["row"] for q in guilty])
             rest = [q for q in merged if q not in guilty]
-            return try_batch(rest, rows, depth + 1, quick=True) if rest else []
+            return try_batch(rest, rows, depth + 1, quick=False, reviewed=True) if rest else []
+    ids = [q["row"] for q in merged]
+    ok, fails, log = gate(ids, rows, quick)
+    if ok:
         finish_spec(ids)
         return merged
     own = {i for i in ids for t in rows[i]["tests"] if t in fails}
