@@ -3954,11 +3954,21 @@ class Driver(mainred.MainRed):
         recs, new = self.st["functions"], []
         for fid in [k for k in recs if k not in self.fns]:
             del recs[fid]
+        demoted = []
         for f in self.order:
             if f.id not in recs:
                 new.append(f.id)
                 recs[f.id] = {"status": "proven" if f.status == "proven" else "planned", "attempts": 0,
                               "conflicts": 0, "last_reason": "", "branch": f"fn/{f.id}", "updated": now_iso()}
+            elif recs[f.id].get("status") == "proven" and f.status == "planned":
+                # the plan sent a proven row back (a proof-check PARTIAL, a rewritten acceptance): its tests are red
+                # on purpose, so it must leave the proven set or every build's proven-test check fails on it
+                # (pilot2026-11-10/11: S04 S06 S45 S50 S268 R0520 stayed proven 13 h, resets refused)
+                recs[f.id].update(status="planned", attempts=0, conflicts=0, updated=now_iso(),
+                                  last_reason="sent back to planned by the plan (was proven)")
+                demoted.append(f.id)
+        if demoted:
+            self.log(None, "plan_demoted", " ".join(demoted))
         self.flush()
         for fid in new:
             if recs[fid]["status"] == "planned" and (problem := self.plan_problem(self.fns[fid])):

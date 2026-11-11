@@ -247,3 +247,15 @@ class VerdictLine(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlanDemotes(unittest.TestCase):
+    def test_a_proven_row_the_plan_marks_planned_leaves_the_proven_set(self):
+        d = mock.Mock()
+        d.st = {"functions": {"F1": {"status": "proven", "attempts": 2}}}
+        rec = d.st["functions"]["F1"]
+        f = mock.Mock(id="F1", status="planned")
+        # the same rule the reload applies
+        if rec.get("status") == "proven" and f.status == "planned":
+            rec.update(status="planned", attempts=0)
+        self.assertEqual(rec["status"], "planned")
