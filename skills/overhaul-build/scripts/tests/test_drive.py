@@ -738,7 +738,7 @@ WIDE = CHAIN.replace("| F2 | 1 | alpha | F1 |", "| F2 | 1 | alpha | - |").replac
 
 class TestCriticalPath(Toy):
     """Pass C: rows start and land in order of how many not-proven rows wait on them; st["width"] counts ready rows
-    beside free slots and goes red after [harness] width_red_min with too few (pilot2026-11-09)."""
+    beside free slots and goes red after [harness] width_red_min with too few (pilot 2026-11-09)."""
 
     def driver(self, repo: Path) -> drive.Driver:
         drv = drive.Driver(repo, drive.load_config(repo))
@@ -1538,7 +1538,7 @@ class TestScale(Toy):
 
 
 class TestResume(Toy):
-    """A restart keeps the work on fn/<id> (pilot2026-11-09: 87 of 324 builds never ended, every restart reset
+    """A restart keeps the work on fn/<id> (pilot 2026-11-09: 87 of 324 builds never ended, every restart reset
     their branches to main)."""
 
     def seed(self, repo: Path, status: str, commit: bool = True) -> str:
@@ -1636,7 +1636,7 @@ class TestResume(Toy):
 
 
 class TestDiskGuard(Toy):
-    """[limits] min_free_gb (pilot2026-11-09: 20 slot target dirs of ~10 GB filled Z: and ENOSPC killed drive)."""
+    """[limits] min_free_gb (pilot 2026-11-09: 20 slot target dirs of ~10 GB filled Z: and ENOSPC killed drive)."""
 
     def setup_dirs(self, repo: Path) -> list[Path]:
         dirs = []

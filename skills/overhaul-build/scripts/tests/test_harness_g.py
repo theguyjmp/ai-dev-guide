@@ -1,5 +1,5 @@
 """Pass G (owner 2026-11-10): drive honours the watchdog's requests, so what is due runs even when drive's own
-schedule skipped it: audit-phase-<N> (the pilot project: 0 phase audits in two days, a finished final polish hid them),
+schedule skipped it: audit-phase-<N> (pilot: 0 phase audits in two days, a finished final polish hid them),
 arch-sweep (the every-25-lands sweep never ran) and periodic-<gate> (55 reds after the last bisect drew no action).
 
 Run from the scripts dir:  py -3 -m unittest tests.test_harness_g

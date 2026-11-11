@@ -1,4 +1,4 @@
-"""A systemic reason green on clean main does not stop the build (pilot2026-11-10 03:04: 57 min of no launches)."""
+"""A systemic reason green on clean main does not stop the build (pilot 2026-11-10 03:04: 57 min of no launches)."""
 import sys
 import unittest
 from pathlib import Path

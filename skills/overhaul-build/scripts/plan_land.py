@@ -20,7 +20,7 @@ the checkout changes, so a refusal leaves main and the checkout exactly as they 
 which writes the files first: the pilot project 2026-11-10 07:35-08:10, a refused fast-forward left the live repo dirty and
 blocked every land and plan round, twice).
 
-Why (pilot2026-11-10): the phase-10 plan commit's stubs (invalid JSON schemas) failed proven tests, and main was red
+Why (pilot 2026-11-10): the phase-10 plan commit's stubs (invalid JSON schemas) failed proven tests, and main was red
 for every land 03:30-05:20; plan commits ran only static checks before they landed.
 """
 from __future__ import annotations
@@ -175,7 +175,7 @@ def check(repo: Path, branch: str, main: str, wt: Path | None, tests_only: bool,
         if not tests_only and (why := static_check(tree, conf, out.parent)):
             return 1, f"{RED}: {branch} {why}"
         if tests_only and (why := lint_check(tree, conf, out.parent)):  # --tests-only never skips lint: two plan lands
-            return 1, f"{RED}: {branch} {why}"  # without it turned main lint-red (pilot2026-11-10 20:36, 21:20)
+            return 1, f"{RED}: {branch} {why}"  # without it turned main lint-red (pilot 2026-11-10 20:36, 21:20)
         green, line = proven_check(tree, main, conf, timeout, out)
         if not green:
             return 1, f"{RED}: {branch}: {line}"
@@ -285,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["CARGO_TARGET_DIR"] = str(repo / ".overhaul" / "target" / "plan")
     if not os.environ.get(memcap.ENV):  # run by a planner by hand: the same [limits] proc_mem_gb cap as a land
         memcap.cap_self(land.proc_mem_gb(str(repo)))
-    # One plan_land per repo at a time: parallel runs collided on shared test binaries (pilot2026-11-10, 80 min).
+    # One plan_land per repo at a time: parallel runs collided on shared test binaries (pilot 2026-11-10, 80 min).
     def note(holder):
         m = re.search(r"branch (\S+) pid (\d+)", holder)
         print(f"waiting for plan_land of {m.group(1) if m else '?'} (pid {m.group(2) if m else '?'})", flush=True)

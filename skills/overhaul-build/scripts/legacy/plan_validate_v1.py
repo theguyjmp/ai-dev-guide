@@ -20,7 +20,7 @@ Counting mode (a tick check row): fails when the project's own proven-counting r
 every function of the phase in spec/FUNCTIONS.md, so a change to counting never again disconnects silently from the plan.
   py -3 plan_validate.py <repo> --counting --phase M1 [--rule <file.py>:<func>] [--syspath <dir;dir>] [--ref origin/main] [--exists]
 --rule is the counting code itself, called on the FUNCTIONS.md text and returning {function id: names}
-(the pilot project: --rule tools/health/health/sources/gate.py:accept_map --syspath "tools/health;tools/vc", R192); it is loaded
+(pilot: --rule tools/health/health/sources/gate.py:accept_map --syspath "tools/health;tools/vc", R192); it is loaded
 from the checkout with the --syspath dirs (default <repo>/tools) first on sys.path, as the project's own entry point does. Without --rule a backticked `<file>::<test>` in the row counts. --ref reads FUNCTIONS.md (and, with --exists,
 the test sources) at that git ref. --exists also fails a named test that no file in the repo defines.
 Exit 0 pass, 1 on any miss, 2 on bad usage. Read-only: it writes nothing.

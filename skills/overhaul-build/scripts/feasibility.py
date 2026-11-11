@@ -32,7 +32,7 @@ tokens per build.
 plan_validate.py --feasibility (planners, before a plan commit): the same check for every planned row; a problem or a
 file outside the files cell is a PLAN FAIL line.
 
-Why (pilot2026-11-09 overnight, 248 builds): 69 went back to planning after the build, 16 for a file outside the
+Why (pilot 2026-11-09 overnight, 248 builds): 69 went back to planning after the build, 16 for a file outside the
 files cell, 13 BLOCKED on a capability no row provides, 8 real timeouts on rows too big for one builder.
 """
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Desktop builder loop, run on the laptop: claim a row here, build it on remote-host with `claude -p`,
+"""Desktop builder loop, run on the laptop: claim a row here, build it on a second machine (ssh host HARNESS_REMOTE_HOST) with `claude -p`,
 fetch the branch back, submit it to the train.   py -3 remote.py --slot 100
 """
 import argparse, json, subprocess, sys, time
@@ -6,9 +6,12 @@ from pathlib import Path
 
 H = Path(__file__).parent
 import os
-REPO = os.environ.get("HARNESS_REPO", "<repo>")
-ENV = ("set CARGO_HOME=D:\\dev\\cargo&& set RUSTUP_HOME=D:\\dev\\rustup&& set APP_OCCT_DIR=D:\\dev\\occt-7.9.1\\win64\\vc14\\bin"
-       "&& set PATH=D:\\dev\\occt-7.9.1\\win64\\vc14\\bin;D:\\dev\\cargo\\bin;%PATH%&& set CARGO_BUILD_JOBS=3")
+REPO = os.environ.get("HARNESS_REPO", ".")
+HOST = os.environ.get("HARNESS_REMOTE_HOST", "remote-host")
+ROOT = os.environ.get("HARNESS_REMOTE_ROOT", "D:\\fleet")  # remote dir holding repo.git and vh\
+LOCAL_WT = os.environ.get("HARNESS_WT", str(Path(REPO).parent / "vh"))
+# cmd.exe env prefix on the remote host, e.g. "set CARGO_HOME=D:\\dev\\cargo&& set CARGO_BUILD_JOBS=3"
+ENV = os.environ.get("HARNESS_REMOTE_ENV", "set CARGO_BUILD_JOBS=3")
 
 
 def run(cmd, **kw):
@@ -48,22 +51,22 @@ def main():
         if not c.get("row"):
             continue
         row, br = c["row"], c["branch"]
-        wt = f"D:\fleet\\vh\\s{a.slot}"
-        tgt = f"D:\fleet\\vh\\target-{a.slot}"
+        wt = f"{ROOT}\\vh\\s{a.slot}"
+        tgt = f"{ROOT}\\vh\\target-{a.slot}"
         run(["git", "-C", REPO, "push", "-q", "-f", "desk", f"main:refs/heads/main", f"main:refs/heads/{br}"])
-        setup = (f"cd /d D:\fleet\repo.git && (if not exist {wt}\\.git git worktree add -q -f {wt} {br})"
+        setup = (f"cd /d {ROOT}\\repo.git && (if not exist {wt}\\.git git worktree add -q -f {wt} {br})"
                  f" & cd /d {wt} && git checkout -q -f -B {br} {br} 2>nul & git -C {wt} reset -q --hard {br} & git -C {wt} clean -qfd")
-        run(["ssh", "remote-host", setup])
+        run(["ssh", HOST, setup])
         Path(H / "state" / f"remote-{a.slot}.brief").write_text(
             BRIEF.format(claim=json.dumps(c), branch=br, target=tgt, branch_prev=br), encoding="utf-8")
-        run(["scp", "-q", str(H / "state" / f"remote-{a.slot}.brief"), f"remote-host:{wt}\\..\\brief-{a.slot}.txt"])
+        run(["scp", "-q", str(H / "state" / f"remote-{a.slot}.brief"), f"{HOST}:{wt}\\..\\brief-{a.slot}.txt"])
         t0 = time.time()
-        r = run(["ssh", "-o", "ServerAliveInterval=30", "remote-host",
+        r = run(["ssh", "-o", "ServerAliveInterval=30", HOST,
                  f"{ENV}&& set CARGO_TARGET_DIR={tgt}&& cd /d {wt} && type ..\\brief-{a.slot}.txt | claude -p --dangerously-skip-permissions --max-turns 120"],
                 timeout=3 * 3600)
         tail = (r.stdout or "").strip().splitlines()[-1:] or [""]
         f = run(["git", "-C", REPO, "fetch", "-q", "desk", f"+refs/heads/{br}:refs/remotes/desk/{br}"])
-        lw = f"<worktrees>/s{a.slot}"
+        lw = f"{LOCAL_WT}/s{a.slot}"
         run(["git", "-C", lw, "reset", "-q", "--hard", f"desk/{br}"])
         ahead = run(["git", "-C", REPO, "rev-list", "--count", f"main..desk/{br}"]).stdout.strip()
         if tail[0].startswith("DONE") and ahead not in ("", "0"):

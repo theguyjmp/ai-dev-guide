@@ -346,7 +346,7 @@ class FlakyUnderLoad(unittest.TestCase):
 
 
 class PlanMergeStaticGates(unittest.TestCase):
-    """A plan branch that would turn main red on dup or literals never lands (pilot2026-11-09 23:08)."""
+    """A plan branch that would turn main red on dup or literals never lands (pilot 2026-11-09 23:08)."""
 
     def gates(self, dup_exit: int) -> list[str]:
         logs: list[str] = []
@@ -394,7 +394,7 @@ class FreeBranch(unittest.TestCase):
 
 
 class PlanLandGate(Toy):
-    """A plan branch that fails a proven acceptance test it can break never lands (pilot2026-11-10 03:30-05:20)."""
+    """A plan branch that fails a proven acceptance test it can break never lands (pilot 2026-11-10 03:30-05:20)."""
 
     RED = "import sys; print('PLAN LAND RED: plan/x: regression: proven S03 t fails (exit 1): boom'); sys.exit(1)"
 
@@ -486,7 +486,7 @@ class LiveRetryOnCrash(unittest.TestCase):
 
 
 def plan_text(rows: list[tuple[str, str]]) -> str:
-    """FUNCTIONS.md for (id, deps) rows: Q09 blocks 80 rows (pilot2026-11-10), M1 blocks 3, A1..A3 block none."""
+    """FUNCTIONS.md for (id, deps) rows: Q09 blocks 80 rows (pilot 2026-11-10), M1 blocks 3, A1..A3 block none."""
     return ("# Functions\n\n| id | phase | module | deps | entry | acceptance | status |\n"
             "|----|-------|--------|------|-------|------------|--------|\n"
             + "".join(f"| {fid} | 1 | m | {deps} | `toy {fid}` | tests/acceptance/test_{fid}.py::t | planned |\n"

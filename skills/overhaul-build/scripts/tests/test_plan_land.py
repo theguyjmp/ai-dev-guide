@@ -199,7 +199,7 @@ exit 0
 
 class FastForward(unittest.TestCase):
     """main moves only through fast_forward: a guard refusal leaves main and the checkout exactly as they were
-    (pilot2026-11-10 07:35-08:10: `git merge --ff-only` wrote the files, the guard refused, the repo stayed dirty)."""
+    (pilot 2026-11-10 07:35-08:10: `git merge --ff-only` wrote the files, the guard refused, the repo stayed dirty)."""
 
     def setUp(self):
         self.r = Path(tempfile.mkdtemp(prefix="plan-ff-"))
@@ -272,7 +272,7 @@ if __name__ == "__main__":
 
 class StaticCheckReadsStdout(unittest.TestCase):
     """plan_validate prints notes (warnings) to stderr after its PLAN line on stdout; the PLAN line decides
-    (pilot2026-11-10 16:13-17:00: every plan branch refused as 'not PLAN OK: PLAN FAIL' from a stderr note)."""
+    (pilot 2026-11-10 16:13-17:00: every plan branch refused as 'not PLAN OK: PLAN FAIL' from a stderr note)."""
 
     def test_plan_ok_on_stdout_with_stderr_notes_passes(self):
         done = subprocess.CompletedProcess([], 0, "notes\nPLAN OK 3 functions\n", "warning: row X has no packet\n")

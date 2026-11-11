@@ -15,7 +15,7 @@ json` writes, so drive.read_result reads both.
 Detached launch. `py -3 worker.py --mem GB --rc FILE -- cmd...` is how drive.py starts a local builder outside its own
 kill-on-close job: the launcher puts itself in a new job with the same per-process memory cap (memcap.cap_self, kill on
 close, so killing the launcher's pid kills its builder tree), runs cmd with the inherited stdout and stderr, writes
-cmd's exit code to FILE and exits with it. A drive that restarts reads FILE for a builder it re-adopted (the pilot project
+cmd's exit code to FILE and exits with it. A drive that restarts reads FILE for a builder it re-adopted (pilot
 2026-11-09: 73 of 248 builds were killed by drive restarts).
 """
 from __future__ import annotations

@@ -1,6 +1,6 @@
-"""Codebase stats of app-rebuild main, as JSON (for the rebuild dashboard)."""
-import json, re, subprocess
-REPO = "<repo>"
+"""Codebase stats of the rebuild repo's main, as JSON (for the rebuild dashboard)."""
+import json, os, re, subprocess
+REPO = os.environ.get("HARNESS_REPO", ".")
 git = lambda *a: subprocess.run(["git", "-C", REPO, *a], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
 files = git("ls-tree", "-r", "--name-only", "main").split()
 FN = re.compile(r"^\s*(?:pub(?:\([a-z]+\))?\s+)?(?:const\s+|async\s+)?fn\s+\w+", re.M)

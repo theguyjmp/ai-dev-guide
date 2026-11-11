@@ -1,11 +1,11 @@
 export const meta = {
-  name: 'app-builders',
+  name: 'fleet-builders',
   description: '16 short-lived builder agents claim rebuild rows, build them in warm per-slot worktrees, and submit to the batch land train',
   phases: [{ title: 'Build', detail: 'worker loops: claim -> build -> submit, fresh agent per row' }],
 }
 const SLOTS = (args && args.slots) || 16
 const MAX_PER_WORKER = (args && args.max) || 40
-const H = (args && args.home) || '<harness>'
+const H = (args && args.home) || (() => { throw new Error('pass args.home = the harness folder') })()
 const SCHEMA = { type: 'object', properties: {
   status: { type: 'string', enum: ['submitted', 'released', 'idle'] },
   row: { type: 'string' }, note: { type: 'string' } }, required: ['status'] }

@@ -18,7 +18,7 @@ and anything it cannot fix also append one line to .overhaul/ALERT.txt for the m
 A breach that persists repeats its event and alert at most every 30 min. Its memory (first seen, last fired, last
 check) is .overhaul/watchdog.json.
 
-Why (pilot2026-11-09/10): 17 gaps of over 45 min between lands, 5 whole-build stops and 5 desk hangs in 13 minutes
+Why (pilot 2026-11-09/10): 17 gaps of over 45 min between lands, 5 whole-build stops and 5 remote hangs in 13 minutes
 were each found by the manager's 30-minute heartbeat or by the owner, not when they happened; 0 phase audits and 0
 arch sweeps ran in two days with phase_audit = true; 55 periodic reds after the last bisect drew no action.
 """
@@ -57,7 +57,7 @@ CRITICAL_ROUND_S = 15 * 60.0  # a needs-plan row with critical_waiters rows wait
 CRITICAL_WAITERS = 10  # [harness] critical_waiters (supervise.py's default too)
 PROOF_DUE_S = 60 * 60.0  # a proof-check after a phase end
 DASH_S = 60 * 60.0  # the dashboard is rewritten within this while the build is live
-AUDIT_LOCK_S = 20 * 60.0  # a module held by an audit fix (st audit_locks) longer than this (pilot2026-11-10: 30+ min)
+AUDIT_LOCK_S = 20 * 60.0  # a module held by an audit fix (st audit_locks) longer than this (pilot 2026-11-10: 30+ min)
 TAIL_BYTES = 4 << 20
 INCREMENTAL = ("*/debug/incremental/*", "*/release/incremental/*")
 PROGRESS = ("build_start", "build_end", "verdict", "review_pass", "review_fail", "review_nos", "verify_fail",
@@ -445,7 +445,7 @@ class Watchdog:
 
     def critical_plan(self, now, mem, st):
         """A needs-plan row that critical_waiters or more not-proven rows wait on (drive.waiters, the same weight
-        drive and supervise rank by) is in a plan round within 15 min (pilot2026-11-10: Q09 blocked 80 rows and
+        drive and supervise rank by) is in a plan round within 15 min (pilot 2026-11-10: Q09 blocked 80 rows and
         sat needs-plan for hours while rounds fixed low-value rows)."""
         import drive  # noqa: PLC0415
         recs = st.get("functions") or {}

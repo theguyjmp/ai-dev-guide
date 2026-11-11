@@ -1,4 +1,4 @@
-"""flush() keeps waiting while a live land holds the lock (pilot2026-11-10 02:15: a 120 s wait stopped the run)."""
+"""flush() keeps waiting while a live land holds the lock (pilot 2026-11-10 02:15: a 120 s wait stopped the run)."""
 import sys
 import unittest
 from pathlib import Path

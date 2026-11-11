@@ -271,7 +271,7 @@ class TestRelay(unittest.TestCase):
 
 
 class TestPool(unittest.TestCase):
-    CONF = {"host": "remote-host", "name": "desk", "slots": 2, "repo": "D:\fleet\\v.git"}
+    CONF = {"host": "remote-host", "name": "desk", "slots": 2, "repo": "D:\\app\\v.git"}
 
     def test_no_table_or_zero_slots_means_no_pool(self):
         self.assertIsNone(remote.Pool.from_harness({}))

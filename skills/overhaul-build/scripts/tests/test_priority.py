@@ -1,5 +1,5 @@
 """Process priority (builders BELOW_NORMAL, gates NORMAL, land's acceptance ABOVE_NORMAL) and the [tiers] rerun
-that keeps a timing bench starved by builders from failing a land (pilotS123 on S02, 2026-11-09)."""
+that keeps a timing bench starved by builders from failing a land (pilot S123 on S02, 2026-11-09)."""
 import os
 import shutil
 import subprocess

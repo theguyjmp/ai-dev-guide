@@ -276,7 +276,7 @@ class Supervisor:
         return proc.returncode, last_line(drive.read_text(out))
 
     def live_step(self) -> None:
-        """Start live rounds while drive runs, critical path first (pilot2026-11-10: Q09 blocked 80 rows and sat
+        """Start live rounds while drive runs, critical path first (pilot 2026-11-10: Q09 blocked 80 rows and sat
         needs-plan for hours while live rounds fixed low-value rows, and ready rows were 0 most of the afternoon):
         - a needs-plan row with >= critical_waiters not-proven rows waiting on it (drive.waiters) gets its own round
           at once, beside any round in flight; so does a row the watchdog asks for (requests/planfix-<id>);
@@ -359,7 +359,7 @@ class Supervisor:
 
     def live_retry(self, fixing: list[str]) -> list[str]:
         """A live round that did not land (main moved, a dirty checkout, a refused fast-forward) leaves its rows
-        untried, so the next poll starts them again, up to LIVE_RETRIES times per row (pilot2026-11-10 07:18: one
+        untried, so the next poll starts them again, up to LIVE_RETRIES times per row (pilot 2026-11-10 07:18: one
         failed land left 36 rows needs-plan with no round for the rest of the run)."""
         out = []
         for fid in fixing:
@@ -487,7 +487,7 @@ class Supervisor:
 
     def plan_tests(self, branch: str, merge_wt: Path, work: Path, rnd: int | str) -> None:
         """plan_land.py --tests-only on the merged branch: the proven acceptance tests the plan commit can break.
-        Red: Stop, main never moves (pilot2026-11-10: phase-10 stubs failed proven tests, main red 03:30-05:20)."""
+        Red: Stop, main never moves (pilot 2026-11-10: phase-10 stubs failed proven tests, main red 03:30-05:20)."""
         code, line = self.run([*self.plan_land_cmd, "--repo", str(self.repo), "--branch", branch, "--main", self.main,
                                "--wt", str(merge_wt), "--tests-only", "--timeout", f"{self.test_timeout:.0f}"],
                               work / "plan-land.txt")
@@ -618,7 +618,7 @@ class Supervisor:
 
     def free_branch(self, branch: str) -> None:
         """Remove any worktree that still has branch checked out: one supervise runs per repo, so it is a killed
-        round's leftover, and `worktree add -B` refuses a branch checked out elsewhere (pilot2026-11-10: every
+        round's leftover, and `worktree add -B` refuses a branch checked out elsewhere (pilot 2026-11-10: every
         restart left plan/fix-<id> worktrees that failed the next live round for that row)."""
         listing = self.git("worktree", "list", "--porcelain", check=False) or ""
         path = ""
@@ -632,7 +632,7 @@ class Supervisor:
 
     def land_plan(self, branch: str, merge_wt: Path, work: Path, rnd: int) -> None:
         """land_plan_unlocked under plan_land.py's per-repo lock, so a live round, the manager's plan_land and an
-        agent's plan_land never race to fast-forward main (pilot2026-11-10 22:33: 3 plan lands at once)."""
+        agent's plan_land never race to fast-forward main (pilot 2026-11-10 22:33: 3 plan lands at once)."""
         repo = str(self.repo)
         if not plan_land.land.acquire_lock(repo, wait=3600.0, owner=f"supervise round {rnd} {branch}",
                                            name=plan_land.LOCK_NAME,
@@ -669,7 +669,7 @@ class Supervisor:
 
     def static_gates(self, branch: str, merge_wt: Path, work: Path, rnd: int | str) -> None:
         """The whole-tree checks that need no build (dup, literals) on the merged plan branch before main moves:
-        a plan stub that repeats landed code turned main red and held every land (pilot2026-11-09 23:08)."""
+        a plan stub that repeats landed code turned main red and held every land (pilot 2026-11-09 23:08)."""
         cmds = self.cfg.get("commands") or {}
         for name in ("dup", "literals"):
             cmd = cmds.get(name)

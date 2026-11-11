@@ -1,5 +1,5 @@
 """[harness] stacked_starts: a row builds on its dep's reviewed, unlanded branch, lands after it, is reset when that
-branch changes, and its review sees only its own diff (pilotrate proof 2026-11-09: 7.5/h -> 14.5-15.8/h)."""
+branch changes, and its review sees only its own diff (pilot rate proof 2026-11-09: 7.5/h -> 14.5-15.8/h)."""
 import subprocess
 import sys
 from pathlib import Path

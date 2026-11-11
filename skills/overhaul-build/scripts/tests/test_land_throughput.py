@@ -1,4 +1,4 @@
-"""Land throughput (pilot2026-11-09): parallel lands with a partial re-gate, heavy tests through a remote runner,
+"""Land throughput (pilot 2026-11-09): parallel lands with a partial re-gate, heavy tests through a remote runner,
 the land time budget, and drive.py's side of each (land_parallel, module footprints, land_timeout requeue).
 
 Run from the scripts dir: py -3 -m unittest tests.test_land_throughput

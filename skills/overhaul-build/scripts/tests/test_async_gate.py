@@ -1,4 +1,4 @@
-"""The pre-review gate runs off the main loop (pilot2026-11-10: serial ~3.5 min gates starved reviews and lands)."""
+"""The pre-review gate runs off the main loop (pilot 2026-11-10: serial ~3.5 min gates starved reviews and lands)."""
 import sys
 import time
 import unittest

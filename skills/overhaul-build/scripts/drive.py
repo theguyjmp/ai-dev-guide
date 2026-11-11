@@ -174,13 +174,13 @@ HARNESS_REQUESTS = ("audit-phase-", "arch-sweep", "periodic-", "release-audit-lo
 PERIODIC_REARMS = 2
 LOCK_WAIT_S = 120.0  # a write that must happen now waits this long for land.py's lock
 # [limits] min_free_gb: under it, cargo's incremental dirs under .overhaul/target are pruned and no build starts
-# (pilot2026-11-09: 20 slot target dirs of ~10 GB filled Z: to 0 GB and ENOSPC killed the drive)
+# (pilot 2026-11-09: 20 slot target dirs of ~10 GB filled Z: to 0 GB and ENOSPC killed the drive)
 MIN_FREE_GB = 40.0
 # [limits] prune_at_gb: under it the same dirs are pruned with builds still starting, so min_free_gb is not reached
-# (pilot2026-11-10: the 40 GB floor blocked every local build); a job's own slot is pruned when the job ends
+# (pilot 2026-11-10: the 40 GB floor blocked every local build); a job's own slot is pruned when the job ends
 PRUNE_AT_GB = 80.0
 # [harness] detach_builders (default true): a local build runs outside drive's kill-on-close job (worker.py launcher,
-# pid file .overhaul/jobs/<id>.json) and a restarted drive re-adopts it (pilot2026-11-09: 73 of 248 builds killed
+# pid file .overhaul/jobs/<id>.json) and a restarted drive re-adopts it (pilot 2026-11-09: 73 of 248 builds killed
 # by restarts). Only the owner's stop (`drive.py --stop`, Ctrl-C) kills it.
 DETACH_KINDS = ("build",)
 BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB
@@ -280,7 +280,7 @@ def read_text(path: Path) -> str:
 def run(cmd: list[str], cwd: Path, timeout: float | None = None) -> subprocess.CompletedProcess:
     """cmd with captured output. On timeout the whole process tree is killed before TimeoutExpired is raised:
     subprocess.run only kills the child, and a grandchild (git, cargo) holding the pipes made the drive's main loop
-    wait forever (pilot2026-11-10 10:58-11:18, a verdict.py past its 300 s timeout)."""
+    wait forever (pilot 2026-11-10 10:58-11:18, a verdict.py past its 300 s timeout)."""
     proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace")
     try:
@@ -771,7 +771,7 @@ class Driver(mainred.MainRed):
         # [harness] land_parallel (the older max_lands): lands at once; overlapping footprints never
         self.max_lands = max(1, int(har.get("land_parallel") or har.get("max_lands") or 3))
         # [harness] gate_parallel: pre-review merges + gates (whole-tree checks, own acceptance, footprint) run in
-        # worker threads, so the main loop keeps reaping, reviewing and landing while they run (pilot2026-11-10:
+        # worker threads, so the main loop keeps reaping, reviewing and landing while they run (pilot 2026-11-10:
         # run serially in the loop at ~3.5 min each, 11 built rows queued for review and no land started for 35 min)
         self.gate_parallel = max(1, int(har.get("gate_parallel") or 4))
         self.gate_pool: ThreadPoolExecutor | None = None
@@ -998,7 +998,7 @@ class Driver(mainred.MainRed):
             hist.append([now_iso(), n])
             self.save()
 
-    # ---- resume: a restart keeps the work on fn/<id> (pilot2026-11-09: 87 of 324 builds never ended, every
+    # ---- resume: a restart keeps the work on fn/<id> (pilot 2026-11-09: 87 of 324 builds never ended, every
     # restart turned them back to planned and `worktree add -B` reset their branches to main) ----
     def ahead(self, fid: str) -> int:
         """Commits on fn/<id> that main does not have; 0 when the branch is missing."""
@@ -1265,7 +1265,7 @@ class Driver(mainred.MainRed):
     def width_step(self) -> None:
         """Record st["width"] for verdict.py and dash.py: `ready` rows (startable, deps proven, not in flight)
         beside free builder slots. Ready under free slots for [harness] width_red_min is `width red`, naming the
-        not-proven rows that unblock the most (pilot2026-11-09: ~9 of 120 rows ready, slots idle)."""
+        not-proven rows that unblock the most (pilot 2026-11-09: ~9 of 120 rows ready, slots idle)."""
         now = time.monotonic()
         if now - self.last_width < WIDTH_EVERY_S:
             return
@@ -2110,7 +2110,7 @@ class Driver(mainred.MainRed):
         self.clear_git_locks()
 
     def clear_git_locks(self, min_age_s: float = 60.0) -> None:
-        """Remove git lock files a killed run left (pilot2026-11-10: a restart at 05:24 left .git/packed-refs.lock
+        """Remove git lock files a killed run left (pilot 2026-11-10: a restart at 05:24 left .git/packed-refs.lock
         and ref updates failed for an hour). Safe at start: the drive lock is held and orphan workers are killed."""
         gdir = self.repo / ".git"
         for name in ("packed-refs.lock", "index.lock", "HEAD.lock", "config.lock"):
@@ -2512,7 +2512,7 @@ class Driver(mainred.MainRed):
             self.land_queue.append(fid)
             self.set(fid, status="landing")
             return
-        # pf-F: a verified duplicate NO always fails review (pilot2026-11-10: 20 passed "recorded as plan gap").
+        # pf-F: a verified duplicate NO always fails review (pilot 2026-11-10: 20 passed "recorded as plan gap").
         # Only one another module must change for (its owner has to export the item) is a plan gap AND a depfix of
         # that module; the function waits for it without spending an attempt, then retries with the NO.
         stuck = self.gap_nos(fid, gap, real)
@@ -2699,7 +2699,7 @@ class Driver(mainred.MainRed):
     # Per phase (item 8): with the phase barrier on, when every function of phase N (not the last) is proven, the
     # same gap pass, probes and audit/fix rounds run scoped to phase N before phase N+1 starts. Its state is
     # st["phase_polish"][N] and its files .overhaul/polish/phase-N/; the final whole-tree polish still runs at the end.
-    # pf-F (pilot2026-11-10, 0 phase audits in 3 days): a final polish that ended before the plan grew (status
+    # pf-F (pilot 2026-11-10, 0 phase audits in 3 days): a final polish that ended before the plan grew (status
     # done) no longer blocks every phase audit, phases are scanned past the first unfinished one, and a phase is also
     # due after [harness] phase_audit_every lands since its last audit (its open rows wait on needs-plan for days).
     # A lands audit ("why": "lands") locks only what its fixes edit; a done audit re-arms on the next trigger.
@@ -3311,7 +3311,7 @@ class Driver(mainred.MainRed):
     # ---- phase audit (owner 2026-11-09): phase polish beside the builds, the arch audit, and the sweep ----
     # [harness] phase_audit runs each phase's polish (above) whatever phase_barrier says. Without the barrier holding
     # later phases it runs beside their builds. An audit (checklist, arch, sweep) and its verify lock nothing: they
-    # read main while builds go on (pilot2026-11-10 17:02-17:34: a lands audit held 10 modules for 30+ min, 0
+    # read main while builds go on (pilot 2026-11-10 17:02-17:34: a lands audit held 10 modules for 30+ min, 0
     # builds ran, and the manager turned phase_audit off). Only a fix pass locks, from queued until it lands, and only
     # the files its verified findings name (fix_claims): a row overlapping them waits, any other row of the module
     # builds; the fix waits for builds in flight on those files. Round 1 also runs the arch audit
@@ -3963,7 +3963,7 @@ class Driver(mainred.MainRed):
             elif recs[f.id].get("status") == "proven" and f.status == "planned":
                 # the plan sent a proven row back (a proof-check PARTIAL, a rewritten acceptance): its tests are red
                 # on purpose, so it must leave the proven set or every build's proven-test check fails on it
-                # (pilot2026-11-10/11: S04 S06 S45 S50 S268 R0520 stayed proven 13 h, resets refused)
+                # (pilot 2026-11-10/11: S04 S06 S45 S50 S268 R0520 stayed proven 13 h, resets refused)
                 recs[f.id].update(status="planned", attempts=0, conflicts=0, updated=now_iso(),
                                   last_reason="sent back to planned by the plan (was proven)")
                 demoted.append(f.id)
@@ -3980,7 +3980,7 @@ class Driver(mainred.MainRed):
 
     def reload_slots(self) -> None:
         """Re-read [harness] max_parallel, land_parallel and [harness.remote] slots from overhaul.toml, so the manager moves build
-        load between machines without a restart (pilot2026-11-10: 24 cold laptop slots at 94% CPU, the desktop idle).
+        load between machines without a restart (pilot 2026-11-10: 24 cold laptop slots at 94% CPU, desktop idle).
         Running jobs finish where they are; new starts follow the new numbers."""
         try:
             har = load_config(self.repo)["harness"]
@@ -4005,7 +4005,7 @@ class Driver(mainred.MainRed):
         pv = pv if pv.is_file() else HERE / "plan_validate.py"
         where = land_mod.checked_out_at(str(self.repo), self.main) or str(self.repo)
         try:
-            # --no-lint: the whole-tree clippy timed out at 300 s under build load and refused phases 11-12 (the pilot project
+            # --no-lint: the whole-tree clippy timed out at 300 s under build load and refused phases 11-12 (pilot
             # 2026-11-10 08:16, 08:33); lint gates every land and every plan land already
             r = run([sys.executable, str(pv), "--repo", where, "--no-lint"], self.repo, timeout=300)
         except subprocess.TimeoutExpired:

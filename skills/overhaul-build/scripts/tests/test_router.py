@@ -18,7 +18,7 @@ from drive import in_paths, module_paths, module_section, paths_overlap  # noqa:
 from tests import test_supervise as ts  # noqa: E402
 from tests import test_verdict as tv  # noqa: E402
 
-FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "router_app.json").read_text(encoding="utf-8"))
+FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "router_pilot.json").read_text(encoding="utf-8"))
 UTC = dt.timezone.utc
 
 
@@ -228,7 +228,7 @@ BUGS = ["crates/kernel/src/solid_box.rs:54 `solid.box` prints `{solid, volume}` 
 
 class PermanentRoutes(unittest.TestCase):
     """Pass B 2026-11-10: a files_gap the row can fix itself widens its claim; a missing capability and a second
-    BLOCKED-BY go to a plan fix at once (pilotovernight: 16 files_gap, 13 BLOCKED/no-change builds lost)."""
+    BLOCKED-BY go to a plan fix at once (pilot overnight: 16 files_gap, 13 BLOCKED/no-change builds lost)."""
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="router-pf-"))

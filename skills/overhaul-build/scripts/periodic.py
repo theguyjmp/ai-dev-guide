@@ -17,7 +17,7 @@ overhaul.toml (all optional; without [gates.periodic] nothing changes):
   [gates.periodic.commands]  # name = command, run in .overhaul/periodic (a detached worktree at {sha})
   parity = "py -3 {scripts}/periodic.py ci --workflow parity.yml --sha {sha}"   # X2: Windows/macOS/Linux matrix
   scale = "cargo test --release --test scale -- --test-threads=1 --nocapture"   # the full scale tier
-  gpu = "ssh remote-host \"cd app && git fetch -q && git checkout -q {sha} && cargo bench --bench gpu\""
+  gpu = "ssh remote-host \"cd repo && git fetch -q && git checkout -q {sha} && cargo bench --bench gpu\""
 Placeholders: {sha}, {sha12}, {repo}, {scripts}. A gate is red when its command exits non-zero or a line it prints,
 `BENCH <name> <os> <value>`, is over budget. Every BENCH line goes to .overhaul/bench.jsonl.
 BUDGETS.toml (D9): `ci_factor = 2.0`, `reference = "desk"` (the os label whose numbers are the budget itself),

@@ -969,7 +969,7 @@ ACCEPTANCE_PRIORITY = priority.ABOVE_NORMAL  # land's acceptance runs: ahead of 
 
 def tier_recovered(bad, template, tiers, owner, wt, out_path, timeout):
     """bad without the [tiers] tests that pass when rerun alone. A tier test runs only inside the footprint, and
-    a timing bench starved by 16 builders fails a land it passes alone (pilotS123 on S02, 2026-11-09): each
+    a timing bench starved by 16 builders fails a land it passes alone (pilot S123 on S02, 2026-11-09): each
     failed one reruns by itself, serially after the batch, up to TIER_RERUNS times; a pass drops it and writes
     `tier rerun passed` to out_path (land.out) and stdout. Reruns write <out_path>-tier.out, so land.out keeps a
     failing test's own output. Other proven tests keep the batch verdict."""

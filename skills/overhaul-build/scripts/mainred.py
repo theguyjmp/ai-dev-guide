@@ -268,7 +268,7 @@ class MainRed:
     # ---- systemic ----
     def red_clear_systemic(self, key: str, why: str) -> bool:
         """A systemic reason with no shared red on main is per-branch (or flaky under load): each function keeps its
-        own retry or needs-plan and the build goes on (pilot2026-11-10: three whole-build stops in one night on a
+        own retry or needs-plan and the build goes on (pilot 2026-11-10: three whole-build stops in one night on a
         test green on main 03:04 (57 min), builder timeouts 04:35 and 'no committed change' 05:01 (rows BLOCKED on
         real plan gaps), each stopping every launch while ready rows waited)."""
         self.log(None, "systemic_clear", f"{why}; not stopping: {key}"[:1500])

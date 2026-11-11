@@ -18,10 +18,10 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO = Path(os.environ.get("HARNESS_REPO", "<repo>"))
-HOME = Path(os.environ.get("HARNESS_HOME", "<harness>"))
+REPO = Path(os.environ.get("HARNESS_REPO", "."))
+HOME = Path(os.environ.get("HARNESS_HOME", str(Path(__file__).parent)))
 ST = HOME / "state"
-WT = Path(os.environ.get("HARNESS_WT", "<worktrees>"))  # per-slot worktrees, fixed paths -> warm incremental builds
+WT = Path(os.environ.get("HARNESS_WT", str(REPO.parent / "vh")))  # per-slot worktrees, fixed paths -> warm incremental builds
 TARGETS = REPO / ".overhaul" / "target"
 SPEC = "spec/FUNCTIONS.md"
 CLAIM_TTL = 100 * 60
@@ -315,7 +315,9 @@ def cmd_release(a):
 # ---------------------------------------------------------------- train
 TRAIN = WT / "train"
 FIXTURES = WT / "fixture-cache-train"
-TRAIN_ENV = {"APP_FIXTURE_CACHE": str(FIXTURES), "CARGO_TARGET_DIR": str(TARGETS / "land-0"), "CARGO_PROFILE_RELEASE_INCREMENTAL": "true", "PROPTEST_DISABLE_FAILURE_PERSISTENCE": "1"}
+CRATE = os.environ.get("HARNESS_CRATE", "app")  # workspace crate prefix: <CRATE>-<name> lives in crates/<name>/
+FIXTURE_EXT = os.environ.get("HARNESS_FIXTURE_EXT", ".fixture")
+TRAIN_ENV = {os.environ.get("HARNESS_FIXTURE_VAR", "APP_FIXTURE_CACHE"): str(FIXTURES), "CARGO_TARGET_DIR": str(TARGETS / "land-0"), "CARGO_PROFILE_RELEASE_INCREMENTAL": "true", "PROPTEST_DISABLE_FAILURE_PERSISTENCE": "1"}
 
 
 def run_env(extra):
@@ -394,7 +396,7 @@ def run_tests(tests, timeout=1800):
                 out = rr.stdout + rr.stderr
                 m = re.search(r"sample.generate ([\w-]+): .*locked by another writer", out)
                 if rr.returncode != 0 and m:  # stale fixture lock: drop the fixture, regenerate once
-                    for f in FIXTURES.glob(m.group(1) + ".fixture*"):
+                    for f in FIXTURES.glob(m.group(1) + FIXTURE_EXT + "*"):
                         f.unlink(missing_ok=True)
                     rr = sh([exes[stem], "--exact", "--test-threads=1", name], cwd=TRAIN, check=False, env=env, timeout=900)
                     out = rr.stdout + rr.stderr
@@ -432,7 +434,7 @@ def main_unit_baseline() -> set:
     return set(cache["fails"])
 
 
-QS = "~/.claude/skills/overhaul-build/scripts"
+QS = str(Path.home() / ".claude/skills/overhaul-build/scripts")
 QUALITY_CMDS = [f"py -3 {QS}/dup_blocks.py crates src", f"py -3 {QS}/dup_literals.py crates src",
                 f"py -3 {QS}/shape_check.py crates src", f"py -3 {QS}/check_cycles.py crates src"]
 CLIPPY_STRICT = ("cargo clippy -q --workspace --all-targets -- -D warnings -D clippy::too_many_lines "
@@ -485,7 +487,7 @@ def quality_problems(cwd) -> str:
 
 
 def cmd_quality_check(a):
-    """Used by app-rebuild/.git/hooks/pre-push: refuse to publish a tree with quality problems."""
+    """Used by <repo>/.git/hooks/pre-push: refuse to publish a tree with quality problems."""
     q = quality_problems(Path(a.dir) if a.dir else REPO)
     if q:
         print(q[-3000:])
@@ -551,9 +553,9 @@ def gate(new_rows, rows, quick=False):
             event("gate_stage", stage="unit-baseline-red", failing=sorted(failing)[:5])
             r = None
     if r is not None and r.returncode != 0:
-        crates = sorted(set(re.findall(r"-p (app-[\w-]+)", out)))
-        dirs = " ".join("crates/" + c[len("app-"):] + "/" for c in crates if c != "app")
-        if "-p app " in out or "`-p app`" in out:
+        crates = sorted(set(re.findall(r"-p (" + re.escape(CRATE) + r"-[\w-]+)", out)))
+        dirs = " ".join("crates/" + c[len(CRATE) + 1:] + "/" for c in crates if c != CRATE)
+        if f"-p {CRATE} " in out or f"`-p {CRATE}`" in out:
             dirs += " src/"
         return False, ["unit"], f"failing crates: {dirs}" + chr(10) + out[-6000:]
     if quality_on():

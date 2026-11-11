@@ -16,7 +16,7 @@ low-value rows; ready rows were 0 most of the afternoon.
 
 ## Audits lock nothing; a fix holds only its files, 2026-11-10
 - the pilot project 17:02-17:34: a phase-3 lands audit locked 10 modules (its scope plus plan-gap modules) for 30+ min; every
-  deps-proven row waited (Q09: 80), 0 builds ran, and the manager set phase_audit = false (pilot01487f4).
+  deps-proven row waited (Q09: 80), 0 builds ran, and the manager set phase_audit = false (pilot 01487f4).
 - drive.py: an audit (checklist, arch, sweep) and its verify lock no module and wait for no build (polish_busy waits
   only for fix passes). fix_locks(): a polish/arch/gaps fix, queued or in flight until it lands, holds the files its
   verified findings name (fix_claims: file, the reused `other`, owner modules' paths; a finding without a file means
@@ -50,7 +50,7 @@ Owner 2026-11-10: "the heartbeat should check to make sure all things that are s
 ... if a phase has gone from unfinished to finished, check that the appropriate checkers have audited or are auditing,
 if not trigger them." the pilot project: 0 phase_audit events in two days with phase_audit = true (a finished final polish hid
 every phase audit), the every-25-lands arch sweep never ran (at 0 with 79 proven), 55 periodic_red after the last
-bisect; desk builds "silent" because slow rows timed out at 30 min and were benched as offline without an attempt.
+bisect; remote builds "silent" because slow rows timed out at 30 min and were benched as offline without an attempt.
 - watchdog.py: INVARIANTS table (name, due, evidence, action); new phase_audit, arch_sweep, periodic, progress, reload,
   needs_plan, proof_check, dashboard checks. Acts by request files (audit-phase-<N>, arch-sweep, periodic-<gate>,
   reload-watchdog-*), dash.py, or an ALERT.txt line; reset/reload requests are aged by first sighting, not mtime.
@@ -219,7 +219,7 @@ let 4 private copies of app_core helpers through (`invalid` with swapped argumen
 - tests/test_index_api.py.
 
 ## pf-F: phase audits run, a verified duplicate fails review, 2026-11-10
-- Phase audit (the pilot project: phase_audit = true, 0 phase_audit events in 3 days): a final polish that ended before the plan
+- Phase audit (pilot: phase_audit = true, 0 phase_audit events in 3 days): a final polish that ended before the plan
   grew (st.polish status done) no longer blocks every phase audit; phases are scanned past the first unfinished one;
   a phase is also due after `[harness] phase_audit_every` (default 15) of its rows proven since its last audit (a
   "lands" audit locks only what its fixes edit, so builds go on beside it); a done audit re-arms on the next trigger;

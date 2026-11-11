@@ -1,10 +1,10 @@
 export const meta = {
-  name: 'app-cleanup',
+  name: 'fleet-cleanup',
   description: 'Fix duplicate blocks, repeated literals, long functions and strict clippy findings on the pilot project rebuild main, one agent per crate group, landed through the train',
   phases: [{ title: 'Clean', detail: 'one agent per crate group' }],
 }
-const H = (args && args.home) || '<harness>'
-const S = '~/.claude/skills/overhaul-build/scripts'
+const H = (args && args.home) || (() => { throw new Error('pass args.home = the harness folder') })()
+const S = (args && args.scripts) || '~/.claude/skills/overhaul-build/scripts'
 const GROUPS = [
   { name: 'drawing-a', crates: ['drawing'], note: 'only files in crates/drawing/src whose file name starts with a-l' },
   { name: 'drawing-b', crates: ['drawing'], note: 'only files in crates/drawing/src whose file name starts with m-z, plus sub-folders' },

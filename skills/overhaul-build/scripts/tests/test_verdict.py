@@ -63,7 +63,7 @@ class VerdictTest(unittest.TestCase):
     def kinds(self, doc):
         return [r["kind"] for r in doc["reds"]]
 
-    def test_disk_low_is_a_red_with_the_number(self):  # drive.py's disk guard (pilot2026-11-09 ENOSPC)
+    def test_disk_low_is_a_red_with_the_number(self):  # drive.py's disk guard (pilot 2026-11-09 ENOSPC)
         state = {"cycle": 1, "functions": {}, "disk_low": {"free_gb": 12.5, "min_gb": 40.0, "t": ago(seconds=0)}}
         code, line, doc = self.verdict(self.repo(["proven", "planned"], state=state))
         self.assertEqual(code, 1)

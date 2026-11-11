@@ -704,6 +704,6 @@ class WorkPackets(Base):
         fun = root / "spec" / "FUNCTIONS.md"
         fun.write_text(fun.read_text(encoding="utf-8").replace(R2, R2.replace("| stub |", "| F001:behaviour |")),
                        encoding="utf-8")
-        p2, notes2 = self.checked(root)  # an edited existing row warns (pilot2026-11-10: dep renames over 49 rows)
+        p2, notes2 = self.checked(root)  # an edited existing row warns (pilot 2026-11-10: dep renames over 49 rows)
         self.assertEqual(p2, [])
         self.assertTrue(any("F002" in n and "(warning)" in n for n in notes2), notes2)

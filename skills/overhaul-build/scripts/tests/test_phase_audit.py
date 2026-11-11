@@ -290,7 +290,7 @@ class AppSettings(Base):
 
     def test_an_unfinished_phase_is_audited_after_n_lands_and_locks_nothing_of_its_own(self):
         drv = self.app(every=1)
-        drv.st["functions"]["F2"]["status"] = "proven"  # phase 2: 1 of 2 proven, F3 waits (the pilot project: needs-plan)
+        drv.st["functions"]["F2"]["status"] = "proven"  # phase 2: 1 of 2 proven, F3 waits (pilot: needs-plan)
         self.assertEqual(drv.polish_phase(), 2)
         self.assertEqual(drv.polish_state()["why"], "lands")
         self.assertEqual(drv.audit_locked(), set())  # builds go on in beta and alpha beside it

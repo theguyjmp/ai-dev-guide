@@ -26,7 +26,7 @@ as they come (drive's run file fills live). The laptop wrapper counts any line o
 for remote_idle_min means the host hung, so it kills the ssh session and exits OFFLINE (host offline, no attempt). On
 any failure it fetches the host log into <runs>/<id>-host.log. A host the watchdog holds offline
 (.overhaul/remote/<name>.offline, {"until": epoch, "why": ...}) is refused at once with OFFLINE.
-Why (pilot2026-11-10 05:57-06:10): five desk builds in 13 min timed out with no output and no host-side trace, so the
+Why (pilot 2026-11-10 05:57-06:10): five remote builds in 13 min timed out with no output and no host-side trace, so the
 hang could not be diagnosed; the builder's output came back only after it exited.
 """
 import base64
@@ -430,7 +430,7 @@ class Pool:
     # ---- finish ----
     def after(self, fid, code, timed_out, err_path, now=None, silent=False):
         """Free fid's slot. True when the host was unusable (exit OFFLINE, or `silent`: timed out with a zero-byte
-        stream, which with line forwarding means a dead host; the pilot project 2026-11-10 04:05-04:35, 14 of 22 desk builds, which the router had sent to plan fix as
+        stream, which with line forwarding means a dead host; the pilot project 2026-11-10 04:05-04:35, 14 of 22 remote builds, which the router had sent to plan fix as
         oversized): the host goes offline for offline_min, its slot is cleaned on the host, and drive requeues fid
         without counting an attempt."""
         k = self.slot_of(fid)
