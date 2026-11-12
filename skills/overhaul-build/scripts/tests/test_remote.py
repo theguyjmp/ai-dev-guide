@@ -56,7 +56,7 @@ git = '{host_git.as_posix()}'
 work = '{work.as_posix()}'
 python = ['{py}']
 ssh = ['{py}', '{(self.root_hint / "fake_ssh.py").as_posix()}']
-env = {{ APP_OCCT_DIR = "D:/dev/occt-7.9.1" }}
+env = {{ APP_NATIVE_DIR = "D:/dev/native-sdk-1.0" }}
 """
         repo = self.make_repo(functions=THREE, max_parallel=max_parallel, harness_extra=extra, **kw)
         subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(host_git)], check=True, capture_output=True)
