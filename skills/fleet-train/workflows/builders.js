@@ -4,6 +4,9 @@ export const meta = {
   phases: [{ title: 'Build', detail: 'worker loops: claim -> build -> submit, fresh agent per row' }],
 }
 const SLOTS = (args && args.slots) || 16
+// slot_list: explicit slot numbers (e.g. [20, 21, 22]) so a second run never reuses slots, worktrees or claims of a
+// run still going; default 0..slots-1
+const SLOT_LIST = (args && args.slot_list) || Array.from({ length: SLOTS }, (_, i) => i)
 const MAX_PER_WORKER = (args && args.max) || 40
 const H = (args && args.home) || (() => { throw new Error('pass args.home = the harness folder') })()
 const SCHEMA = { type: 'object', properties: {
@@ -19,7 +22,7 @@ const brief = (slot) => `You are a builder for the rebuild (Rust workspace). One
 5. Done = the row's acceptance tests pass: \`cargo test -q --test <stem> -- --exact <test_name>\` for each test in "tests" (tests under tests/acceptance/s*.rs may be slow in debug: add --release for those if a debug run takes over 3 min). Then \`cargo clippy -q -p <crate> --all-targets -- -D warnings\` for each crate you touched. Do NOT run the whole workspace test suite - the land train does that once per batch.
 6. Rules: never edit the status column of spec/FUNCTIONS.md; never edit or weaken acceptance tests of other rows; edit this row's own test only if it contradicts the row's spec text, and say why in the commit message. No new [[test]] entries for other rows. No sleeping or polling.
 6b. The claim JSON has "must_also_before_commit": follow it exactly. A second copy of anything an owner already has (core::math, core::param, core::refusal, spec/index/*) or any dup/shape/strict-clippy problem gets your branch rejected at land.
-7. Commit (git add -A && git commit -m "<row>: <what>"), then \`cd ${H} && py -3 harness.py submit --slot ${slot} --row <row>\` and return {status:"submitted", row}.
+7. Commit (git add -A && git commit -m "<row>: <what>"), run \`cd ${H} && py -3 harness.py self-review --slot ${slot}\` and fix every duplicate it lists until it prints an empty list (the land train rejects anything it lists), then \`cd ${H} && py -3 harness.py submit --slot ${slot} --row <row>\` and return {status:"submitted", row}.
 8. Budget: about 90 tool calls. If you cannot get it green by then, or the same step fails twice the same way, commit whatever compiles, run \`cd ${H} && py -3 harness.py release --slot ${slot} --row <row> --reason "<precise blocker: file, error, what is needed>"\`, and return {status:"released", row, note}.
 Keep tool output small: pipe cargo output through tail -30 or grep error.`
 
@@ -36,5 +39,5 @@ async function worker(slot) {
 }
 
 phase('Build')
-const res = await parallel(Array.from({ length: SLOTS }, (_, i) => () => worker(i)))
+const res = await parallel(SLOT_LIST.map((s) => () => worker(s)))
 return res

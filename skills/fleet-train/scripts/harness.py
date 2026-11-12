@@ -1,4 +1,4 @@
-"""the pilot project harness v2: claim / submit / release for builder agents, and a batch land train.
+"""fleet-train harness v2: claim / submit / release for builder agents, and a batch land train.
 
 No LLM in here. Builders are Claude Code Workflow agents; this file only hands out rows,
 keeps per-slot worktrees warm, and lands finished branches in batches (merge all, gate once,
@@ -220,68 +220,81 @@ def cmd_frontier(a):
     print(json.dumps({"frontier": len(f), "top": f[:20], "claimed": len(claims), "queued": len(queue), "status": c}))
 
 
+CLOUD_SLOT0 = int(os.environ.get("HARNESS_CLOUD_SLOT0", "1000"))  # cloud.py slots: expired by `cloud.py collect` (2 h after a cloud session claims), never by CLAIM_TTL
+
+
+def is_cloud(slot) -> bool:
+    return str(slot).isdigit() and int(slot) >= CLOUD_SLOT0
+
+
+def previous_branch(rid):
+    """An earlier attempt's branch still ahead of main (h/<row> or fn/<row>), or None."""
+    for cand in (f"h/{rid}", f"fn/{rid}"):
+        if git("rev-parse", "-q", "--verify", cand, check=False).returncode == 0:
+            ahead = git("rev-list", "--count", f"main..{cand}", check=False).stdout.strip()
+            if ahead and ahead != "0":
+                return {"branch": cand, "commits_ahead_of_main": int(ahead)}
+    return None
+
+
+def take_row(slot, rid, rows, claims, attempts) -> dict:
+    """Record slot's claim of rid (caller holds the state lock); return the claim fields every builder gets."""
+    r = rows[rid]
+    branch = f"h/{rid}-s{slot}"
+    claims[str(slot)] = {"row": rid, "ts": now(), "branch": branch}
+    save("claims.json", claims)
+    attempts[rid] = attempts.get(rid, 0) + 1
+    save("attempts.json", attempts)
+    event("claim", slot=slot, row=rid, attempt=attempts[rid])
+    return {"row": rid, "branch": branch, "module": r["module"], "entry": r["entry"], "deps": r["deps"],
+            "tests": r["tests"], "files": r["file_list"], "attempt": attempts[rid],
+            "previous_branch": previous_branch(rid),
+            "old_harness_reason": old_state().get(rid, {}).get("last_reason", "")[:600],
+            "recent_rejects": load("rejects.json", {}).get(rid, [])[-3:],
+            "must_also_before_commit": QUALITY_BRIEF}
+
+
 def cmd_claim(a):
     t0 = now()
     while True:
         with lock("state"):
             rows = main_spec()
             claims, queue, attempts = load("claims.json", {}), load("queue.json", []), load("attempts.json", {})
-            for k in [k for k, c in claims.items() if now() - c["ts"] > CLAIM_TTL]:
+            for k in [k for k, c in claims.items() if not is_cloud(k) and now() - c["ts"] > CLAIM_TTL]:
                 event("claim_expired", **claims.pop(k))
             claims.pop(str(a.slot), None)
             f = [] if (ST / "pause").exists() else frontier(rows, claims, queue, attempts)
             if f:
-                rid = f[0]
-                r = rows[rid]
-                old = old_state().get(rid, {})
-                branch = f"h/{rid}-s{a.slot}"
-                prev = None
-                for cand in (f"h/{rid}", f"fn/{rid}"):
-                    if git("rev-parse", "-q", "--verify", cand, check=False).returncode == 0:
-                        ahead = git("rev-list", "--count", f"main..{cand}", check=False).stdout.strip()
-                        if ahead and ahead != "0":
-                            prev = {"branch": cand, "commits_ahead_of_main": int(ahead)}
-                            break
-                p = slot_wt(a.slot)
-                claims[str(a.slot)] = {"row": rid, "ts": now(), "branch": branch}
-                save("claims.json", claims)
-                attempts[rid] = attempts.get(rid, 0) + 1
-                save("attempts.json", attempts)
-                hist = [e for e in load("rejects.json", {}).get(rid, [])][-3:]
-                event("claim", slot=a.slot, row=rid, attempt=attempts[rid])
+                info = take_row(a.slot, f[0], rows, claims, attempts)
                 break
         if now() - t0 > a.wait:
             print(json.dumps({"row": None, "reason": "frontier empty", "queued": len(load("queue.json", []))}))
             return
         time.sleep(20)
-    p = ensure_wt(a.slot, branch, "main")  # outside the lock: worktree checkout is slow
-    stack = [q for q in queue if q["row"] in r["deps"]]
-    for q in stack:  # stacked start: deps still waiting for the train are merged in first
+    p = ensure_wt(a.slot, info["branch"], "main")  # outside the lock: worktree checkout is slow
+    for q in [q for q in queue if q["row"] in info["deps"]]:  # stacked start: deps still waiting for the train
         if git("merge", "-q", "--no-edit", "-m", f"stack: {q['row']}", q["sha"], cwd=p, check=False).returncode != 0:
             git("merge", "--abort", cwd=p, check=False)
-    if True:
-        if True:
-                e = env_for(a.slot)
-                print(json.dumps({
-                    "row": rid, "worktree": str(p).replace("\\", "/"), "branch": branch,
-                    "env": e, "env_prefix": " ".join(f"{k}={v}" for k, v in e.items()).replace("\\", "/"),
-                    "module": r["module"], "entry": r["entry"], "deps": r["deps"], "tests": r["tests"],
-                    "files": r["file_list"], "attempt": attempts[rid],
-                    "previous_branch": prev, "old_harness_reason": old.get("last_reason", "")[:600],
-                    "recent_rejects": hist,
-                    "must_also_before_commit": QUALITY_BRIEF,
-                }, indent=1))
-                return
-        if now() - t0 > a.wait:
-            print(json.dumps({"row": None, "reason": "frontier empty", "queued": len(load("queue.json", []))}))
-            return
-        time.sleep(20)
+    e = env_for(a.slot)
+    print(json.dumps({**info, "worktree": str(p).replace("\\", "/"), "env": e,
+                      "env_prefix": " ".join(f"{k}={v}" for k, v in e.items()).replace("\\", "/")}, indent=1))
+
+
+def queue_sha(slot, row, sha, since) -> int:
+    """Queue sha as slot's submission of row and drop slot's claim (caller holds the state lock); the queue length."""
+    git("branch", "-f", f"h/{row}", sha)
+    queue = [q for q in load("queue.json", []) if q["row"] != row] + [{"row": row, "sha": sha, "ts": now(), "slot": slot}]
+    save("queue.json", queue)
+    claims = load("claims.json", {})
+    claims.pop(str(slot), None)
+    save("claims.json", claims)
+    event("submit", slot=slot, row=row, sha=sha, secs=round(now() - since))
+    return len(queue)
 
 
 def cmd_submit(a):
     with lock("state"):
-        claims = load("claims.json", {})
-        c = claims.get(str(a.slot))
+        c = load("claims.json", {}).get(str(a.slot))
         if not c or c["row"] != a.row:
             sys.exit(f"slot {a.slot} does not hold {a.row}")
         p = slot_wt(a.slot)
@@ -290,14 +303,7 @@ def cmd_submit(a):
         sha = git("rev-parse", "HEAD", cwd=p).stdout.strip()
         if git("rev-list", "--count", f"main..{sha}").stdout.strip() == "0":
             sys.exit("no commits on top of main")
-        git("branch", "-f", f"h/{a.row}", sha)
-        queue = load("queue.json", [])
-        queue = [q for q in queue if q["row"] != a.row] + [{"row": a.row, "sha": sha, "ts": now(), "slot": a.slot}]
-        save("queue.json", queue)
-        claims.pop(str(a.slot))
-        save("claims.json", claims)
-        event("submit", slot=a.slot, row=a.row, sha=sha, secs=round(now() - c["ts"]))
-        print(json.dumps({"ok": True, "queued": len(queue)}))
+        print(json.dumps({"ok": True, "queued": queue_sha(a.slot, a.row, sha, c["ts"])}))
 
 
 def cmd_release(a):
@@ -417,6 +423,35 @@ def run_tests(tests, timeout=1800):
     return [f for f in fails if f in want] or fails
 
 
+def fmt_tree(cwd):
+    """rustfmt every workspace target root in batches and commit. `cargo fmt --all` hits Windows' 32k command-line
+    limit on this workspace (hundreds of [[test]] roots) and failed silently, so main drifted unformatted (2026-11-12:
+    49 files)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("fmt_check", f"{QS}/fmt_check.py")
+    fc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fc)
+    for ed, files in fc.roots(Path(cwd)).items():
+        for i in range(0, len(files), 60):
+            subprocess.run(["rustfmt", "--edition", ed, *files[i:i + 60]], cwd=cwd, capture_output=True)
+    if git("status", "--porcelain", cwd=cwd, check=False).stdout.strip():
+        git("commit", "-qam", "train: rustfmt", cwd=cwd, check=False)
+
+
+def unit_flaky(failing: set, env) -> bool:
+    """True when every failing unit test passes when rerun alone (single thread): load flakiness, not the batch.
+    2026-11-12: a store snapshot timing test failed the whole gate under train load twice; it passes alone."""
+    if not failing or len(failing) > 5:
+        return False
+    for name in sorted(failing):
+        rr = sh(f"cargo test -q --workspace --lib --bins -- --exact {name} --test-threads=1", cwd=TRAIN, check=False,
+                env=env, timeout=900)
+        if rr.returncode != 0:
+            return False
+    event("gate_stage", stage="unit-flaky-passed-alone", failing=sorted(failing))
+    return True
+
+
 def main_unit_baseline() -> set:
     """Unit tests failing on main itself (cached per main sha)."""
     sha = git("rev-parse", "main").stdout.strip()
@@ -434,15 +469,18 @@ def main_unit_baseline() -> set:
     return set(cache["fails"])
 
 
-QS = str(Path.home() / ".claude/skills/overhaul-build/scripts")
+QS = os.environ.get("HARNESS_QS", str(Path.home() / ".claude/skills/overhaul-build/scripts"))
 QUALITY_CMDS = [f"py -3 {QS}/dup_blocks.py crates src", f"py -3 {QS}/dup_literals.py crates src",
                 f"py -3 {QS}/shape_check.py crates src", f"py -3 {QS}/check_cycles.py crates src"]
 CLIPPY_STRICT = ("cargo clippy -q --workspace --all-targets -- -D warnings -D clippy::too_many_lines "
                  "-D clippy::unwrap_used -D clippy::cognitive_complexity")
+FILE_LINES = int(os.environ.get("HARNESS_FILE_LINES", "500"))  # spec/STANDARDS.md S8 module-size cap
+TEST_FILE_LINES = int(os.environ.get("HARNESS_TEST_FILE_LINES", "600"))  # the same cap for test files
 QUALITY_BRIEF = ("The plan forbids second copies (spec/STANDARDS.md S1, S5, S6, S44): before writing ANY function, "
                  "private helpers included, grep spec/index/*.md and spec/ARCHITECTURE.md for an owner that already has it "
                  "(core owns refusals and error builders, geom owns maths; vectors, param parsing, not_found/malformed/"
                  "invalid builders must come from their owner, never a local copy) and extend the owner instead. "
+                 f"Keep every file you add or grow at most {FILE_LINES} lines (tests {TEST_FILE_LINES}; STANDARDS S8): split into modules. "
                  "Clean code is part of done. Before committing, from your worktree run each of: "
                  + " ; ".join(QUALITY_CMDS) + " ; and " + CLIPPY_STRICT.replace("--workspace", "-p <each crate you touched>")
                  + ". Fix every problem they report in files you changed (extract repeated blocks into one named fn, "
@@ -470,14 +508,50 @@ def owner_copies(cwd) -> set:
     return found
 
 
-def quality_problems(cwd) -> str:
-    """Output of every quality check that fails (empty = clean)."""
+
+
+def file_line_cap(rel: str) -> int:
+    """The S8 cap for repo path `rel`: test files (under a tests/ folder, or tests.rs / *_tests.rs) get TEST_FILE_LINES."""
+    parts = rel.split("/")
+    test = "tests" in parts[:-1] or parts[-1] == "tests.rs" or parts[-1].endswith("_tests.rs")
+    return TEST_FILE_LINES if test else FILE_LINES
+
+
+def oversized_files(cwd, base: str) -> list:
+    """S8 module-size gate: each .rs file under crates/ src/ tests/ that the tree at `cwd` adds, or grows past its
+    cap, relative to `base`. A file already over the cap at `base` is grandfathered until it is split under it; from
+    then on it is gated like any other. Renames count as adds (--no-renames), so moving a big file needs a split."""
+    r = git("diff", "--name-only", "--no-renames", "--diff-filter=AM", base, "--", "crates", "src", "tests",
+            cwd=cwd, check=False)
+    if r.returncode != 0:
+        return [f"size gate: git diff against {base} failed: {(r.stderr or '').strip()[-300:]}"]
+    out = []
+    for rel in r.stdout.split():
+        f = Path(cwd) / rel
+        if not rel.endswith(".rs") or not f.exists():
+            continue
+        cap, now_n = file_line_cap(rel), len(f.read_text(encoding="utf-8", errors="replace").splitlines())
+        if now_n <= cap:
+            continue
+        old = git("show", f"{base}:{rel}", cwd=cwd, check=False)
+        before = len(old.stdout.splitlines()) if old.returncode == 0 else 0
+        if before <= cap:
+            out.append(f"{rel}:1: {now_n} lines (was {before}); STANDARDS S8 caps a file at {cap}: split it into modules")
+    return out
+
+
+def quality_problems(cwd, base: str = "main") -> str:
+    """Output of every quality check that fails (empty = clean). `base` is what the size gate measures growth from."""
     out = []
     allow = set((ST / "owner-allowlist.txt").read_text(encoding="utf-8").split()) if (ST / "owner-allowlist.txt").exists() else set()
     new_copies = sorted(owner_copies(cwd) - allow)
     if new_copies:
         out.append("second copy of a capability core owns (STANDARDS S1/S6; use app_core::math/param/refusal): "
                    + " ".join(c.split("::")[0] + ":1: " + c.split("::")[1] for c in new_copies))
+    big = oversized_files(cwd, base)
+    if big:
+        out.append("file over the S8 size cap (new or newly over; existing big files are grandfathered until split): "
+                   + chr(10) + chr(10).join(big))
     env = run_env(TRAIN_ENV)
     for c in QUALITY_CMDS + [CLIPPY_STRICT]:
         r = sh(c, cwd=cwd, check=False, env=env, timeout=1800)
@@ -488,7 +562,10 @@ def quality_problems(cwd) -> str:
 
 def cmd_quality_check(a):
     """Used by <repo>/.git/hooks/pre-push: refuse to publish a tree with quality problems."""
-    q = quality_problems(Path(a.dir) if a.dir else REPO)
+    d = Path(a.dir) if a.dir else REPO
+    base = a.base or ("origin/main" if git("rev-parse", "-q", "--verify", "origin/main", cwd=d, check=False).returncode == 0
+                      else "main")
+    q = quality_problems(d, base)
     if q:
         print(q[-3000:])
         sys.exit(1)
@@ -499,6 +576,14 @@ def cmd_clean_start(a):
     p = ensure_wt(a.slot, f"clean/{a.name}-s{a.slot}", "main")
     e = env_for(a.slot)
     print(json.dumps({"worktree": str(p).replace(chr(92), "/"), "env_prefix": " ".join(f"{k}={v}" for k, v in e.items()).replace(chr(92), "/")}))
+
+
+def cmd_self_review(a):
+    """Run the land train's duplicate-capability reviewer on a slot's branch (functions it adds vs main)."""
+    wt = slot_wt(a.slot)
+    base = git("merge-base", "main", "HEAD", cwd=wt).stdout.strip() or "main"
+    dups = batch_review([], cwd=wt, base=base)
+    print(json.dumps({"duplicates": dups}, indent=1))
 
 
 def cmd_clean_submit(a):
@@ -517,17 +602,15 @@ def cmd_clean_submit(a):
 def gate(new_rows, rows, quick=False):
     """Return (ok, failed_tests, log)."""
     env = run_env(TRAIN_ENV)
-    r = sh("cargo fmt --all -- --check", cwd=TRAIN, check=False, env=env)
-    if r.returncode != 0:
-        sh("cargo fmt --all", cwd=TRAIN, check=False, env=env)  # auto-fix formatting, never fail on it
-        git("commit", "-qam", "train: cargo fmt", cwd=TRAIN, check=False)
+    fmt_tree(TRAIN)  # auto-fix formatting, never fail on it
     if quick:  # retry after ejecting rows whose own tests failed: lint passed with them in; unit is re-run (cheap, and
         # removing a branch can break another that used it)
         r = sh("cargo test -q --workspace --lib --bins --no-fail-fast", cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=1800)
         if r.returncode != 0:
             o = r.stdout + r.stderr
             failing = set(re.findall(r"^(\S+) --- FAILED$", o, re.M))
-            if not (failing and failing <= main_unit_baseline()):
+            base = main_unit_baseline()
+            if not (failing and (failing <= base or unit_flaky(failing - base, run_env(TRAIN_ENV)))):
                 return False, ["unit"], o[-6000:]
         q = quality_problems(TRAIN)
         if q:
@@ -537,11 +620,12 @@ def gate(new_rows, rows, quick=False):
         fails = run_tests(sorted(set(tests)))
         event("gate_stage", stage="acceptance-quick", secs=round(now() - t0), fails=len(fails))
         return (not fails), fails, ""
-    t0 = now()
-    r = sh("cargo clippy -q --workspace --all-targets -- -D warnings", cwd=TRAIN, check=False, env=env, timeout=1800)
-    event("gate_stage", stage="clippy", secs=round(now() - t0), rc=r.returncode)
-    if r.returncode != 0:
-        return False, ["clippy"], (r.stdout + r.stderr)[-6000:]
+    if not quality_on():  # the quality stage's strict clippy is a superset; running both cost ~10 min a train (2026-11-12)
+        t0 = now()
+        r = sh("cargo clippy -q --workspace --all-targets -- -D warnings", cwd=TRAIN, check=False, env=env, timeout=1800)
+        event("gate_stage", stage="clippy", secs=round(now() - t0), rc=r.returncode)
+        if r.returncode != 0:
+            return False, ["clippy"], (r.stdout + r.stderr)[-6000:]
     t0 = now()
     r = sh("cargo test -q --workspace --lib --bins --no-fail-fast", cwd=TRAIN, check=False, env=env, timeout=1800)
     event("gate_stage", stage="unit", secs=round(now() - t0), rc=r.returncode)
@@ -551,6 +635,8 @@ def gate(new_rows, rows, quick=False):
         base = main_unit_baseline()
         if failing and failing <= base:  # main is already red on exactly these: not this batch's fault
             event("gate_stage", stage="unit-baseline-red", failing=sorted(failing)[:5])
+            r = None
+        elif failing and unit_flaky(failing - base, env):
             r = None
     if r is not None and r.returncode != 0:
         crates = sorted(set(re.findall(r"-p (" + re.escape(CRATE) + r"-[\w-]+)", out)))
@@ -587,7 +673,45 @@ def build_train(batch, rows):
             conflicted.append(q)
         else:
             merged.append(q)
+    # 2026-11-11: 16 of 18 rows in one train were rejected on one hot file; each reject cost a
+    # whole builder pass plus another train. Resolve a few here instead; the gate still tests the result.
+    for q in list(conflicted[:RESOLVE_MAX]):
+        if resolve_conflict(q):
+            conflicted.remove(q)
+            merged.append(q)
     return merged, conflicted
+
+
+RESOLVE_MAX = int(os.environ.get("HARNESS_RESOLVE_MAX", "12"))  # conflicted rows per train given to the resolver
+RESOLVE_PROMPT = """You are resolving a git merge conflict in the current folder (the land train's tree; main is already proven).
+Row {row}'s branch is being merged onto main. Conflicted files: {files}
+1. Open only the conflicted hunks (grep -n '<<<<<<<\\|>>>>>>>' then read those line ranges). Keep BOTH sides: main's code must
+   keep all its behaviour; apply the row's additions on top of it. Where both sides changed the same function, combine them.
+2. Remove every conflict marker. Touch other files only if needed to compile.
+3. Run `cargo check -q --workspace --tests 2>&1 | grep -E '^error' -A5 | head -40` and fix errors until it is clean.
+4. Do NOT commit, abort the merge, or run tests. Reply DONE, or FAIL with one line why. Keep tool output small."""
+
+
+def resolve_conflict(q):
+    """Merge q again, let a short Sonnet pass resolve the conflict, accept it only if no markers remain and cargo check passes."""
+    t0 = now()
+    git("merge", "-q", "--no-ff", "--no-edit", "-m", f"train: land {q['row']} (conflict resolved)", q["sha"], cwd=TRAIN, check=False)
+    files = git("diff", "--name-only", "--diff-filter=U", cwd=TRAIN, check=False).stdout.split()
+    ok = bool(files) and len(files) <= 4 and all(f.endswith(".rs") for f in files)
+    if ok:
+        sh([CLAUDE_BIN, "-p", "--model", "sonnet", "--max-turns", "30", "--dangerously-skip-permissions"], cwd=TRAIN,
+           check=False, env=run_env(TRAIN_ENV), timeout=600, stdin=RESOLVE_PROMPT.format(row=q["row"], files=" ".join(files)))
+        marked = git("grep", "-l", "-E", "^(<<<<<<<|>>>>>>>) ", "--", *files, cwd=TRAIN, check=False).stdout.strip()
+        ok = not marked and sh("cargo check -q --workspace --tests", cwd=TRAIN, check=False, env=run_env(TRAIN_ENV),
+                               timeout=900).returncode == 0
+    if ok:
+        git("add", "-A", cwd=TRAIN, check=False)
+        ok = git("commit", "-q", "--no-edit", cwd=TRAIN, check=False).returncode == 0
+    if not ok:
+        git("merge", "--abort", cwd=TRAIN, check=False)
+        git("reset", "-q", "--hard", "HEAD", cwd=TRAIN, check=False)
+    event("resolve", row=q["row"], ok=ok, files=files[:4], secs=round(now() - t0))
+    return ok
 
 
 def finish_spec(ids):
@@ -630,9 +754,11 @@ CLAUDE_BIN = (shutil.which("claude.exe")
               or str(Path.home() / "AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe"))
 
 
-def batch_review(merged) -> list:
-    """Headless reviewer over the functions this batch adds. Fail-open (logged) so a reviewer outage never stalls lands."""
-    diff = git("diff", "-U0", "main", "HEAD", "--", "crates", "src", cwd=TRAIN, check=False).stdout
+def batch_review(merged, cwd=None, base="main") -> list:
+    """Headless reviewer over the functions this batch adds. Fail-open (logged) so a reviewer outage never stalls lands.
+    Also run by builders before submit (`self-review --slot N`), so a duplicate is caught before a 20-min train."""
+    cwd = cwd or TRAIN
+    diff = git("diff", "-U0", base, "HEAD", "--", "crates", "src", cwd=cwd, check=False).stdout
     added, cur = [], ""
     for line in diff.splitlines():
         if line.startswith("+++ b/"):
@@ -644,7 +770,7 @@ def batch_review(merged) -> list:
     t0 = now()
     try:
         r = sh([CLAUDE_BIN, "-p", "--output-format", "json", "--model", "sonnet", "--max-turns", "60",
-                "--dangerously-skip-permissions"], cwd=TRAIN, check=False, timeout=1500,
+                "--dangerously-skip-permissions"], cwd=cwd, check=False, timeout=1500,
                stdin=REVIEW_PROMPT.format(added=chr(10).join(added[:300])))
         res = json.loads(r.stdout).get("result", "")
         m = re.search(r"\{.*\}", res, re.S)
@@ -750,7 +876,8 @@ def cmd_train(a):
             time.sleep(30)
 
 
-MIN_BATCH = 8
+MIN_BATCH = int(os.environ.get("HARNESS_MIN_BATCH", "8"))
+BATCH_WAIT_BUSY = int(os.environ.get("HARNESS_BATCH_WAIT_BUSY", str(25 * 60)))  # max wait for MIN_BATCH while claims are in flight
 BATCH_WAIT = 600
 
 
@@ -771,7 +898,11 @@ def train_once():
             if not queue:
                 return False
         # a gate run costs ~15-20 min whatever the size: wait for a real batch (8 rows) or 10 min since the oldest
-        if not queue or (len(queue) < MIN_BATCH and now() - min(q["ts"] for q in queue) < BATCH_WAIT):
+        # 2026-11-12: a 1-row train cost a full 22-min gate while 10 rows queued behind it. While builders still hold
+        # claims, wait up to BATCH_WAIT_BUSY for a fuller batch; with no claims in flight nothing more is coming: go now.
+        in_flight = len(load("claims.json", {}))
+        wait = BATCH_WAIT_BUSY if in_flight else 0
+        if not queue or (len(queue) < MIN_BATCH and now() - min(q["ts"] for q in queue) < wait):
             return False
         batch = sorted(queue, key=lambda q: q["ts"])[:80]
         for q in batch:
@@ -787,12 +918,28 @@ def train_once():
             done = {q["sha"] for q in batch}
             save("queue.json", [q for q in queue if q["sha"] not in done])
         event("train_end", landed=[q["row"] for q in landed], tried=len(batch), secs=round(now() - t0))
+        for gen in ("dash.py",):  # dashboards are regenerated by the train, never by memory
+            if (HOME / gen).exists():
+                sh(["py", "-3", str(HOME / gen)], cwd=HOME, check=False, timeout=900)
         print(f"{iso()} train: landed {len(landed)}/{len(batch)} in {round(now() - t0)}s", flush=True)
         return True
 
 
+def read_events() -> list:
+    """events.jsonl, skipping blank or half-written lines (2026-11-12: one blank line took status, the card and the
+    dashboard down)."""
+    out = []
+    if (ST / "events.jsonl").exists():
+        for line in open(ST / "events.jsonl", encoding="utf-8"):
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+    return out
+
+
 def cmd_status(a):
-    ev = [json.loads(l) for l in open(ST / "events.jsonl", encoding="utf-8")] if (ST / "events.jsonl").exists() else []
+    ev = read_events()
     t = now()
     landed = lambda h: len({r for e in ev if e["event"] == "land" and t - e["ts"] < h * 3600 for r in e["rows"]})
     rows = main_spec()
@@ -811,13 +958,14 @@ def main():
     p = sp.add_parser("release"); p.add_argument("--slot", type=int, required=True); p.add_argument("--row", required=True); p.add_argument("--reason", required=True)
     p = sp.add_parser("train"); p.add_argument("--loop", action="store_true")
     sp.add_parser("status")
-    p = sp.add_parser("quality-check"); p.add_argument("--dir", default="")
+    p = sp.add_parser("quality-check"); p.add_argument("--dir", default=""); p.add_argument("--base", default="")
     p = sp.add_parser("clean-start"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
+    p = sp.add_parser("self-review"); p.add_argument("--slot", type=int, required=True)
     p = sp.add_parser("clean-submit"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
     a = ap.parse_args()
     {"frontier": cmd_frontier, "claim": cmd_claim, "submit": cmd_submit, "release": cmd_release,
      "train": cmd_train, "status": cmd_status,
-     "clean-start": cmd_clean_start, "quality-check": cmd_quality_check, "clean-submit": cmd_clean_submit}[a.cmd](a)
+     "clean-start": cmd_clean_start, "self-review": cmd_self_review, "quality-check": cmd_quality_check, "clean-submit": cmd_clean_submit}[a.cmd](a)
 
 
 if __name__ == "__main__":

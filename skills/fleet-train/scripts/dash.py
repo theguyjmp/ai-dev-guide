@@ -43,6 +43,7 @@ l3 = st.get('landed_3h', sum(nrows(e) for e in lands if e['ts'] > now - 10800))
 r1 = st.get('rejects_1h', sum(1 for e in rej if e['ts'] > now - 3600))
 cum = BASE + len({r for e in lands for r in e.get('rows', [])})
 proven = st.get('proven', cum)
+TOTAL = st.get('total', TOTAL)  # planned rows in FUNCTIONS.md (grows as phases are planned)
 busy = st.get('claimed', len(claims))
 ql = st.get('queued', len(queue))
 ok = l1 >= BAR
