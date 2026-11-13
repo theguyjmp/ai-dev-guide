@@ -71,6 +71,30 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
 - events.jsonl is read tolerantly (`read_events` skips blank or half-written lines): one bad line once took status
   and the dashboard down.
 - Freeze a working harness: one tested change at a time, keep a dated backup, revert if the land rate drops.
+- Batch pick by trial merges (git merge-tree): 39 of 106 queued rows vs 23 by file-disjoint; still no resolves.
+- Land first: builders starve when the queue backs up (their deps are queued, not landed); the heartbeat scales
+  builders up only once the queue drains (fleet_beat FIRE cap 8 -> 30 under 20 queued; SUPPLY alarms when fewer than
+  8 rows are open to builders while 40+ wait in the queue).
+
+## One harness for every project
+- Every project runs `scripts/harness.py` from this skill (or a copy synced from it), never a fork. A fix lands here
+  first, then each project's copy is synced. A forked harness misses every train fix (disjoint batches, blame by file,
+  unowned-test blame, the health-check heartbeat): that happened on a second project within two days.
+- Stack-specific steps (format, lint, strict lint, unit, unit-failure parse, acceptance build and run, failure parse,
+  conflict check, function regexes for the reviewer, file-path regexes for blame, target-dir env) all come from one
+  profile in `STACKS` at the top of harness.py. Pick it with `HARNESS_STACK=rust` (default) or `node`, or with
+  `stack = "node"` in `<HARNESS_HOME>/harness.toml`; a `[profile]` table there overrides any key, for example
+  `unit = "npm run test:unit --silent"`, `qa = ["dup_literals.py", "check_cycles.py"]`, `src_dirs = ["lib"]`.
+- Rust: cargo test/clippy/rustfmt, crates/ layout, CARGO_TARGET_DIR per slot. Acceptance ids are
+  `tests/acceptance/<stem>.rs::<test_fn>`.
+- Node: `node --test --test-reporter=tap` (or `npm test` when package.json has a test script), prettier and eslint
+  only when the project has them and only on the files a batch changed, NODE_PATH to the repo's node_modules.
+  Acceptance ids are `<test file>::<test name>` (`::*` runs the whole file); each file runs once, failures re-run
+  alone. The quality scripts are off by default (`qa = []`): turn them on once main passes them.
+- Row <-> test mapping is the same on every stack: the spec row's acceptance column lists its test ids (`;`-separated),
+  its files column the files it owns (used for blame). Builder briefs (workflows/builders.js, cloud/BUILDER.md) quote
+  cargo commands: on another stack, change only their "Done" and lint lines to the profile's commands.
+- The heartbeat is `scripts/fleet_beat.py` on every project.
 
 ## Cloud fleet (builders in the cloud, only the train local)
 - Never run local builders on the gate machine: 16 local builders starved the gate (clippy 13 min, quality 20 min,
@@ -93,6 +117,10 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
   grow the frontier, and size builders to min(frontier, what the train lands).
 - Setup: copy `cloud/` to `<repo>/tools/cloud/`, fill the "extra system deps" hook in setup.sh, probe one session
   (setup prints SETUP OK), then step 20 -> 50 -> 100 sessions while rejects stay under 30% and the train keeps up.
+- Private mirror (not in cloud.py): when cloud sessions cannot reach the real repo, a project can hand rows out on a
+  private mirror whose main carries the real main's tree, and land each cloud branch on the real repo as a patch
+  (`git diff base..cloud/<row>` applied with `git apply --cached --3way`, then queued like any branch). Keep that as
+  a thin wrapper that only moves branches between the mirror and the real repo; the train itself stays this harness.
 
 ## Manager loop
 - Laptop scripts cannot start cloud sessions; only the manager chat can (a routine run). So the manager runs an hourly
@@ -110,10 +138,10 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
 - NEVER attach a GitHub push webhook to a builder routine: it has no ref filter, builders push, and every push starts
   another builder (a runaway loop). If one is attached by mistake, disable that routine at once.
 - Rebaser routine (`cloud/REBASER.md`): cloud agents rebase queued rows that stopped merging onto main. The train also
-  picks a batch of rows with disjoint changed files (`disjoint()`), so row-vs-row conflicts never cost gate time.
+  picks a batch of rows that trial-merge cleanly together (`disjoint()`), so row-vs-row conflicts never cost gate time.
 
 ## Run
-1. Set HARNESS_REPO, HARNESS_HOME (state dir parent), HARNESS_WT (fast drive) or edit the defaults at the top.
+1. Set HARNESS_REPO, HARNESS_HOME (state dir parent), HARNESS_WT (fast drive), HARNESS_STACK (rust or node).
 2. `py -3 harness.py frontier` must show rows. Free disk first (keep 80 GB+; slot targets about 5-9 GB each, the
    train's release target about 30 GB).
 3. Background: `py -3 -u harness.py train --loop >> state/train.log 2>&1`.

@@ -10,3 +10,7 @@
 - 2026-11-12: size gate `oversized_files` (HARNESS_FILE_LINES / HARNESS_TEST_FILE_LINES): files added or grown past the cap are rejected, existing ones grandfathered until split.
 - 2026-11-12: cloud fleet: `cloud.py` (assign / collect / status through the `harness-cloud` branch, atomic `cloud/claim-<row>` refs, `cloud-base` mirror of the train's main) and the `cloud/` kit templates; local builders off the gate machine.
 - 2026-11-12: dash.py takes the planned-row total from `harness.py status`.
+- 2026-11-13: one harness for every stack: every stack-specific command and pattern sits in one profile (`STACKS`, `HARNESS_STACK=rust|node`, `harness.toml` overrides); rust behaviour unchanged (checked call for call against the previous file); node runs `node --test` per test file with TAP failure parsing.
+- 2026-11-13: fix: gate()'s quick-path return had been dedented out of `if quick:`, so every full gate crashed on `fails`.
+- 2026-11-13: `disjoint()` picks a batch by trial merges (git merge-tree), file-disjoint as fallback: 39 of 106 queued rows instead of 23.
+- 2026-11-13: fleet_beat: FIRE cap 8 while 20+ rows are queued, 30 once it drains; SUPPLY alarm when builders starve behind the queue.

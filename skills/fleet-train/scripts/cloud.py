@@ -35,7 +35,7 @@ KIT = os.environ.get("HARNESS_CLOUD_KIT", "tools/cloud")  # the builder kit insi
 BASE = "cloud-base"  # origin branch every session starts from (refreshed from local main by collect)
 CLOUD_TTL = int(os.environ.get("HARNESS_CLOUD_TTL", str(2 * 3600)))  # a session that claimed a row and pushed nothing for this long is released
 STATE = "cloud.json"
-QA = os.environ.get("HARNESS_CLOUD_QA", "dup_blocks.py,dup_literals.py,shape_check.py,check_cycles.py,rust_src.py").split(",")  # the train's checks
+QA = [f for f in os.environ.get("HARNESS_CLOUD_QA", ",".join(h.P["cloud_qa"])).split(",") if f]  # the train's checks (stack profile)
 QA_DIR = "/tmp/harness-qa"  # where the kit's claim.sh puts them in a session
 
 

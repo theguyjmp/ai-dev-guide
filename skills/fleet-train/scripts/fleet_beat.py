@@ -45,6 +45,12 @@ for e in ev:
 loopers = [r for r, n in count.items() if n >= 4 and r in {q["row"] for q in queue}]
 if loopers:
     alarms.append(f"REWORK rows rejected 4+ times still queued: {loopers[:5]} (needs a ruling, not another pass)")
+# 2026-11-13: builders ran 2 min and quit with NO ROW for hours: 4 assignable rows, the rest waiting on 106 queued
+# rows the stalled train had not landed. Supply = assigned + claimed; low supply with a big queue = land faster.
+supply = (cs.get("assigned", 0) or 0) + (cs.get("claimed", 0) or 0)
+if supply < 8 and len(queue) > 40:
+    alarms.append(f"SUPPLY only {supply} rows for builders while {len(queue)} wait in the train queue: builders starve "
+                  f"until the train lands (fix any gate red first; check batch time)")
 stale = [c["row"] for c in h.load("claims.json", {}).values() if now - c.get("ts", now) > 3 * 3600]
 if stale:
     alarms.append(f"STALE-CLAIMS {stale[:6]} held over 3h: release them")
@@ -61,7 +67,9 @@ if alarms and ping.exists() and project:
     subprocess.run([sys.executable, str(ping), "alert", project, "HEALTH: " + "; ".join(a.split(" (")[0] for a in alarms)],
                    capture_output=True)
 waiting = cs.get("waiting_for_a_session", 0)
-fire = min(waiting, 8)  # one run = one session; cap a heartbeat's fires
+# one run = one session. Land first: with 20+ rows queued, builders only starve (their deps are queued, not landed),
+# so cap a beat's fires at 8; once the queue drains, scale up to build every planned row.
+fire = min(waiting, 8 if len(queue) >= 20 else 30)
 print(f"cloud claimed {cs.get('claimed')} waiting {waiting} | landed 1h {landed1} | train procs {alive or 0}, "
       f"last event {round((now - last) / 60)} min ago | plan branches {plans} | FIRE {fire}"
       + (" | ALARMS: " + " || ".join(alarms) + " -> fix each this beat" if alarms else " | HEALTH OK"))

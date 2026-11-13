@@ -10,6 +10,9 @@ bisect on red).
   py -3 harness.py release --slot N --row R --reason "..."
   py -3 harness.py train [--loop]      # land queued branches
   py -3 harness.py status              # one-line rate
+
+One harness for every stack: HARNESS_STACK=rust (default) or node, or `stack = "node"` in <HARNESS_HOME>/harness.toml,
+whose [profile] table overrides any command or pattern in STACKS below.
 """
 from __future__ import annotations
 
@@ -204,9 +207,19 @@ def ensure_wt(slot: int, branch: str, base: str):
     return p
 
 
+def stack_env(tmpl: dict, **kw) -> dict:
+    """Resolve a profile env dict: "{targets}/x" -> TARGETS / x, "{repo}/x" -> REPO / x ({slot} etc. filled in)."""
+    out = {}
+    for k, v in tmpl.items():
+        for tok, root in (("{targets}/", TARGETS), ("{repo}/", REPO.resolve())):
+            if v.startswith(tok):
+                v = str(root / v[len(tok):].format(**kw))
+        out[k] = v
+    return out
+
+
 def env_for(slot) -> dict:
-    return {"CARGO_TARGET_DIR": str(TARGETS / f"slot-{slot}"),
-            "CARGO_INCREMENTAL": "1"}
+    return stack_env(P["slot_env"], slot=slot)
 
 
 # ---------------------------------------------------------------- commands
@@ -318,12 +331,138 @@ def cmd_release(a):
         print(json.dumps({"ok": True}))
 
 
+# ---------------------------------------------------------------- stack profile
+# Every stack-specific command and pattern is here, nowhere else. HARNESS_STACK (else `stack` in <HARNESS_HOME>/harness.toml,
+# else rust) picks the profile; a [profile] table in harness.toml overrides any key. Command strings may use {QS} (quality
+# scripts), {files} (the changed files, one run) or {file} (one run per changed file). "" turns a step off.
+QS = os.environ.get("HARNESS_QS", str(Path.home() / ".claude/skills/overhaul-build/scripts"))
+JS_EXTS = [".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"]
+STACKS = {
+    "rust": {
+        "src_exts": [".rs"],
+        "src_dirs": ["crates", "src"],  # product code: review diff, quality scripts, grep hint
+        "size_dirs": ["crates", "src", "tests"],  # S8 size gate
+        "test_file_re": r"(^|/)tests/|(^|/)tests\.rs$|_tests\.rs$",  # gets the test-file size cap
+        "slot_env": {"CARGO_TARGET_DIR": "{targets}/slot-{slot}", "CARGO_INCREMENTAL": "1"},
+        "train_env": {"CARGO_TARGET_DIR": "{targets}/land-0", "CARGO_PROFILE_RELEASE_INCREMENTAL": "true",
+                      "PROPTEST_DISABLE_FAILURE_PERSISTENCE": "1"},
+        "fmt": "rustfmt",  # batched rustfmt over every workspace target root (fmt_tree)
+        "unit": "cargo test -q --workspace --lib --bins --no-fail-fast",
+        "unit_one": "cargo test -q --workspace --lib --bins -- --exact {name} --test-threads=1",
+        "name_escape": False,  # unit_one gets the raw test name
+        "unit_fail_re": [r"^(\S+) --- FAILED$", r"^test (\S+) \.\.\. FAILED$"],
+        "lint": "cargo clippy -q --workspace --all-targets -- -D warnings",
+        "lint_strict": ("cargo clippy -q --workspace --all-targets -- -D warnings -D clippy::too_many_lines "
+                        "-D clippy::unwrap_used -D clippy::cognitive_complexity"),
+        "lint_strict_brief": ("cargo clippy -q -p <each crate you touched> --all-targets -- -D warnings "
+                              "-D clippy::too_many_lines -D clippy::unwrap_used -D clippy::cognitive_complexity"),
+        "qa": ["dup_blocks.py", "dup_literals.py", "shape_check.py", "check_cycles.py"],  # in QS, run over src_dirs
+        "cloud_qa": ["dup_blocks.py", "dup_literals.py", "shape_check.py", "check_cycles.py", "rust_src.py"],
+        "accept": "cargo",  # build the test binaries once, run each (run_tests_cargo)
+        "check": "cargo check -q --workspace --tests",
+        "check_exts": [".rs"],
+        "check_hint": "cargo check -q --workspace --tests 2>&1 | grep -E '^error' -A5 | head -40",
+        "fn_added_re": r"^\+\s*(pub(\([a-z]+\))?\s+)?fn\s+\w+",
+        "fn_def_re": r"\bfn\s+{name}\b",
+        "review_skip_re": r"/tests/",
+        "path_re": r"((?:crates|src|tests)[\\/][\w\\/.-]+\.rs)",  # repo files a failure log names
+        "quoted_path_re": r"[\"'`]((?:crates|src|tests)/[\w/.-]+\.rs)[\"'`]",  # repo files a test reads
+        "strip_root": False,
+        "crate_blame": True,  # unit failures name `-p <CRATE>-x` -> crates/x/
+        "owner_fns": True,  # flag local copies of fns core owns (owner_copies)
+        "lang": "Rust",
+        "owners": "app_core::math, app_core::param, app_core::refusal (+ core::invalid), and the owners in",
+        "owner_note": ("(core owns refusals and error builders, geom owns maths; vectors, param parsing, not_found/malformed/"
+                       "invalid builders must come from their owner, never a local copy)"),
+    },
+    "node": {
+        "src_exts": JS_EXTS,
+        "src_dirs": ["."],
+        "size_dirs": [],
+        "test_file_re": r"(^|/)(tests?|__tests__)/|[._-](test|spec)\.[mc]?[jt]sx?$",
+        "slot_env": {"NODE_PATH": "{repo}/node_modules"},  # worktrees have no node_modules (CommonJS only; ESM ignores it)
+        "train_env": {"NODE_PATH": "{repo}/node_modules"},
+        "fmt": "",  # prettier on the files the train changed, when the project has prettier (load_profile)
+        "unit": "node --test --test-reporter=tap",
+        "unit_one": "node --test --test-reporter=tap --test-name-pattern=\"^{name}$\"",
+        "name_escape": True,  # unit_one gets re.escape(name)
+        "unit_fail_re": [r"^\s*not ok \d+ - (.+?)(?: # .*)?$", r"^\s*[✖✕×] (.+?)(?: \([\d.]+ ?m?s\))?$"],
+        "lint": "",
+        "lint_strict": "",  # eslint on {files} when the project has eslint (load_profile)
+        "lint_strict_brief": "",
+        "qa": [],  # dup_literals.py / check_cycles.py read JS: turn them on in harness.toml once main passes them
+        "cloud_qa": [],
+        "accept": "node --test --test-reporter=tap {names} {file}",  # one run per test file
+        "accept_name": "--test-name-pattern=^{name}$",  # `file::*` runs the whole file
+        "accept_fail_re": r"^\s*not ok \d+ - (.+?)(?: # .*)?$",
+        "check": "node --check {file}",
+        "check_exts": [".js", ".mjs", ".cjs"],
+        "check_hint": "node --check <each conflicted .js/.mjs file>",
+        "fn_added_re": (r"^\+\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?\s+\w+|"
+                        r"(?:const|let)\s+\w+\s*=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*=>)"),
+        "fn_def_re": r"(?:\bfunction\*?\s+{name}\b|\b(?:const|let|var)\s+{name}\s*=)",
+        "review_skip_re": r"(^|/)(tests?|__tests__)/|[._-](test|spec)\.[mc]?[jt]sx?$",
+        "path_re": r"((?:[\w.-]+[\\/])+[\w.-]+\.(?:[mc]?js|jsx|[mc]?ts|tsx))",
+        "quoted_path_re": r"[\"'`]((?:\.{1,2}/)*[\w./-]+\.(?:[mc]?js|jsx|[mc]?ts|tsx|json))[\"'`]",
+        "strip_root": True,  # logs carry absolute paths: drop the train root so the names are repo-relative
+        "crate_blame": False,
+        "owner_fns": False,
+        "lang": "JavaScript/TypeScript",
+        "owners": "the owners in",
+        "owner_note": "(the owners are listed in spec/ARCHITECTURE.md; never a local copy)",
+    },
+}
+
+
+def load_profile() -> tuple:
+    cfg = {}
+    if (HOME / "harness.toml").exists():
+        import tomllib
+        cfg = tomllib.loads((HOME / "harness.toml").read_text(encoding="utf-8"))
+    name = os.environ.get("HARNESS_STACK") or cfg.get("stack") or "rust"
+    if name not in STACKS:
+        sys.exit(f"HARNESS_STACK={name}: known stacks are {', '.join(STACKS)}")
+    p = dict(STACKS[name])
+    if name == "node":  # the project's own tools, when it has them
+        pkg = json.loads((REPO / "package.json").read_text(encoding="utf-8")) if (REPO / "package.json").exists() else {}
+        dev = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+        if "test" in pkg.get("scripts", {}):
+            p.update(unit="npm test --silent", unit_one="")
+        if "prettier" in dev:
+            p["fmt"] = "npx --no-install prettier --write {files}"
+        if "eslint" in dev:
+            p["lint_strict"] = "npx --no-install eslint --max-warnings 0 {files}"
+            p["lint_strict_brief"] = "npx eslint --max-warnings 0 <the files you changed>"
+    p.update(cfg.get("profile", {}))
+    return name, p
+
+
+STACK, P = load_profile()
+
+
+def changed_files(cwd, base: str, dirs=None, exts=None) -> list:
+    """Repo paths added or modified in the tree at `cwd` against `base`, under `dirs`, with one of `exts`."""
+    r = git("diff", "--name-only", "--no-renames", "--diff-filter=AM", base, "--", *(dirs or []), cwd=cwd, check=False)
+    exts = tuple(exts or P["src_exts"])
+    return [f for f in r.stdout.split() if f.endswith(exts) and (Path(cwd) / f).exists()]
+
+
+def expand(cmd: str, files: list) -> list:
+    """The command(s) to run for a profile string: {QS} filled, {files} once over all, {file} once per file; [] = skip."""
+    cmd = cmd.replace("{QS}", QS)
+    if "{file}" in cmd:
+        return [cmd.replace("{file}", f'"{f}"') for f in files]
+    if "{files}" in cmd:
+        return [cmd.replace("{files}", " ".join(f'"{f}"' for f in files[i:i + 60])) for i in range(0, len(files), 60)]
+    return [cmd] if cmd else []
+
+
 # ---------------------------------------------------------------- train
 TRAIN = WT / "train"
 FIXTURES = WT / "fixture-cache-train"
 CRATE = os.environ.get("HARNESS_CRATE", "app")  # workspace crate prefix: <CRATE>-<name> lives in crates/<name>/
 FIXTURE_EXT = os.environ.get("HARNESS_FIXTURE_EXT", ".fixture")
-TRAIN_ENV = {os.environ.get("HARNESS_FIXTURE_VAR", "APP_FIXTURE_CACHE"): str(FIXTURES), "CARGO_TARGET_DIR": str(TARGETS / "land-0"), "CARGO_PROFILE_RELEASE_INCREMENTAL": "true", "PROPTEST_DISABLE_FAILURE_PERSISTENCE": "1"}
+TRAIN_ENV = {os.environ.get("HARNESS_FIXTURE_VAR", "APP_FIXTURE_CACHE"): str(FIXTURES), **stack_env(P["train_env"])}
 
 
 def run_env(extra):
@@ -351,6 +490,63 @@ def tests_cmd(tests):
 
 
 def run_tests(tests, timeout=1800):
+    """Run acceptance tests 'file::name' on the train tree. Returns the failed ones (empty = pass)."""
+    return run_tests_cargo(tests, timeout) if P["accept"] == "cargo" else run_tests_cmd(tests, timeout)
+
+
+def perf_debt(t, out) -> bool:
+    """A perf budget failed: meaningless on a loaded laptop, so record it to check later on a quiet machine."""
+    if not re.search(r"over budget|under floor|over the budget|over limit|^BENCH ", out, re.M):
+        return False
+    with open(ST / "perf-debt.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"t": iso(), "test": t, "out": out[-400:]}) + chr(10))
+    event("perf_debt", test=t)
+    return True
+
+
+def run_tests_cmd(tests, timeout=1800):
+    """One profile `accept` run per test file (in parallel), its failures parsed by `accept_fail_re`; each failure is
+    re-run alone, serially, before it counts (perf and timing tests fail under parallel load)."""
+    if not tests:
+        return []
+    from concurrent.futures import ThreadPoolExecutor
+    by_file, env = {}, run_env(TRAIN_ENV)
+    for t in tests:
+        by_file.setdefault(t.split("::")[0], []).append(t.split("::", 1)[1])
+
+    def run(f, names):
+        argv = []
+        for tok in P["accept"].split():
+            if tok == "{names}":
+                argv += [P["accept_name"].replace("{name}", re.escape(n)) for n in names if n != "*"]
+            else:
+                argv.append(tok.replace("{file}", f))
+        argv[0] = shutil.which(argv[0]) or argv[0]
+        try:
+            rr = sh(argv, cwd=TRAIN, check=False, env=env, timeout=900)
+        except subprocess.TimeoutExpired:
+            return names, "timeout 900s"
+        if rr.returncode == 0:
+            return [], ""
+        out = rr.stdout + rr.stderr
+        bad = set(re.findall(P["accept_fail_re"], out, re.M))
+        return [n for n in names if n in bad] or names, out[-1500:]
+
+    retry, fails, logs = [], [], []
+    with ThreadPoolExecutor(10) as ex:
+        for f, (bad, _) in zip(sorted(by_file), ex.map(lambda f: run(f, by_file[f]), sorted(by_file))):
+            retry += [f"{f}::{n}" for n in bad]
+    for t in retry:
+        bad, out = run(t.split("::")[0], [t.split("::", 1)[1]])
+        if bad and not perf_debt(t, out):
+            fails.append(t)
+            logs.append(f"== {t} (alone): {out}")
+    if logs:
+        (ST / "last-gate.txt").write_text(chr(10).join(logs)[-20000:], encoding="utf-8")
+    return fails
+
+
+def run_tests_cargo(tests, timeout=1800):
     """Build the needed test binaries once (release, incremental), run them in parallel.
     Returns list of failed 'file::name' (empty = pass)."""
     if not tests:
@@ -426,7 +622,13 @@ def run_tests(tests, timeout=1800):
 def fmt_tree(cwd):
     """rustfmt every workspace target root in batches and commit. `cargo fmt --all` hits Windows' 32k command-line
     limit on this workspace (hundreds of [[test]] roots) and failed silently, so main drifted unformatted (2026-11-12:
-    49 files)."""
+    49 files). Other stacks: the profile's `fmt` over the files the train changed against main (never the whole repo)."""
+    if P["fmt"] != "rustfmt":
+        for c in expand(P["fmt"], changed_files(cwd, "main")):
+            sh(c, cwd=cwd, check=False, timeout=600)
+        if git("status", "--porcelain", cwd=cwd, check=False).stdout.strip():
+            git("commit", "-qam", "train: format", cwd=cwd, check=False)
+        return
     import importlib.util
     spec = importlib.util.spec_from_file_location("fmt_check", f"{QS}/fmt_check.py")
     fc = importlib.util.module_from_spec(spec)
@@ -438,14 +640,20 @@ def fmt_tree(cwd):
         git("commit", "-qam", "train: rustfmt", cwd=cwd, check=False)
 
 
+def unit_failures(out: str, first_only=False) -> set:
+    """Failing unit test names in a unit run's output (the quick gate has always parsed only the first pattern)."""
+    pats = P["unit_fail_re"][:1] if first_only else P["unit_fail_re"]
+    return set().union(*(re.findall(p, out, re.M) for p in pats))
+
+
 def unit_flaky(failing: set, env) -> bool:
     """True when every failing unit test passes when rerun alone (single thread): load flakiness, not the batch.
     2026-11-12: a store snapshot timing test failed the whole gate under train load twice; it passes alone."""
-    if not failing or len(failing) > 5:
+    if not failing or len(failing) > 5 or not P["unit_one"]:
         return False
     for name in sorted(failing):
-        rr = sh(f"cargo test -q --workspace --lib --bins -- --exact {name} --test-threads=1", cwd=TRAIN, check=False,
-                env=env, timeout=900)
+        n = re.escape(name).replace('"', ".") if P["name_escape"] else name
+        rr = sh(P["unit_one"].replace("{name}", n), cwd=TRAIN, check=False, env=env, timeout=900)
         if rr.returncode != 0:
             return False
     event("gate_stage", stage="unit-flaky-passed-alone", failing=sorted(failing))
@@ -459,9 +667,8 @@ def main_unit_baseline() -> set:
     if cache.get("sha") != sha:
         cur = git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip()
         git("checkout", "-q", "--detach", "-f", sha, cwd=TRAIN)
-        rr = sh("cargo test -q --workspace --lib --bins --no-fail-fast", cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=1800)
-        o = rr.stdout + rr.stderr
-        fails = set(re.findall(r"^(\S+) --- FAILED$", o, re.M)) | set(re.findall(r"^test (\S+) \.\.\. FAILED$", o, re.M))
+        rr = sh(P["unit"], cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=1800)
+        fails = unit_failures(rr.stdout + rr.stderr)
         git("checkout", "-q", "--detach", "-f", cur, cwd=TRAIN)
         cache = {"sha": sha, "fails": sorted(fails)}
         save("unit-baseline.json", cache)
@@ -469,22 +676,20 @@ def main_unit_baseline() -> set:
     return set(cache["fails"])
 
 
-QS = os.environ.get("HARNESS_QS", str(Path.home() / ".claude/skills/overhaul-build/scripts"))
-QUALITY_CMDS = [f"py -3 {QS}/dup_blocks.py crates src", f"py -3 {QS}/dup_literals.py crates src",
-                f"py -3 {QS}/shape_check.py crates src", f"py -3 {QS}/check_cycles.py crates src"]
-CLIPPY_STRICT = ("cargo clippy -q --workspace --all-targets -- -D warnings -D clippy::too_many_lines "
-                 "-D clippy::unwrap_used -D clippy::cognitive_complexity")
+QUALITY_CMDS = [c.replace("{QS}", QS) if " " in c else f"py -3 {QS}/{c} {' '.join(P['src_dirs'])}" for c in P["qa"]]
+CLIPPY_STRICT = P["lint_strict"]  # the strict linter (name kept from the rust-only harness)
 FILE_LINES = int(os.environ.get("HARNESS_FILE_LINES", "500"))  # spec/STANDARDS.md S8 module-size cap
 TEST_FILE_LINES = int(os.environ.get("HARNESS_TEST_FILE_LINES", "600"))  # the same cap for test files
+CHECKS_BRIEF = " ; and ".join(x for x in (" ; ".join(QUALITY_CMDS), P["lint_strict_brief"]) if x)
 QUALITY_BRIEF = ("The plan forbids second copies (spec/STANDARDS.md S1, S5, S6, S44): before writing ANY function, "
                  "private helpers included, grep spec/index/*.md and spec/ARCHITECTURE.md for an owner that already has it "
-                 "(core owns refusals and error builders, geom owns maths; vectors, param parsing, not_found/malformed/"
-                 "invalid builders must come from their owner, never a local copy) and extend the owner instead. "
+                 + P["owner_note"] + " and extend the owner instead. "
                  f"Keep every file you add or grow at most {FILE_LINES} lines (tests {TEST_FILE_LINES}; STANDARDS S8): split into modules. "
-                 "Clean code is part of done. Before committing, from your worktree run each of: "
-                 + " ; ".join(QUALITY_CMDS) + " ; and " + CLIPPY_STRICT.replace("--workspace", "-p <each crate you touched>")
-                 + ". Fix every problem they report in files you changed (extract repeated blocks into one named fn, "
-                 "name repeated literals as consts, split functions over 30 lines into named steps). Before writing a "
+                 "Clean code is part of done. "
+                 + ("Before committing, from your worktree run each of: " + CHECKS_BRIEF
+                    + ". Fix every problem they report in files you changed (extract repeated blocks into one named fn, "
+                    "name repeated literals as consts, split functions over 30 lines into named steps). " if CHECKS_BRIEF else "")
+                 + "Before writing a "
                  "helper, grep the workspace for an existing one and reuse it. The land train rejects branches that add any of these.")
 
 
@@ -499,6 +704,8 @@ OWNED_FN = re.compile(r"^\s*(?:pub(?:\([a-z]+\))?\s+)?fn\s+(unit|unit_above|unit
 def owner_copies(cwd) -> set:
     """`file::fn` for every fn outside crates/core named like a capability core owns (math, params, refusals)."""
     found = set()
+    if not P["owner_fns"]:
+        return found
     for f in Path(cwd).glob("crates/*/src/**/*.rs"):
         rel = f.relative_to(cwd).as_posix()
         if rel.startswith("crates/core/"):
@@ -511,24 +718,23 @@ def owner_copies(cwd) -> set:
 
 
 def file_line_cap(rel: str) -> int:
-    """The S8 cap for repo path `rel`: test files (under a tests/ folder, or tests.rs / *_tests.rs) get TEST_FILE_LINES."""
-    parts = rel.split("/")
-    test = "tests" in parts[:-1] or parts[-1] == "tests.rs" or parts[-1].endswith("_tests.rs")
-    return TEST_FILE_LINES if test else FILE_LINES
+    """The S8 cap for repo path `rel`: test files (profile test_file_re; rust: under a tests/ folder, or tests.rs /
+    *_tests.rs) get TEST_FILE_LINES."""
+    return TEST_FILE_LINES if re.search(P["test_file_re"], rel) else FILE_LINES
 
 
 def oversized_files(cwd, base: str) -> list:
-    """S8 module-size gate: each .rs file under crates/ src/ tests/ that the tree at `cwd` adds, or grows past its
+    """S8 module-size gate: each source file (profile src_exts under size_dirs) that the tree at `cwd` adds, or grows past its
     cap, relative to `base`. A file already over the cap at `base` is grandfathered until it is split under it; from
     then on it is gated like any other. Renames count as adds (--no-renames), so moving a big file needs a split."""
-    r = git("diff", "--name-only", "--no-renames", "--diff-filter=AM", base, "--", "crates", "src", "tests",
+    r = git("diff", "--name-only", "--no-renames", "--diff-filter=AM", base, "--", *P["size_dirs"],
             cwd=cwd, check=False)
     if r.returncode != 0:
         return [f"size gate: git diff against {base} failed: {(r.stderr or '').strip()[-300:]}"]
     out = []
     for rel in r.stdout.split():
         f = Path(cwd) / rel
-        if not rel.endswith(".rs") or not f.exists():
+        if not rel.endswith(tuple(P["src_exts"])) or not f.exists():
             continue
         cap, now_n = file_line_cap(rel), len(f.read_text(encoding="utf-8", errors="replace").splitlines())
         if now_n <= cap:
@@ -553,7 +759,8 @@ def quality_problems(cwd, base: str = "main") -> str:
         out.append("file over the S8 size cap (new or newly over; existing big files are grandfathered until split): "
                    + chr(10) + chr(10).join(big))
     env = run_env(TRAIN_ENV)
-    for c in QUALITY_CMDS + [CLIPPY_STRICT]:
+    lint = expand(CLIPPY_STRICT, changed_files(cwd, base) if "{file" in CLIPPY_STRICT else [])
+    for c in QUALITY_CMDS + lint:
         r = sh(c, cwd=cwd, check=False, env=env, timeout=1800)
         if r.returncode != 0:
             out.append((r.stdout + r.stderr)[-4000:])
@@ -605,10 +812,10 @@ def gate(new_rows, rows, quick=False):
     fmt_tree(TRAIN)  # auto-fix formatting, never fail on it
     if quick:  # retry after ejecting rows whose own tests failed: lint passed with them in; unit is re-run (cheap, and
         # removing a branch can break another that used it)
-        r = sh("cargo test -q --workspace --lib --bins --no-fail-fast", cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=1800)
+        r = sh(P["unit"], cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=1800)
         if r.returncode != 0:
             o = r.stdout + r.stderr
-            failing = set(re.findall(r"^(\S+) --- FAILED$", o, re.M))
+            failing = unit_failures(o, first_only=True)
             base = main_unit_baseline()
             if not (failing and (failing <= base or unit_flaky(failing - base, run_env(TRAIN_ENV)))):
                 return False, ["unit"], o[-6000:]
@@ -619,27 +826,28 @@ def gate(new_rows, rows, quick=False):
         tests = [t for i in new_rows for t in rows[i]["tests"]] + [t for r_ in rows.values() if r_["status"] == "proven" for t in r_["tests"]]
         fails = run_tests(sorted(set(tests)))
         event("gate_stage", stage="acceptance-quick", secs=round(now() - t0), fails=len(fails))
-        # 2026-11-13: an empty log here sent every unowned acceptance failure to bisect (~18 min a level, 6 h with 0 landed)
-    log = (ST / "last-gate.txt").read_text(encoding="utf-8", errors="replace")[-20000:] if fails else ""
-    return (not fails), fails, log
+        log = (ST / "last-gate.txt").read_text(encoding="utf-8", errors="replace")[-20000:] if fails else ""
+        return (not fails), fails, log
     if not quality_on():  # the quality stage's strict clippy is a superset; running both cost ~10 min a train (2026-11-12)
         t0 = now()
-        r = sh("cargo clippy -q --workspace --all-targets -- -D warnings", cwd=TRAIN, check=False, env=env, timeout=1800)
+        r = sh(P["lint"] or "exit 0", cwd=TRAIN, check=False, env=env, timeout=1800)
         event("gate_stage", stage="clippy", secs=round(now() - t0), rc=r.returncode)
         if r.returncode != 0:
             return False, ["clippy"], (r.stdout + r.stderr)[-6000:]
     t0 = now()
-    r = sh("cargo test -q --workspace --lib --bins --no-fail-fast", cwd=TRAIN, check=False, env=env, timeout=1800)
+    r = sh(P["unit"], cwd=TRAIN, check=False, env=env, timeout=1800)
     event("gate_stage", stage="unit", secs=round(now() - t0), rc=r.returncode)
     if r.returncode != 0:
         out = r.stdout + r.stderr
-        failing = set(re.findall(r"^(\S+) --- FAILED$", out, re.M)) | set(re.findall(r"^test (\S+) \.\.\. FAILED$", out, re.M))
+        failing = unit_failures(out)
         base = main_unit_baseline()
         if failing and failing <= base:  # main is already red on exactly these: not this batch's fault
             event("gate_stage", stage="unit-baseline-red", failing=sorted(failing)[:5])
             r = None
         elif failing and unit_flaky(failing - base, env):
             r = None
+    if r is not None and r.returncode != 0 and not P["crate_blame"]:
+        return False, ["unit"], out[-6000:]
     if r is not None and r.returncode != 0:
         crates = sorted(set(re.findall(r"-p (" + re.escape(CRATE) + r"-[\w-]+)", out)))
         dirs = " ".join("crates/" + c[len(CRATE) + 1:] + "/" for c in crates if c != CRATE)
@@ -692,8 +900,9 @@ Row {row}'s branch is being merged onto main. Conflicted files: {files}
 1. Open only the conflicted hunks (grep -n '<<<<<<<\\|>>>>>>>' then read those line ranges). Keep BOTH sides: main's code must
    keep all its behaviour; apply the row's additions on top of it. Where both sides changed the same function, combine them.
 2. Remove every conflict marker. Touch other files only if needed to compile.
-3. Run `cargo check -q --workspace --tests 2>&1 | grep -E '^error' -A5 | head -40` and fix errors until it is clean.
-4. Do NOT commit, abort the merge, or run tests. Reply DONE, or FAIL with one line why. Keep tool output small."""
+3. Run `@CHECK@` and fix errors until it is clean.
+4. Do NOT commit, abort the merge, or run tests. Reply DONE, or FAIL with one line why. Keep tool output small.""".replace(
+    "@CHECK@", P["check_hint"])
 
 
 def resolve_conflict(q):
@@ -701,13 +910,13 @@ def resolve_conflict(q):
     t0 = now()
     git("merge", "-q", "--no-ff", "--no-edit", "-m", f"train: land {q['row']} (conflict resolved)", q["sha"], cwd=TRAIN, check=False)
     files = git("diff", "--name-only", "--diff-filter=U", cwd=TRAIN, check=False).stdout.split()
-    ok = bool(files) and len(files) <= 4 and all(f.endswith(".rs") for f in files)
+    ok = bool(files) and len(files) <= 4 and all(f.endswith(tuple(P["src_exts"])) for f in files)
     if ok:
         sh([CLAUDE_BIN, "-p", "--model", "sonnet", "--max-turns", "30", "--dangerously-skip-permissions"], cwd=TRAIN,
            check=False, env=run_env(TRAIN_ENV), timeout=600, stdin=RESOLVE_PROMPT.format(row=q["row"], files=" ".join(files)))
         marked = git("grep", "-l", "-E", "^(<<<<<<<|>>>>>>>) ", "--", *files, cwd=TRAIN, check=False).stdout.strip()
-        ok = not marked and sh("cargo check -q --workspace --tests", cwd=TRAIN, check=False, env=run_env(TRAIN_ENV),
-                               timeout=900).returncode == 0
+        ok = not marked and all(sh(c, cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=900).returncode == 0
+                                for c in expand(P["check"], [f for f in files if f.endswith(tuple(P["check_exts"]))]))
     if ok:
         git("add", "-A", cwd=TRAIN, check=False)
         ok = git("commit", "-q", "--no-edit", cwd=TRAIN, check=False).returncode == 0
@@ -737,21 +946,23 @@ def reject(q, reason):
 def adds_fn(q, d) -> bool:
     """True when branch q itself adds fn d["fn"] in d["file"] (not merely touches the file)."""
     diff = git("diff", "-U0", f"main...{q['sha']}", "--", d["file"], check=False).stdout
-    return re.search(r"^\+.*\bfn\s+" + re.escape(d["fn"]) + r"\b", diff, re.M) is not None
+    return re.search(r"^\+.*" + P["fn_def_re"].replace("{name}", re.escape(d["fn"])), diff, re.M) is not None
 
 
 def branch_files(q) -> set:
     return set(git("diff", "--name-only", f"main...{q['sha']}", check=False).stdout.split())
 
 
-REVIEW_PROMPT = """You are the duplicate-capability reviewer for the rebuild (Rust). Your cwd is the merged train tree.
+REVIEW_PROMPT = """You are the duplicate-capability reviewer for the rebuild (@LANG@). Your cwd is the merged train tree.
 These functions were ADDED by the batch about to land (file: signature):
 {added}
 For each one, decide whether the codebase ALREADY has a function doing the same job (same input meaning, same output,
-possibly different name/wording): search spec/index/*.md and grep crates/ src/, and read both bodies before deciding.
-Owners to prefer: app_core::math, app_core::param, app_core::refusal (+ core::invalid), and the owners in
+possibly different name/wording): search spec/index/*.md and grep @GREP@, and read both bodies before deciding.
+Owners to prefer: @OWNERS@
 spec/ARCHITECTURE.md. Report ONLY verified duplicates. Thin wrappers that call the owner are fine. Be fast: at most 40 tool calls.
 Final answer: ONLY a JSON object {{"duplicates": [{{"file": "<path of the NEW copy>", "fn": "<name>", "existing": "<file:line>", "why": "<short>"}}]}}"""
+REVIEW_PROMPT = (REVIEW_PROMPT.replace("@LANG@", P["lang"]).replace("@OWNERS@", P["owners"])
+                 .replace("@GREP@", " ".join(d.rstrip("/") + "/" for d in P["src_dirs"])))
 
 
 CLAUDE_BIN = (shutil.which("claude.exe")
@@ -762,12 +973,12 @@ def batch_review(merged, cwd=None, base="main") -> list:
     """Headless reviewer over the functions this batch adds. Fail-open (logged) so a reviewer outage never stalls lands.
     Also run by builders before submit (`self-review --slot N`), so a duplicate is caught before a 20-min train."""
     cwd = cwd or TRAIN
-    diff = git("diff", "-U0", base, "HEAD", "--", "crates", "src", cwd=cwd, check=False).stdout
+    diff = git("diff", "-U0", base, "HEAD", "--", *P["src_dirs"], cwd=cwd, check=False).stdout
     added, cur = [], ""
     for line in diff.splitlines():
         if line.startswith("+++ b/"):
             cur = line[6:]
-        elif line.startswith("+") and re.match(r"^\+\s*(pub(\([a-z]+\))?\s+)?fn\s+\w+", line) and "/tests/" not in cur:
+        elif line.startswith("+") and re.match(P["fn_added_re"], line) and not re.search(P["review_skip_re"], cur):
             added.append(f"{cur}: {line[1:].strip()[:160]}")
     if not added:
         return []
@@ -820,7 +1031,10 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
         rest = [q for q in merged if q["row"] not in own]
         return try_batch(rest, rows, depth + 1, quick=True) if rest else []
     # blame by file: eject branches that touched a file the failure output names
-    named = set(m.replace(chr(92), "/") for m in re.findall(r"((?:crates|src|tests)[\\/][\w\\/.-]+\.rs)", log or ""))
+    if P["strip_root"]:  # absolute paths in the log -> repo-relative
+        for root in {str(TRAIN), TRAIN.as_posix()}:
+            log = (log or "").replace(root + chr(92), "").replace(root + "/", "")
+    named = set(m.replace(chr(92), "/") for m in re.findall(P["path_re"], log or ""))
     m = re.search(r"failing crates: ([^\n]*)", log or "")
     if m:
         named |= set(m.group(1).split())
@@ -830,7 +1044,9 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     for t in fails:  # a test no row owns (a quality or regression test) points at the repo files it reads
         src = TRAIN / t.split("::")[0]
         if "::" in t and src.is_file():
-            named |= set(re.findall(r"[\"'`]((?:crates|src|tests)/[\w/.-]+\.rs)[\"'`]", src.read_text(encoding="utf-8", errors="replace")))
+            import posixpath  # a relative import ("../x.js") resolves against the test file's folder
+            named |= set(posixpath.normpath(posixpath.join(posixpath.dirname(t.split("::")[0]), p)) if p.startswith(".") else p
+                         for p in re.findall(P["quoted_path_re"], src.read_text(encoding="utf-8", errors="replace")))
     if len(merged) > 1 and named:
         guilty = []
         for q in merged:
@@ -890,9 +1106,29 @@ BATCH_WAIT = 600
 
 
 def disjoint(queue: list) -> list:
-    """Oldest first, the rows whose changed files overlap no earlier pick; the rest wait one batch.
+    """Oldest first, the rows that merge cleanly onto main plus every earlier pick (trial merges with git merge-tree,
+    no worktree, ~0.2 s a row); the rest wait (oldest next batch).
     Measured: every conflict the train resolved was row-vs-row inside one batch (0 of 58 queued rows conflicted with
-    main), ~2 min each and serial ahead of a 15 min gate. A disjoint batch landed 31 of 33 rows in 21 min, 0 resolves."""
+    main), ~2 min each and serial ahead of a 15 min gate. 2026-11-13: file-disjoint picks took 23 of 106 queued rows
+    (40 rows touched one hot file in different hunks); trial merges take 39, still with no resolves. Falls back to
+    file-disjoint if merge-tree is unavailable (git < 2.38)."""
+    acc, out = git("rev-parse", "main").stdout.strip(), []
+    for q in queue:
+        r = git("merge-tree", "--write-tree", acc, q["sha"], check=False)
+        if r.returncode == 1:  # conflicts: next batch
+            continue
+        if r.returncode != 0 or not r.stdout.split():
+            return _disjoint_files(queue)
+        c = git("commit-tree", r.stdout.split()[0], "-p", acc, "-p", q["sha"], "-m", "train pick", check=False).stdout.strip()
+        if not c:
+            return _disjoint_files(queue)
+        acc = c
+        out.append(q)
+    return out
+
+
+def _disjoint_files(queue: list) -> list:
+    """Oldest first, the rows whose changed files overlap no earlier pick."""
     taken, out = set(), []
     for q in queue:
         files = set(git("diff", "--name-only", f"main...{q['sha']}", check=False).stdout.split())
