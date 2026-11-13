@@ -41,3 +41,13 @@ Every Bash call: `cd <repo root> && source /opt/harness/env.sh && ...` (the shel
 
 Never push to `main`, `cloud-base` or `harness-cloud`, never force-push a ref you did not create, never delete another
 session's refs. Keep tool output small: pipe cargo output through `tail -30` or `grep -E "^(error|warning)"`.
+
+**Git discipline (hand-off between sessions and accounts).** Your work must survive this session ending at any moment
+(usage limit, timeout, crash) so another session, possibly on another account, can continue it:
+- After the first thing that compiles, then at least every ~15 tool calls or ~10 minutes, run
+  `git add -A && git commit -qm "WIP <row>: <what works / what is next>" && git push -q -f origin HEAD:refs/heads/cloud/wip-<row>`.
+- Keep `HANDOFF-<row>.md` at the repo root current in each WIP commit, at most 10 lines: what is done, what is next, the
+  exact failing command and error, the decisions taken. Delete it in the final commit.
+- On a usage or rate-limit warning, or a very large context: stop new work, push the WIP branch with HANDOFF, report
+  `HANDOFF <row>: cloud/wip-<row>` and end.
+- If claim.sh prints `RESUMED`, read `HANDOFF-<row>.md` before anything else.

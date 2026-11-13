@@ -83,6 +83,14 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
 - `cloud.py collect` (every 5 min) queues new `cloud/<row>` heads for the train, releases `cloud/release-<row>`
   (blocker in REASON; WIP kept as `cloud/prev-<row>`), expires claims silent for HARNESS_CLOUD_TTL (2 h) and tops
   assignments up to HARNESS_CLOUD_TARGET (40). `cloud.py status` shows assigned/claimed/pushed/landed.
+- Builders and planners are both routines. A builder claims one assigned row (`BUILDER.md`); a planner claims one phase
+  from `plan-tasks.txt` on `harness-cloud` and turns up to 15 roadmap rows into planned rows (`PLANNER.md`). Every claim
+  is a UNIQUE commit pushed to a new ref (an identical commit pushes as a no-op "success", so two sessions would both win).
+  Everything bases on `cloud-base`, never main. Sessions push `cloud/wip-<row>` + `HANDOFF-<row>.md` often so another
+  session or account resumes (`cloud/HANDOFF-ACCOUNT.md`).
+- The real caps on agent count are the frontier (ready rows: deps proven, not claimed) and the landing rate of the
+  train, not slots. More builders than frontier rows idle; more than the train lands pile up rejects. Run planners to
+  grow the frontier, and size builders to min(frontier, what the train lands).
 - Setup: copy `cloud/` to `<repo>/tools/cloud/`, fill the "extra system deps" hook in setup.sh, probe one session
   (setup prints SETUP OK), then step 20 -> 50 -> 100 sessions while rejects stay under 30% and the train keeps up.
 

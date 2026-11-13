@@ -37,4 +37,10 @@ if [ -n "$prev" ]; then
   git fetch -q origin "+refs/heads/${prev#origin/}:refs/remotes/$prev"
   git merge -q --no-edit "$prev" || echo "MERGE CONFLICT with $prev: resolve it first (git status)"
 fi
+# a session that died mid-row left its work on cloud/wip-<row> (with HANDOFF-<row>.md): resume from it
+if git ls-remote --exit-code origin "refs/heads/cloud/wip-$row" >/dev/null 2>&1; then
+  git fetch -q origin "+refs/heads/cloud/wip-$row:refs/remotes/origin/cloud/wip-$row"
+  if git merge -q --no-edit "origin/cloud/wip-$row"; then echo "RESUMED from cloud/wip-$row: read HANDOFF-$row.md first"
+  else echo "MERGE CONFLICT with cloud/wip-$row: resolve it first (git status)"; fi
+fi
 cat "$A"
