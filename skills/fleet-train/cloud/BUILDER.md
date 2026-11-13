@@ -34,6 +34,8 @@ Every Bash call: `cd <repo root> && source /opt/harness/env.sh && ...` (the shel
    `{added}` replaced by that list: start ONE subagent with that text (or do it yourself if you cannot), fix every
    duplicate it reports (call the owner instead, delete your copy), re-run the tests, commit, and review again until
    it reports none (at most 2 rounds). The land train runs the same reviewer and rejects anything it lists.
+7b. **Rebase before push.** `git fetch -q origin cloud-base && git rebase origin/cloud-base`; resolve conflicts keeping both
+   sides' behaviour, re-run the row's tests if anything changed. A row that merges clean never waits on a rebaser.
 8. **Push.** `git push -q origin HEAD:refs/heads/cloud/<row>`. Then stop and report `DONE <row>`.
 9. **Budget.** About 90 tool calls. If you cannot get it green by then, or the same step fails twice the same way, run
    `bash tools/cloud/release.sh <row> "<precise blocker: file, error, what is needed>"` (it saves your work as

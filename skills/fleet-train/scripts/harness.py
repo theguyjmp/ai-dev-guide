@@ -881,6 +881,20 @@ BATCH_WAIT_BUSY = int(os.environ.get("HARNESS_BATCH_WAIT_BUSY", str(25 * 60)))  
 BATCH_WAIT = 600
 
 
+def disjoint(queue: list) -> list:
+    """Oldest first, the rows whose changed files overlap no earlier pick; the rest wait one batch.
+    Measured: every conflict the train resolved was row-vs-row inside one batch (0 of 58 queued rows conflicted with
+    main), ~2 min each and serial ahead of a 15 min gate. A disjoint batch landed 31 of 33 rows in 21 min, 0 resolves."""
+    taken, out = set(), []
+    for q in queue:
+        files = set(git("diff", "--name-only", f"main...{q['sha']}", check=False).stdout.split())
+        if files & taken:
+            continue
+        out.append(q)
+        taken |= files
+    return out
+
+
 def train_once():
     with lock("train", wait=5):
         with lock("state"):
@@ -904,7 +918,7 @@ def train_once():
         wait = BATCH_WAIT_BUSY if in_flight else 0
         if not queue or (len(queue) < MIN_BATCH and now() - min(q["ts"] for q in queue) < wait):
             return False
-        batch = sorted(queue, key=lambda q: q["ts"])[:80]
+        batch = disjoint(sorted(queue, key=lambda q: q["ts"]))[:80]
         for q in batch:
             if q["row"] not in rows:
                 rows[q["row"]] = {"id": q["row"], "tests": [], "status": "cleanup", "file_list": [], "deps": [], "module": "cleanup"}

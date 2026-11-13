@@ -153,6 +153,50 @@ def release(slot, row, reason):
     h.cmd_release(argparse.Namespace(slot=slot, row=row, reason=reason))
 
 
+def batch_rows() -> set:
+    """Rows of the train batch in flight (the last train_start with no train_end after it)."""
+    for e in reversed(h.read_events()[-3000:]):
+        if e.get("event") == "train_end":
+            return set()
+        if e.get("event") == "train_start":
+            return set(e.get("rows", []))
+    return set()
+
+
+def export_conflicts(hd, st):
+    """Queued rows outside the batch in flight that no longer merge onto main go to cloud rebasers as
+    cloud/rebase-<row> (cloud/REBASER.md); rebased while they wait, they merge clean."""
+    batch, sent = batch_rows(), 0
+    for q in h.load("queue.json", []):
+        row, sha = q["row"], q["sha"]
+        if row in batch or st["rows"].get(row, {}).get("rebase_sent") == sha or f"rebased-{row}" in hd:
+            continue
+        if h.git("merge-tree", "--write-tree", "main", sha, check=False).returncode == 1:
+            h.git("push", "-q", "-f", "origin", f"{sha}:refs/heads/cloud/rebase-{row}", check=False)
+            st["rows"].setdefault(row, {})["rebase_sent"] = sha
+            sent += 1
+    return sent
+
+
+def take_rebased(row, sha, st):
+    """Swap a queued row's sha for its cloud rebase, if the row still waits (not in the batch) on the sha we sent.
+    The swap happens under the state lock and leaves claims untouched."""
+    old = st["rows"].get(row, {}).get("rebase_sent")
+    if not old or row in batch_rows():
+        return False
+    with h.lock("state"):
+        queue = h.load("queue.json", [])
+        hit = [q for q in queue if q["row"] == row and q["sha"] == old]
+        if not hit:
+            return False
+        hit[0]["sha"] = sha
+        h.git("branch", "-f", f"h/{row}", sha)
+        h.save("queue.json", queue)
+    st["rows"][row].update(queued_sha=sha, rebased=h.iso())
+    h.event("cloud_rebased", row=row, sha=sha)
+    return True
+
+
 def collect():
     with h.lock("cloud"):
         sync_wt()
@@ -178,6 +222,10 @@ def collect():
                     st["rows"].setdefault(row, {})["released"] = h.iso()
                     done.append(row)
                 gone += [name, f"claim-{row}", row]
+            elif name.startswith("rebased-"):
+                row = name[8:]
+                take_rebased(row, sha, st)
+                gone += [name, f"rebase-{row}", f"rebase-claim-{row}"]
             elif h.ROW_RE.match(name):
                 row = name
                 if st["rows"].get(row, {}).get("queued_sha") == sha:
@@ -219,6 +267,10 @@ def collect():
             if p.stem in done or p.stem not in owned:
                 p.unlink()
         queued = {q["row"] for q in h.load("queue.json", [])}
+        gone += [n for n in hd if n.startswith(("rebase-", "rebase-claim-")) and n.split("-")[-1] not in queued]
+        exported = export_conflicts(hd, st)
+        if exported:
+            h.event("cloud_rebase_export", n=exported)
         gone += [n for n in hd if n.startswith("stack-") and n[6:] not in queued]  # dep landed or was rejected
         delete_refs(sorted(set(gone) & set(hd)))
         publish("collect: " + " ".join(sorted(set(done) | {r for _, r in readd})) if (done or readd) else "collect")

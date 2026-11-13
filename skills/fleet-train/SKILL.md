@@ -94,6 +94,17 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
 - Setup: copy `cloud/` to `<repo>/tools/cloud/`, fill the "extra system deps" hook in setup.sh, probe one session
   (setup prints SETUP OK), then step 20 -> 50 -> 100 sessions while rejects stay under 30% and the train keeps up.
 
+## Manager loop
+- Laptop scripts cannot start cloud sessions; only the manager chat can (a routine run). So the manager runs an hourly
+  heartbeat (an in-chat cron): `py -3 scripts/fleet_beat.py` compares rows waiting for a session with sessions running
+  and prints `FIRE n`; fire that many runs (capped per beat). Without it, rows wait for hours on a handful of sessions.
+- Each routine fire is one session. Scale with several routines on staggered minutes, not by firing runs by hand
+  (each manual run's response costs the manager context).
+- NEVER attach a GitHub push webhook to a builder routine: it has no ref filter, builders push, and every push starts
+  another builder (a runaway loop). If one is attached by mistake, disable that routine at once.
+- Rebaser routine (`cloud/REBASER.md`): cloud agents rebase queued rows that stopped merging onto main. The train also
+  picks a batch of rows with disjoint changed files (`disjoint()`), so row-vs-row conflicts never cost gate time.
+
 ## Run
 1. Set HARNESS_REPO, HARNESS_HOME (state dir parent), HARNESS_WT (fast drive) or edit the defaults at the top.
 2. `py -3 harness.py frontier` must show rows. Free disk first (keep 80 GB+; slot targets about 5-9 GB each, the
