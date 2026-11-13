@@ -98,6 +98,13 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
 - Laptop scripts cannot start cloud sessions; only the manager chat can (a routine run). So the manager runs an hourly
   heartbeat (an in-chat cron): `py -3 scripts/fleet_beat.py` compares rows waiting for a session with sessions running
   and prints `FIRE n`; fire that many runs (capped per beat). Without it, rows wait for hours on a handful of sessions.
+- The heartbeat is a health check, not a liveness check. A train that was alive but landed 0 rows for 6 h passed a
+  liveness-only beat every hour. fleet_beat prints ALARMS (STALL, LONG-BATCH, REPEAT-RED, MAIN-RED, REJECTS, REWORK,
+  STALE-CLAIMS, OLD-QUEUE, TRAIN-ERROR, DISK), each naming its fix, and the manager fixes every one in the same beat,
+  never only reports it. A new failure mode found by hand gets a new check in fleet_beat.py.
+- The train's blame: a failing acceptance test that no batch row owns (a quality or regression test) blames the batch
+  branch that touches a repo file the test's source names; with disjoint batches that is one branch, ejected at once.
+  Before this the failure went to bisect at one full gate (~18 min) per level.
 - Each routine fire is one session. Scale with several routines on staggered minutes, not by firing runs by hand
   (each manual run's response costs the manager context).
 - NEVER attach a GitHub push webhook to a builder routine: it has no ref filter, builders push, and every push starts

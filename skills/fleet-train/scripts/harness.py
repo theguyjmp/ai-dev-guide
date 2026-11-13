@@ -619,7 +619,9 @@ def gate(new_rows, rows, quick=False):
         tests = [t for i in new_rows for t in rows[i]["tests"]] + [t for r_ in rows.values() if r_["status"] == "proven" for t in r_["tests"]]
         fails = run_tests(sorted(set(tests)))
         event("gate_stage", stage="acceptance-quick", secs=round(now() - t0), fails=len(fails))
-        return (not fails), fails, ""
+        # 2026-11-13: an empty log here sent every unowned acceptance failure to bisect (~18 min a level, 6 h with 0 landed)
+    log = (ST / "last-gate.txt").read_text(encoding="utf-8", errors="replace")[-20000:] if fails else ""
+    return (not fails), fails, log
     if not quality_on():  # the quality stage's strict clippy is a superset; running both cost ~10 min a train (2026-11-12)
         t0 = now()
         r = sh("cargo clippy -q --workspace --all-targets -- -D warnings", cwd=TRAIN, check=False, env=env, timeout=1800)
@@ -655,7 +657,9 @@ def gate(new_rows, rows, quick=False):
     t0 = now()
     fails = run_tests(sorted(set(tests)))
     event("gate_stage", stage="acceptance", secs=round(now() - t0), n=len(set(tests)), fails=len(fails))
-    return (not fails), fails, ""
+    # 2026-11-13: an empty log here sent every unowned acceptance failure to bisect (~18 min a level, 6 h with 0 landed)
+    log = (ST / "last-gate.txt").read_text(encoding="utf-8", errors="replace")[-20000:] if fails else ""
+    return (not fails), fails, log
 
 
 def build_train(batch, rows):
@@ -823,6 +827,10 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     for r_ in rows.values():  # a failing test points at its row's declared files
         if any(t in fails for t in r_["tests"]):
             named |= set(r_["file_list"])
+    for t in fails:  # a test no row owns (a quality or regression test) points at the repo files it reads
+        src = TRAIN / t.split("::")[0]
+        if "::" in t and src.is_file():
+            named |= set(re.findall(r"[\"'`]((?:crates|src|tests)/[\w/.-]+\.rs)[\"'`]", src.read_text(encoding="utf-8", errors="replace")))
     if len(merged) > 1 and named:
         guilty = []
         for q in merged:
