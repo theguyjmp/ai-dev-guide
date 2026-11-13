@@ -69,7 +69,7 @@ if alarms and ping.exists() and project:
 waiting = cs.get("waiting_for_a_session", 0)
 # one run = one session. Land first: with 20+ rows queued, builders only starve (their deps are queued, not landed),
 # so cap a beat's fires at 8; once the queue drains, scale up to build every planned row.
-fire = min(waiting, 8 if len(queue) >= 20 else 30)
+fire = min(waiting, 30)  # scale builders to every assigned row; landing keeps up via the trial-merge batch pick
 print(f"cloud claimed {cs.get('claimed')} waiting {waiting} | landed 1h {landed1} | train procs {alive or 0}, "
       f"last event {round((now - last) / 60)} min ago | plan branches {plans} | FIRE {fire}"
       + (" | ALARMS: " + " || ".join(alarms) + " -> fix each this beat" if alarms else " | HEALTH OK"))

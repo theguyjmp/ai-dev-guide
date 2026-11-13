@@ -163,9 +163,13 @@ DEFAULT_CAP = 6
 
 def frontier(rows, claims, queue, attempts):
     busy = {c["row"] for c in claims.values()} | {q["row"] for q in queue}
+    # Only rows being BUILT (claims) count against the module cap and file overlap. Counting queued rows (built,
+    # waiting to land) too left 0 of 93 ready rows buildable while 93 waited in the land queue: builders starved
+    # exactly when landing was behind. The trial-merge batch pick handles queued-vs-new overlap at land time.
+    building = {c["row"] for c in claims.values()}
     inflight = {}
     busy_files = set()
-    for i in busy:
+    for i in building:
         if i in rows:
             inflight[rows[i]["module"]] = inflight.get(rows[i]["module"], 0) + 1
             busy_files |= set(rows[i]["file_list"])

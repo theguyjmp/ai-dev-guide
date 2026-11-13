@@ -130,6 +130,9 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
   liveness-only beat every hour. fleet_beat prints ALARMS (STALL, LONG-BATCH, REPEAT-RED, MAIN-RED, REJECTS, REWORK,
   STALE-CLAIMS, OLD-QUEUE, TRAIN-ERROR, DISK), each naming its fix, and the manager fixes every one in the same beat,
   never only reports it. A new failure mode found by hand gets a new check in fleet_beat.py.
+- Frontier: only rows being built (claims) count against the per-module cap and file-overlap filter, never
+  queued rows. Counting the land queue starved every builder (0 of 93 ready rows assignable) whenever landing
+  fell behind. Check `harness.py frontier` against the count of rows whose deps are all proven or queued.
 - The train's blame: a failing acceptance test that no batch row owns (a quality or regression test) blames the batch
   branch that touches a repo file the test's source names; with disjoint batches that is one branch, ejected at once.
   Before this the failure went to bisect at one full gate (~18 min) per level.
