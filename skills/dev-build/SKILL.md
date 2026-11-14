@@ -1,13 +1,13 @@
+---
+name: dev-build
+description: Start, run or resume the master agent on a new project planned by dev-plan, strictly by its spec, at agent speed in hours, through M0, the Phase 0 risk slice, a soft launch, the health loop and progress gates to a defined finish. Follows overhaul-build with the old-project steps removed. Use when the owner says "start the build", "resume the build", "build the new app", or "dev-build", or when dev-plan ends with "Yes, start the build". The third of three skills: dev-prep, dev-plan, dev-build.
+---
 > **RULE ZERO (the most important rule, ever):** the work must be valuable, well made, clean code that can be built
 > out and extended. A very solid foundation beats functionality depth: missing depth is acceptable, a weak foundation
 > is not. One owner per capability, typed data models, stable ids, clear extension seams, no second copy of anything;
 > never trade code quality, tests or gates for speed or feature count. Every brief this skill writes for an agent
 > quotes this rule at its top.
 
----
-name: dev-build
-description: Start, run or resume the master agent on a new project planned by dev-plan, strictly by its spec, at agent speed in hours, through M0, the Phase 0 risk slice, a soft launch, the health loop and progress gates to a defined finish. Follows overhaul-build with the old-project steps removed. Use when the owner says "start the build", "resume the build", "build the new app", or "dev-build", or when dev-plan ends with "Yes, start the build". The third of three skills: dev-prep, dev-plan, dev-build.
----
 
 # dev-build
 
