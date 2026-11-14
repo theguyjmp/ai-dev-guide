@@ -800,7 +800,10 @@ def cmd_self_review(a):
     """Run the land train's duplicate-capability reviewer on a slot's branch (functions it adds vs main)."""
     wt = slot_wt(a.slot)
     base = git("merge-base", "main", "HEAD", cwd=wt).stdout.strip() or "main"
-    dups = batch_review([], cwd=wt, base=base)
+    try:
+        dups = batch_review([], cwd=wt, base=base)
+    except ReviewUnavailable as e:
+        sys.exit(f"self-review: reviewer unavailable twice ({e}); run it again before submitting")
     print(json.dumps({"duplicates": dups}, indent=1))
 
 
@@ -980,8 +983,14 @@ CLAUDE_BIN = (shutil.which("claude.exe")
               or str(Path.home() / "AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe"))
 
 
+class ReviewUnavailable(Exception):
+    """The duplicate reviewer gave no usable answer twice: the batch waits, it never lands unreviewed (rule zero)."""
+
+
 def batch_review(merged, cwd=None, base="main") -> list:
-    """Headless reviewer over the functions this batch adds. Fail-open (logged) so a reviewer outage never stalls lands.
+    """Headless reviewer over the functions this batch adds. Fail-CLOSED: an empty or unparseable answer is retried once,
+    then ReviewUnavailable is raised and the caller defers the batch (measured: 3 of 432 train and 23 of 668 prescreen
+    reviews returned empty stdout and were landed unreviewed while this was fail-open).
     Also run by builders before submit (`self-review --slot N`), so a duplicate is caught before a 20-min train."""
     cwd = cwd or TRAIN
     diff = git("diff", "-U0", base, "HEAD", "--", *P["src_dirs"], cwd=cwd, check=False).stdout
@@ -993,20 +1002,24 @@ def batch_review(merged, cwd=None, base="main") -> list:
             added.append(f"{cur}: {line[1:].strip()[:160]}")
     if not added:
         return []
-    t0 = now()
-    try:
-        r = sh([CLAUDE_BIN, "-p", "--output-format", "json", "--model", "sonnet", "--max-turns", "60",
-                "--dangerously-skip-permissions"], cwd=cwd, check=False, timeout=1500,
-               stdin=REVIEW_PROMPT.format(added=chr(10).join(added[:300])))
-        res = json.loads(r.stdout).get("result", "")
-        m = re.search(r"\{.*\}", res, re.S)
-        dups = json.loads(m.group(0)).get("duplicates", []) if m else []
-        dups = [d for d in dups if isinstance(d, dict) and d.get("file") and d.get("fn")]
-        event("review", added=len(added), duplicates=len(dups), secs=round(now() - t0))
-        return dups
-    except Exception as e:  # noqa: BLE001
-        event("review_error", error=str(e)[-400:], secs=round(now() - t0))
-        return []
+    t0, last = now(), ""
+    for attempt in (1, 2):
+        try:
+            r = sh([CLAUDE_BIN, "-p", "--output-format", "json", "--model", "sonnet", "--max-turns", "60",
+                    "--dangerously-skip-permissions"], cwd=cwd, check=False, timeout=1500,
+                   stdin=REVIEW_PROMPT.format(added=chr(10).join(added[:300])))
+            res = json.loads(r.stdout).get("result", "")
+            m = re.search(r"\{.*\}", res, re.S)
+            if not m:
+                raise ValueError("no JSON object in the reviewer's answer: " + res[-200:])
+            dups = json.loads(m.group(0)).get("duplicates", [])
+            dups = [d for d in dups if isinstance(d, dict) and d.get("file") and d.get("fn")]
+            event("review", added=len(added), duplicates=len(dups), secs=round(now() - t0), attempt=attempt)
+            return dups
+        except Exception as e:  # noqa: BLE001 - logged, retried once, then the batch is deferred
+            last = str(e)[-400:]
+            event("review_error", error=last, secs=round(now() - t0), attempt=attempt)
+    raise ReviewUnavailable(last)
 
 
 def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
@@ -1124,7 +1137,7 @@ def cmd_train(a):
     born = Path(__file__).stat().st_mtime
     while True:
         if a.loop and Path(__file__).stat().st_mtime != born and \
-                sh([sys.executable, "-c", f"import ast;ast.parse(open(r'{__file__}',encoding='utf-8').read())"], check=False).returncode == 0:  # code changed and parses: restart between trains
+                sh([sys.executable, "-c", f"compile(open(r'{__file__}',encoding='utf-8').read(),'harness','exec')"], check=False).returncode == 0:  # code changed and parses: restart between trains
             print(f"{iso()} train: harness.py changed, re-exec", flush=True)
             os.execv(sys.executable, [sys.executable, "-u", __file__, "train", "--loop"])
         try:
@@ -1211,7 +1224,13 @@ def train_once():
                 rows[q["row"]] = {"id": q["row"], "tests": [], "status": "cleanup", "file_list": [], "deps": [], "module": "cleanup"}
         t0 = now()
         event("train_start", rows=[q["row"] for q in batch])
-        landed = try_batch(batch, rows)
+        try:
+            landed = try_batch(batch, rows)
+        except ReviewUnavailable as e:  # never land unreviewed: keep every row queued, retry the batch later
+            event("review_deferred", rows=[q["row"] for q in batch], error=str(e)[-300:])
+            print(f"{iso()} train: reviewer unavailable, batch deferred", flush=True)
+            time.sleep(300)  # the loop calls train_once again; nothing was removed from the queue
+            return True
         if landed and git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip() != git("rev-parse", "main").stdout.strip():
             promote(landed)
         with lock("state"):
