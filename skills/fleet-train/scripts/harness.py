@@ -372,6 +372,11 @@ STACKS = {
         "path_re": r"((?:crates|src|tests)[\\/][\w\\/.-]+\.rs)",  # repo files a failure log names
         "quoted_path_re": r"[\"'`]((?:crates|src|tests)/[\w/.-]+\.rs)[\"'`]",  # repo files a test reads
         "strip_root": False,
+        # env the toolchain needs: on Windows the MSVC linker and cc builds are found through ProgramFiles(x86),
+        # which Git Bash drops. A profile can add its own (harness.toml [profile] require_env = [...]).
+        "require_env": ["ProgramFiles(x86)"] if os.name == "nt" else [],
+        # a gate log line that means the toolchain env was wrong, not a row (fleet_beat TRAIN-ENV)
+        "env_fail_re": r"linker `link\.exe` not found|cannot open input file 'kernel32\.lib'",
         "crate_blame": True,  # unit failures name `-p <CRATE>-x` -> crates/x/
         "owner_fns": True,  # flag local copies of fns core owns (owner_copies)
         "lang": "Rust",
@@ -409,6 +414,8 @@ STACKS = {
         "path_re": r"((?:[\w.-]+[\\/])+[\w.-]+\.(?:[mc]?js|jsx|[mc]?ts|tsx))",
         "quoted_path_re": r"[\"'`]((?:\.{1,2}/)*[\w./-]+\.(?:[mc]?js|jsx|[mc]?ts|tsx|json))[\"'`]",
         "strip_root": True,  # logs carry absolute paths: drop the train root so the names are repo-relative
+        "require_env": [],
+        "env_fail_re": "",
         "crate_blame": False,
         "owner_fns": False,
         "lang": "JavaScript/TypeScript",
@@ -1062,6 +1069,11 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
                 reject(q, f"gate red ({fails[:3]}) in a file your branch changed: {sorted(named)[:5]} :: {log[-1200:]}")
             event("blame_by_file", ejected=[q["row"] for q in guilty])
             return try_batch([q for q in merged if q not in guilty], rows, depth + 1)
+    if len(merged) > 1 and fails and not set(fails) & {"clippy", "unit", "quality"}:
+        bad = probe_culprit(merged, rows, fails)
+        if bad is not None:
+            reject(bad, f"gate red: {fails[:3]} fail with only your branch merged on main (probe bisect) :: {log[-1200:]}")
+            return try_batch([q for q in merged if q is not bad], rows, depth + 1, reviewed=True)
     if len(merged) == 1:
         reject(merged[0], f"gate red on merged tree: {fails[:8]} {log[-1500:]}")
         return []
@@ -1070,6 +1082,25 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     if left:
         promote(left)
     return left + try_batch(merged[mid:], rows, depth + 1)
+
+
+def probe_culprit(merged, rows, fails):
+    """The one row that alone reproduces the failing acceptance tests, found by bisecting with ONLY those tests (a few
+    minutes a step). None when no single half reproduces them (an interaction): the caller falls back to the full bisect.
+    Measured: a 14-row batch bisected with full gates (~30 min a step) for 4 h; the probe found the row in 17 min."""
+    cand, t0 = list(merged), now()
+    while len(cand) > 1:
+        mid = len(cand) // 2
+        for half in (cand[:mid], cand[mid:]):
+            m, _ = build_train(half, rows)
+            if m and run_tests(fails):
+                cand = m
+                break
+        else:
+            event("probe_none", rows=[q["row"] for q in cand], secs=round(now() - t0))
+            return None
+    event("probe_found", row=cand[0]["row"], tests=fails[:5], secs=round(now() - t0))
+    return cand[0]
 
 
 def promote(landed):
@@ -1084,6 +1115,12 @@ def promote(landed):
 
 
 def cmd_train(a):
+    missing = [v for v in P["require_env"] if not os.environ.get(v)]
+    if missing:  # measured: a train started from Git Bash (no ProgramFiles(x86)) found no MSVC toolchain, every native
+        # test failed and 16 innocent rows were rejected. Refuse to start instead.
+        sys.exit(f"train: {', '.join(missing)} not set (started from Git Bash?): start the train from PowerShell or cmd")
+    if a.loop:  # restart and kill scripts use this pid (and its tree), never a machine-wide command-line pattern
+        (ST / "train.pid").write_text(str(os.getpid()), encoding="utf-8")
     born = Path(__file__).stat().st_mtime
     while True:
         if a.loop and Path(__file__).stat().st_mtime != born and \
@@ -1107,6 +1144,8 @@ def cmd_train(a):
 MIN_BATCH = int(os.environ.get("HARNESS_MIN_BATCH", "8"))
 BATCH_WAIT_BUSY = int(os.environ.get("HARNESS_BATCH_WAIT_BUSY", str(25 * 60)))  # max wait for MIN_BATCH while claims are in flight
 BATCH_WAIT = 600
+# measured: batches of <=30 rows landed 20-38 rows/h; every 42-80-row batch landed 0 (one bad row or clash per ~10 rows)
+BATCH_CAP = int(os.environ.get("HARNESS_BATCH_CAP", "20"))
 
 
 def disjoint(queue: list) -> list:
@@ -1166,7 +1205,7 @@ def train_once():
         wait = BATCH_WAIT_BUSY if in_flight else 0
         if not queue or (len(queue) < MIN_BATCH and now() - min(q["ts"] for q in queue) < wait):
             return False
-        batch = disjoint(sorted(queue, key=lambda q: q["ts"]))[:80]
+        batch = disjoint(sorted(queue, key=lambda q: q["ts"]))[:BATCH_CAP]
         for q in batch:
             if q["row"] not in rows:
                 rows[q["row"]] = {"id": q["row"], "tests": [], "status": "cleanup", "file_list": [], "deps": [], "module": "cleanup"}

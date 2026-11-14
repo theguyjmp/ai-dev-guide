@@ -47,6 +47,14 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
 - Stale fixture locks are cleared and the test re-run once.
 - Blame before bisect: files named in the failure output (clippy paths, failing unit crates, failing rows' declared
   files) eject only the branches that touched them.
+- Probe before bisect (`probe_culprit`): an acceptance-only red in a multi-row batch is bisected with ONLY the failing
+  tests (a few minutes a step) to find the one row that reproduces it alone; events probe_found / probe_none, and
+  probe_none (an interaction) falls back to the full bisect. Measured: 17 min where the full bisect took 4 h.
+- Batches are capped at HARNESS_BATCH_CAP rows (default 20). Batches of 30 rows or fewer landed 20-38 rows/h; every
+  42-80-row batch landed 0 (about one bad row or clash per 10 rows, and each bisect level is a full gate).
+- `train` refuses to start when the stack's `require_env` is missing (rust on Windows: ProgramFiles(x86), which Git
+  Bash drops; the MSVC toolchain is found through it). A train started without it failed every native test and
+  rejected 16 innocent rows. Projects add their own vars in harness.toml `[profile] require_env`.
 - Unit failures that main already has (state/unit-baseline.json, per main sha) are not blamed. Up to 5 new unit
   failures are rerun alone, single-threaded (`unit_flaky`); if all pass, it is load flakiness, not the batch.
   Retries re-run unit.
@@ -127,9 +135,21 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
   heartbeat (an in-chat cron): `py -3 scripts/fleet_beat.py` compares rows waiting for a session with sessions running
   and prints `FIRE n`; fire that many runs (capped per beat). Without it, rows wait for hours on a handful of sessions.
 - The heartbeat is a health check, not a liveness check. A train that was alive but landed 0 rows for 6 h passed a
-  liveness-only beat every hour. fleet_beat prints ALARMS (STALL, LONG-BATCH, REPEAT-RED, MAIN-RED, REJECTS, REWORK,
-  STALE-CLAIMS, OLD-QUEUE, TRAIN-ERROR, DISK), each naming its fix, and the manager fixes every one in the same beat,
+  liveness-only beat every hour. fleet_beat prints ALARMS (TRAIN-DOWN, TRAIN-PID, TRAIN-KILLABLE, TRAIN-ENV, STALL,
+  LONG-BATCH, REPEAT-RED, MAIN-RED, REJECTS, REWORK, STALE-CLAIMS, OLD-QUEUE, TRAIN-ERROR, DISK, BEAT-TIMEOUT), each
+  naming its fix, and the manager fixes every one in the same beat,
   never only reports it. A new failure mode found by hand gets a new check in fleet_beat.py.
+- Train process: `train --loop` writes state/train.pid. TRAIN-DOWN (that pid is gone) restarts the train detached
+  through WMI (Win32_Process Create, HARNESS_* vars on its command line). Never Start-Process or Popen it from an agent
+  shell: the child stays in the shell's job and a train died twice that way, silently. Restart and kill scripts act
+  only on their own state/train.pid tree (`taskkill /T /PID`), never on a machine-wide 'harness.py train' pattern: one
+  fleet's pattern-killing restart script killed another fleet's train 3 times in a day. TRAIN-KILLABLE fires when this
+  train's command line matches that pattern; the beat's restart uses the quoted full path, which does not.
+  TRAIN-ENV: the last gate failed on the toolchain env (stack `env_fail_re`); a gate older than the running train or its
+  current batch (train.pid / train.lock) is ignored, as that restart already handled it. state/train.off = stopped on
+  purpose, no restart.
+- Dashboard: no landing for 3 h or more with rows queued is RED ("Nothing landed in N h"), not amber; 7 h of 0 landed
+  showed only "below the bar" and nobody acted.
 - Frontier: only rows being built (claims) count against the per-module cap and file-overlap filter, never
   queued rows. Counting the land queue starved every builder (0 of 93 ready rows assignable) whenever landing
   fell behind. Check `harness.py frontier` against the count of rows whose deps are all proven or queued.
@@ -147,7 +167,9 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
 1. Set HARNESS_REPO, HARNESS_HOME (state dir parent), HARNESS_WT (fast drive), HARNESS_STACK (rust or node).
 2. `py -3 harness.py frontier` must show rows. Free disk first (keep 80 GB+; slot targets about 5-9 GB each, the
    train's release target about 30 GB).
-3. Background: `py -3 -u harness.py train --loop >> state/train.log 2>&1`.
+3. Start the train from PowerShell or cmd (never Git Bash), detached from any agent shell: `py -3 scripts/fleet_beat.py`
+   starts it when state/train.pid is set and dead; the first time, start it with the quoted full path,
+   `"<python>" -u "<full path>\harness.py" train --loop >> state/train.log 2>&1`, through Win32_Process Create.
 4. Workflow tool: run workflows/builders.js with args {"slots": 16, "max": 40, "idle": 8, "home": "<HARNESS_HOME>"}.
 5. Optional: `py -3 -u remote.py --slot 100` (one per desktop slot), or the cloud fleet instead of steps 4-5.
 6. Watch only `train_end`, `train_error` and disk with one Monitor; measure with `harness.py status`

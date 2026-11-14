@@ -14,3 +14,8 @@
 - 2026-11-13: fix: gate()'s quick-path return had been dedented out of `if quick:`, so every full gate crashed on `fails`.
 - 2026-11-13: `disjoint()` picks a batch by trial merges (git merge-tree), file-disjoint as fallback: 39 of 106 queued rows instead of 23.
 - 2026-11-13: fleet_beat: FIRE cap 8 while 20+ rows are queued, 30 once it drains; SUPPLY alarm when builders starve behind the queue.
+- 2026-11-14: `probe_culprit`: an acceptance-only red in a multi-row batch is bisected with only the failing tests first (events probe_found / probe_none); found the bad row in 17 min where the full bisect took 4 h.
+- 2026-11-14: HARNESS_BATCH_CAP (default 20) replaces the fixed 80-row cap: batches of 30 rows or fewer landed 20-38 rows/h, every 42-80-row batch landed 0.
+- 2026-11-14: `train` refuses to start without the stack's `require_env` (rust on Windows: ProgramFiles(x86), dropped by Git Bash); one such train rejected 16 innocent rows.
+- 2026-11-14: fleet_beat: train found by state/train.pid, not a machine-wide pattern; TRAIN-DOWN restarts it detached through WMI (a train started from an agent shell died with it twice); TRAIN-PID, TRAIN-KILLABLE (a pattern-killing restart script killed another fleet's train 3 times in a day), TRAIN-ENV (ignores a gate older than the running train) and BEAT-TIMEOUT; a timeout on every subprocess call.
+- 2026-11-14: dash.py: 3 h or more with nothing landed and rows queued shows RED "Nothing landed in N h"; 7 h of 0 landed had shown only amber.

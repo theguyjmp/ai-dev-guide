@@ -47,6 +47,15 @@ TOTAL = st.get('total', TOTAL)  # planned rows in FUNCTIONS.md (grows as phases 
 busy = st.get('claimed', len(claims))
 ql = st.get('queued', len(queue))
 ok = l1 >= BAR
+# a dry spell is RED, not amber: 7 h of 0 landed with rows queued showed only 'below the bar' and nobody acted
+last_land = max((e['ts'] for e in lands), default=0)
+dry_h = (now - last_land) / 3600 if last_land else 0
+if dry_h >= 3 and ql > 0:
+    head, hc = 'Nothing landed in %d h (%d queued)' % (dry_h, ql), '--bad'
+elif ok:
+    head, hc = 'On pace', '--good'
+else:
+    head, hc = 'Below the bar', '--mut'
 
 # cumulative chart
 pts = [(ev[0]['ts'] if ev else now, BASE)]
@@ -119,10 +128,12 @@ i.good{background:var(--good)}i.bad{background:var(--bad)}
 .pill.land{color:var(--good);background:color-mix(in srgb,var(--good) 15%,transparent)}
 .pill.reject{color:var(--bad);background:color-mix(in srgb,var(--bad) 15%,transparent)}
 .mut{color:var(--mut);font-size:12px;margin:0}
+.head{font-size:18px;font-weight:700;margin:0}
 """
 
 BODY = """<main>
 <h1>Fleet</h1>
+<p class="head" style="color:var(%(hc)s)">%(head)s</p>
 <section class="card"><h2>Functions landed, last hour</h2>
 <div class="hero"><span class="big" style="color:var(%(bigc)s)">%(l1)d</span><span class="unit">/ h &nbsp;bar %(BAR)d/h &nbsp;·&nbsp; %(l3)d in 3 h</span></div></section>
 <section class="card"><h2>Proven</h2><div class="row"><b>%(proven)d / %(TOTAL)d</b><span>%(pct).1f%%</span></div><div class="bar"><i style="width:%(pct).1f%%"></i></div>
@@ -138,7 +149,7 @@ BODY = """<main>
 </main>"""
 
 page = '<title>Fleet</title>\n<meta name="claude:viewport-fit-sides" content="cover">\n<style>' + CSS + '</style>\n' + BODY % dict(
-    bigc=bigc, l1=l1, BAR=BAR, l3=l3, proven=proven, TOTAL=TOTAL, pct=pct, BASE=BASE, busy=busy, ql=ql, rc=rc, r1=r1, svg=svg, gate=gate, tb=tb, upd=upd)
+    head=html.escape(head), hc=hc, bigc=bigc, l1=l1, BAR=BAR, l3=l3, proven=proven, TOTAL=TOTAL, pct=pct, BASE=BASE, busy=busy, ql=ql, rc=rc, r1=r1, svg=svg, gate=gate, tb=tb, upd=upd)
 os.makedirs(os.path.join(H, 'dash'), exist_ok=True)
 open(os.path.join(H, 'dash', 'index.html'), 'w', encoding='utf-8').write(page)
 print('ok', l1, proven, busy, ql, r1)
