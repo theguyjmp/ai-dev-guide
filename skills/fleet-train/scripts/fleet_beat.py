@@ -37,7 +37,7 @@ def train_cmdline():
         except OSError:
             return ""
     out = ps(f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine")
-    return out if re.search(r"harness\.py.*train", out) else ""
+    return out if re.search(r"(harness|run_train)\.py.*train", out) else ""  # run_train.py = optional hidden pythonw wrapper
 
 
 def start_train():
@@ -48,6 +48,10 @@ def start_train():
     log = h.ST / "train.log"
     # quoted full path: a restart script that kills by a 'harness.py train' pattern cannot match it
     cmd = f'cmd /c "{sets}"{sys.executable}" -u "{Path(h.__file__).resolve()}" train --loop >> "{log}" 2>&1"'
+    wrap = Path(h.__file__).resolve().parent / "run_train.py"  # optional project wrapper: pythonw + CREATE_NO_WINDOW, no console popups
+    if wrap.exists():
+        pyw = Path(sys.executable).with_name("pythonw.exe")
+        cmd = f'cmd /c "{sets}"{pyw if pyw.exists() else sys.executable}" -u "{wrap}" train --loop >> "{log}" 2>&1"'
     q = lambda s: s.replace("'", "''")
     return ps(f"([wmiclass]'Win32_Process').Create('{q(cmd)}', '{q(str(Path(h.__file__).resolve().parent))}').ProcessId")
 
