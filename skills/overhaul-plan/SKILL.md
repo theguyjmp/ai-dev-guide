@@ -2,6 +2,12 @@
 name: overhaul-plan
 description: Plan a ground-up rebuild of an existing project as a new <name>-rebuild repo of checked contracts - spec/FUNCTIONS.md (one row per user-visible behaviour), an acyclic spec/ARCHITECTURE.md, acceptance tests written now that drive only the public entry and fail, and overhaul.toml with the real toolchain - done only when plan_validate.py prints PLAN OK. Use when the owner asks to overhaul, rewrite or re-plan a whole project, after overhaul-check returns OVERHAUL, or when overhaul-build's drive.py exits 3 with a needs-plan function to split or fix.
 ---
+> **RULE ZERO (the most important rule, ever):** the work must be valuable, well made, clean code that can be built
+> out and extended. A very solid foundation beats functionality depth: missing depth is acceptable, a weak foundation
+> is not. One owner per capability, typed data models, stable ids, clear extension seams, no second copy of anything;
+> never trade code quality, tests or gates for speed or feature count. Every brief this skill writes for an agent
+> quotes this rule at its top.
+
 
 # overhaul-plan
 

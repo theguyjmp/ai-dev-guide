@@ -2,6 +2,12 @@
 name: overhaul-build
 description: Start, run or resume the build of a rebuild planned by overhaul-plan. A deterministic harness (drive.py) builds, blind-reviews and lands one function at a time until every function is proven through its public entry; the main chat or a headless manager only supervises it, fixes needs-plan functions through plan_validate, runs a blind proof-check at the end and reports. Use when the owner says to start, run or resume the overhaul build.
 ---
+> **RULE ZERO (the most important rule, ever):** the work must be valuable, well made, clean code that can be built
+> out and extended. A very solid foundation beats functionality depth: missing depth is acceptable, a weak foundation
+> is not. One owner per capability, typed data models, stable ids, clear extension seams, no second copy of anything;
+> never trade code quality, tests or gates for speed or feature count. Every brief this skill writes for an agent
+> quotes this rule at its top.
+
 
 # overhaul-build
 

@@ -2,6 +2,12 @@
 name: fleet-train
 description: Run a fleet of short-lived Claude Code builder agents on a planned rebuild (spec/FUNCTIONS.md rows) with a batch land train - claim, build, submit, then merge everything queued, gate once, bisect only on red. Use when the owner wants many agents building rows fast and the old drive.py harness is stalling, or says "fleet-train", "start the train", "run the builders".
 ---
+> **RULE ZERO (the most important rule, ever):** the work must be valuable, well made, clean code that can be built
+> out and extended. A very solid foundation beats functionality depth: missing depth is acceptable, a weak foundation
+> is not. One owner per capability, typed data models, stable ids, clear extension seams, no second copy of anything;
+> never trade code quality, tests or gates for speed or feature count. Every brief this skill writes for an agent
+> quotes this rule at its top.
+
 
 # fleet-train
 

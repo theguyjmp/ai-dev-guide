@@ -1,3 +1,9 @@
+> **RULE ZERO (the most important rule, ever):** the work must be valuable, well made, clean code that can be built
+> out and extended. A very solid foundation beats functionality depth: missing depth is acceptable, a weak foundation
+> is not. One owner per capability, typed data models, stable ids, clear extension seams, no second copy of anything;
+> never trade code quality, tests or gates for speed or feature count. Every brief this skill writes for an agent
+> quotes this rule at its top.
+
 ---
 name: overhaul-check
 description: Decide whether the current project needs a full overhaul (rebuild from the ground up), a partial rewrite of some areas, targeted refactors, or nothing. Measures and scores architecture, code organization, code quality, duplication, tests and the gate, dependencies, security, bug and change history, build and delivery, roadmap fit, wordiness (AI slop in code, comments, docs and UI text) and the owner's own rules, then writes a scored report with a verdict and the repair-versus-rebuild hours. Use when the owner asks whether a project needs an overhaul or rewrite, or wants a full health or quality audit of a codebase.

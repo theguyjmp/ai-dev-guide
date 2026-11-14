@@ -1,3 +1,9 @@
+> **RULE ZERO (the most important rule, ever):** the work must be valuable, well made, clean code that can be built
+> out and extended. A very solid foundation beats functionality depth: missing depth is acceptable, a weak foundation
+> is not. One owner per capability, typed data models, stable ids, clear extension seams, no second copy of anything;
+> never trade code quality, tests or gates for speed or feature count. Every brief this skill writes for an agent
+> quotes this rule at its top.
+
 ---
 name: dev-plan
 description: Plan the build of a new project from nothing, from the feature map dev-prep wrote (prep/FEATURES.md), as a short, strict, audited spec for a fleet of agents, timed in agent hours, with a private repo and a live progress dashboard. Follows overhaul-plan with the old-project steps removed. Use when the owner says "plan the build", "plan the new app", "write the spec", or "dev-plan", or when dev-prep ends with "Start planning". The second of three skills: dev-prep, dev-plan, dev-build.
