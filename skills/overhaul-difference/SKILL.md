@@ -1,6 +1,6 @@
 ---
 name: overhaul-difference
-description: Compare a rebuilt project (NEW) with the original (OLD) from measurements only and publish the difference as a dashboard artifact: verdict, scorecard, code metrics, function parity, bug patterns, fleet cost. Use when the owner says "compare the overhaul with the original", "difference report", "what changed in the rebuild" or "overhaul-difference".
+description: Compare a rebuilt project (NEW) with the original (OLD) from measurements only and publish the difference as a dashboard artifact (verdict, scorecard, code metrics, function parity, bug patterns, fleet cost). Use when the owner says "compare the overhaul with the original", "difference report", "what changed in the rebuild" or "overhaul-difference".
 ---
 
 # overhaul-difference
