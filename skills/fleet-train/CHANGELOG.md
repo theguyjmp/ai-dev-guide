@@ -120,3 +120,4 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
   another builder (a runaway loop). If one is attached by mistake, disable that routine at once.
 - Rebaser routine (`cloud/REBASER.md`): cloud agents rebase queued rows that stopped merging onto main. The train also
   picks a batch of rows that trial-merge cleanly together (`disjoint()`), so row-vs-row conflicts never cost gate time.
+- 2026-11-15: `quarantine.py`: a failing test no batch row owns is run alone on main before any blame or probe (both pinned a main-red test on an innocent row); red on main it is quarantined with evidence and a fix request and the batch is re-gated; cap 3, then the train pauses until main moves; released once green alone on main. `beat_alarms.py`: KNOWN-RED and REPEAT-TEST say whether a fix request exists and a DISPATCH lane works it; ORIGIN-BEHIND when origin main lags the train (its push is check=False). Gate events list the failed tests (`failed`).

@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-import rules_gate, rules_langs
+import quarantine, rules_gate, rules_langs
 
 REPO = Path(os.environ.get("HARNESS_REPO", "."))
 HOME = Path(os.environ.get("HARNESS_HOME", str(Path(__file__).parent)))
@@ -512,6 +512,21 @@ def run_tests(tests, timeout=1800):
     return run_tests_cargo(tests, timeout) if P["accept"] == "cargo" else run_tests_cmd(tests, timeout)
 
 
+def run_alone(tests, timeout=1800) -> dict:
+    """{test: failure tail} of the tests failing alone in the train tree."""
+    env = run_env(TRAIN_ENV)
+    if P["accept"] == "cargo":
+        exes, r = build_test_exes(sorted({Path(t.split("::")[0]).stem for t in tests}), env, timeout)
+        build = "test build failed: " + r.stdout[-300:] + r.stderr[-1200:]
+        tails = {t: run_one_alone(exes, t, env) if Path(t.split("::")[0]).stem in exes else build for t in tests}
+    else:
+        tails = {}
+        for t in tests:
+            bad, log = run_cmd_test(t.split("::")[0], [t.split("::", 1)[1]], env)
+            tails[t] = (log or "failed") if bad and not perf_debt(t, log) else ""
+    return {t: tail for t, tail in tails.items() if tail}
+
+
 def perf_debt(t, out) -> bool:
     """A perf budget failed: meaningless on a loaded laptop, so record it to check later on a quiet machine."""
     if not re.search(r"over budget|under floor|over the budget|over limit|^BENCH ", out, re.M):
@@ -520,6 +535,25 @@ def perf_debt(t, out) -> bool:
         fh.write(json.dumps({"t": iso(), "test": t, "out": out[-400:]}) + chr(10))
     event("perf_debt", test=t)
     return True
+
+
+def run_cmd_test(f, names, env) -> tuple:
+    argv = []
+    for tok in P["accept"].split():
+        if tok == "{names}":
+            argv += [P["accept_name"].replace("{name}", re.escape(n)) for n in names if n != "*"]
+        else:
+            argv.append(tok.replace("{file}", f))
+    argv[0] = shutil.which(argv[0]) or argv[0]
+    try:
+        rr = sh(argv, cwd=TRAIN, check=False, env=env, timeout=900)
+    except subprocess.TimeoutExpired:
+        return names, "timeout 900s"
+    if rr.returncode == 0:
+        return [], ""
+    out = rr.stdout + rr.stderr
+    bad = set(re.findall(P["accept_fail_re"], out, re.M))
+    return [n for n in names if n in bad] or names, out[-1500:]
 
 
 def run_tests_cmd(tests, timeout=1800):
@@ -531,37 +565,51 @@ def run_tests_cmd(tests, timeout=1800):
     by_file, env = {}, run_env(TRAIN_ENV)
     for t in tests:
         by_file.setdefault(t.split("::")[0], []).append(t.split("::", 1)[1])
-
-    def run(f, names):
-        argv = []
-        for tok in P["accept"].split():
-            if tok == "{names}":
-                argv += [P["accept_name"].replace("{name}", re.escape(n)) for n in names if n != "*"]
-            else:
-                argv.append(tok.replace("{file}", f))
-        argv[0] = shutil.which(argv[0]) or argv[0]
-        try:
-            rr = sh(argv, cwd=TRAIN, check=False, env=env, timeout=900)
-        except subprocess.TimeoutExpired:
-            return names, "timeout 900s"
-        if rr.returncode == 0:
-            return [], ""
-        out = rr.stdout + rr.stderr
-        bad = set(re.findall(P["accept_fail_re"], out, re.M))
-        return [n for n in names if n in bad] or names, out[-1500:]
-
     retry, fails, logs = [], [], []
     with ThreadPoolExecutor(10) as ex:
-        for f, (bad, _) in zip(sorted(by_file), ex.map(lambda f: run(f, by_file[f]), sorted(by_file))):
+        for f, (bad, _) in zip(sorted(by_file), ex.map(lambda f: run_cmd_test(f, by_file[f], env), sorted(by_file))):
             retry += [f"{f}::{n}" for n in bad]
     for t in retry:
-        bad, out = run(t.split("::")[0], [t.split("::", 1)[1]])
+        bad, out = run_cmd_test(t.split("::")[0], [t.split("::", 1)[1]], env)
         if bad and not perf_debt(t, out):
             fails.append(t)
             logs.append(f"== {t} (alone): {out}")
     if logs:
         (ST / "last-gate.txt").write_text(chr(10).join(logs)[-20000:], encoding="utf-8")
     return fails
+
+
+def build_test_exes(stems, env, timeout=1800) -> tuple:
+    cmd = ["cargo", "test", "--release", "--no-run", "--message-format=json", "-q"] + sum((["--test", s] for s in stems), [])
+    r = sh(cmd, cwd=TRAIN, check=False, env=env, timeout=timeout)
+    exes = {}
+    for line in r.stdout.splitlines():
+        if line.startswith("{") and '"executable"' in line:
+            m = json.loads(line)
+            if m.get("executable") and m.get("target", {}).get("kind") == ["test"]:
+                exes[m["target"]["name"]] = m["executable"]
+    return exes, r
+
+
+def run_one_alone(exes, t, env) -> str:
+    """Failure tail of one test run alone; "" on a pass or perf debt."""
+    stem, name = Path(t.split("::")[0]).stem, t.split("::")[1]
+    if stem not in exes:
+        return "no executable"
+    try:
+        rr = sh([exes[stem], "--exact", "--test-threads=1", name], cwd=TRAIN, check=False, env=env, timeout=900)
+        out = rr.stdout + rr.stderr
+        m = re.search(r"sample.generate ([\w-]+): .*locked by another writer", out)
+        if rr.returncode != 0 and m:  # stale fixture lock: drop the fixture, regenerate once
+            for f in FIXTURES.glob(m.group(1) + FIXTURE_EXT + "*"):
+                f.unlink(missing_ok=True)
+            rr = sh([exes[stem], "--exact", "--test-threads=1", name], cwd=TRAIN, check=False, env=env, timeout=900)
+            out = rr.stdout + rr.stderr
+    except Exception as e:  # noqa: BLE001
+        return str(e) or type(e).__name__
+    if rr.returncode == 0 or perf_debt(t, out):
+        return ""
+    return out[-1500:] or f"exit {rr.returncode}"
 
 
 def run_tests_cargo(tests, timeout=1800):
@@ -574,14 +622,7 @@ def run_tests_cargo(tests, timeout=1800):
     for t in tests:
         by_stem.setdefault(Path(t.split("::")[0]).stem, []).append(t.split("::")[1])
     env = run_env(TRAIN_ENV)
-    cmd = ["cargo", "test", "--release", "--no-run", "--message-format=json", "-q"] + sum((["--test", s] for s in sorted(by_stem)), [])
-    r = sh(cmd, cwd=TRAIN, check=False, env=env, timeout=timeout)
-    exes = {}
-    for line in r.stdout.splitlines():
-        if line.startswith("{") and '"executable"' in line:
-            m = json.loads(line)
-            if m.get("executable") and m.get("target", {}).get("kind") == ["test"]:
-                exes[m["target"]["name"]] = m["executable"]
+    exes, r = build_test_exes(sorted(by_stem), env, timeout)
     if r.returncode != 0:
         (ST / "last-gate.txt").write_text((r.stdout[-5000:] + r.stderr[-15000:]), encoding="utf-8")
         missing = [s for s in by_stem if s not in exes]
@@ -610,27 +651,9 @@ def run_tests_cargo(tests, timeout=1800):
     if fails:  # perf/bench tests fail under parallel load: re-run each failure alone, serially
         retry, fails, logs = fails, [], []
         for t in retry:
-            stem, name = Path(t.split("::")[0]).stem, t.split("::")[1]
-            try:
-                rr = sh([exes[stem], "--exact", "--test-threads=1", name], cwd=TRAIN, check=False, env=env, timeout=900)
-                out = rr.stdout + rr.stderr
-                m = re.search(r"sample.generate ([\w-]+): .*locked by another writer", out)
-                if rr.returncode != 0 and m:  # stale fixture lock: drop the fixture, regenerate once
-                    for f in FIXTURES.glob(m.group(1) + FIXTURE_EXT + "*"):
-                        f.unlink(missing_ok=True)
-                    rr = sh([exes[stem], "--exact", "--test-threads=1", name], cwd=TRAIN, check=False, env=env, timeout=900)
-                    out = rr.stdout + rr.stderr
-                if rr.returncode != 0 and re.search(r"over budget|under floor|over the budget|over limit|^BENCH ", out, re.M):
-                    # perf budgets are meaningless on a loaded laptop: record, check later on a quiet machine
-                    with open(ST / "perf-debt.jsonl", "a", encoding="utf-8") as fh:
-                        fh.write(json.dumps({"t": iso(), "test": t, "out": out[-400:]}) + chr(10))
-                    event("perf_debt", test=t)
-                elif rr.returncode != 0:
-                    fails.append(t)
-                    logs.append(f"== {stem}::{name} (serial): {out[-1500:]}")
-            except Exception as e:  # noqa: BLE001
+            if tail := run_one_alone(exes, t, env):
                 fails.append(t)
-                logs.append(f"== {stem}::{name}: {e}")
+                logs.append(f"== {Path(t.split('::')[0]).stem}::{t.split('::')[1]} (serial): {tail}")
     if logs:
         (ST / "last-gate.txt").write_text(chr(10).join(logs)[-20000:], encoding="utf-8")
     want = set(tests)
@@ -697,16 +720,26 @@ def unit_flaky(failing: set, env) -> bool:
     return True
 
 
+@contextmanager
+def at_main():
+    """The train tree at main for a baseline run, restored after."""
+    sha = git("rev-parse", "main").stdout.strip()
+    cur = git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip()
+    git("checkout", "-q", "--detach", "-f", sha, cwd=TRAIN)
+    try:
+        yield sha
+    finally:
+        git("checkout", "-q", "--detach", "-f", cur, cwd=TRAIN)
+
+
 def main_unit_baseline() -> set:
     """Unit tests failing on main itself (cached per main sha)."""
     sha = git("rev-parse", "main").stdout.strip()
     cache = load("unit-baseline.json", {})
     if cache.get("sha") != sha:
-        cur = git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip()
-        git("checkout", "-q", "--detach", "-f", sha, cwd=TRAIN)
-        rr = sh(P["unit"], cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=1800)
+        with at_main():
+            rr = sh(P["unit"], cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=1800)
         fails = unit_failures(rr.stdout + rr.stderr)
-        git("checkout", "-q", "--detach", "-f", cur, cwd=TRAIN)
         cache = {"sha": sha, "fails": sorted(fails)}
         save("unit-baseline.json", cache)
         event("unit_baseline", sha=sha, fails=sorted(fails)[:10])
@@ -854,6 +887,17 @@ def cmd_clean_submit(a):
     print(json.dumps({"ok": True}))
 
 
+def known_red() -> dict:
+    """Proven tests red on main itself (quarantine.py): the gate skips them."""
+    return load(quarantine.KNOWN, {})
+
+
+def gate_tests(new_rows, rows) -> list:
+    kr = known_red()
+    tests = [t for i in new_rows for t in rows[i]["tests"]]
+    return sorted(set(tests + [t for r_ in rows.values() if r_["status"] == "proven" for t in r_["tests"] if t not in kr]))
+
+
 def gate(new_rows, rows, quick=False):
     """Return (ok, failed_tests, log)."""
     env = run_env(TRAIN_ENV)
@@ -874,9 +918,8 @@ def gate(new_rows, rows, quick=False):
         if q:
             return False, ["quality"], q
         t0 = now()
-        tests = [t for i in new_rows for t in rows[i]["tests"]] + [t for r_ in rows.values() if r_["status"] == "proven" for t in r_["tests"]]
-        fails = run_tests(sorted(set(tests)))
-        event("gate_stage", stage="acceptance-quick", secs=round(now() - t0), fails=len(fails))
+        fails = run_tests(gate_tests(new_rows, rows))
+        event("gate_stage", stage="acceptance-quick", secs=round(now() - t0), fails=len(fails), failed=sorted(fails)[:20])
         log = (ST / "last-gate.txt").read_text(encoding="utf-8", errors="replace")[-20000:] if fails else ""
         return (not fails), fails, log
     if not quality_on():  # the quality stage's strict clippy is a superset; running both cost ~10 min a train (2026-11-12)
@@ -911,11 +954,10 @@ def gate(new_rows, rows, quick=False):
         event("gate_stage", stage="quality", secs=round(now() - t0), rc=1 if q else 0)
         if q:
             return False, ["quality"], q
-    tests = [t for i in new_rows for t in rows[i]["tests"]]
-    tests += [t for r_ in rows.values() if r_["status"] == "proven" for t in r_["tests"]]
+    tests = gate_tests(new_rows, rows)
     t0 = now()
-    fails = run_tests(sorted(set(tests)))
-    event("gate_stage", stage="acceptance", secs=round(now() - t0), n=len(set(tests)), fails=len(fails))
+    fails = run_tests(tests)
+    event("gate_stage", stage="acceptance", secs=round(now() - t0), n=len(tests), fails=len(fails), failed=sorted(fails)[:20])
     # 2026-11-13: an empty log here sent every unowned acceptance failure to bisect (~18 min a level, 6 h with 0 landed)
     log = (ST / "last-gate.txt").read_text(encoding="utf-8", errors="replace")[-20000:] if fails else ""
     return (not fails), fails, log
@@ -1115,6 +1157,9 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
                 reject(q, "own acceptance failed on merged tree: " + ", ".join(t for t in fails if t in rows[q["row"]]["tests"]))
         rest = [q for q in merged if q["row"] not in own]
         return try_batch(rest, rows, depth + 1, quick=True) if rest else []
+    # before blame and probe, which pin a main-red test on an innocent row
+    if quarantine.heal(sys.modules[__name__], merged, rows, fails):
+        return try_batch(merged, rows, depth + 1, reviewed=True)
     # blame by file: eject branches that touched a file the failure output names
     if P["strip_root"]:  # absolute paths in the log -> repo-relative
         for root in {str(TRAIN), TRAIN.as_posix()}:
@@ -1294,6 +1339,8 @@ def train_once():
         wait = BATCH_WAIT_BUSY if in_flight else 0
         if not queue or (len(queue) < MIN_BATCH and now() - min(q["ts"] for q in queue) < wait):
             return False
+        if quarantine.paused(sys.modules[__name__]):
+            return False
         batch = disjoint(sorted(queue, key=lambda q: q["ts"]))[:BATCH_CAP]
         for q in batch:
             if q["row"] not in rows:
@@ -1306,6 +1353,9 @@ def train_once():
             event("review_deferred", rows=[q["row"] for q in batch], error=str(e)[-300:])
             print(f"{iso()} train: reviewer unavailable, batch deferred", flush=True)
             time.sleep(300)  # the loop calls train_once again; nothing was removed from the queue
+            return True
+        except quarantine.MainBroken as e:  # rows stay queued
+            print(f"{iso()} train: {e}", flush=True)
             return True
         if landed and git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip() != git("rev-parse", "main").stdout.strip():
             promote(landed)
@@ -1320,6 +1370,7 @@ def train_once():
                 subprocess.Popen(["py", "-3", str(HOME / gen)], cwd=HOME, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         print(f"{iso()} train: landed {len(landed)}/{len(batch)} in {round(now() - t0)}s", flush=True)
+        quarantine.release(sys.modules[__name__])
         return True
 
 

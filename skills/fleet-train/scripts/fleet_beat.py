@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 import json, os, re, subprocess, sys, time
 import harness as h
+import beat_alarms
 
 TIMEOUTS = []
 
@@ -100,6 +101,8 @@ except Exception:
     base = []
 if base:
     alarms.append(f"MAIN-RED {len(base)} unit tests red on main (unit-baseline.json): brief a fix agent (clean-start/clean-submit)")
+alarms += beat_alarms.known_red(h) + beat_alarms.repeat_test(h, ev)
+alarms += beat_alarms.origin_behind(lambda *a: run(["git", *a], cwd=str(h.REPO)).stdout)
 rj = [e for e in ev if e.get("event") == "reject" and now - e["ts"] < 7200]
 if len(rj) >= 6 and len(rj) > 2 * landed2:
     alarms.append(f"REJECTS {len(rj)} rejects vs {landed2} landed in 2h: read the reasons, fix the shared cause")

@@ -39,6 +39,7 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
 | A batch holds at most HARNESS_BATCH_CAP rows (20), picked by trial merges so rows never conflict in the gate | `disjoint()` (git merge-tree, file-disjoint fallback) |
 | Gate once per batch: format (auto-fixed in file batches), clippy -D warnings (skipped when the quality stage runs), unit, then acceptance of every proven row plus the batch, built once in release and run as parallel binaries | `gate()` |
 | Rerun before blaming: a failed test reruns alone; perf-budget failures go to state/perf-debt.jsonl; stale fixture locks are cleared and rerun once; unit failures main already has are not blamed; up to 5 new unit failures rerun single-threaded | `gate()`, state/unit-baseline.json, `unit_flaky` |
+| Main-red tests are nobody's fault: a failing test no batch row owns runs alone on main first; red there, it is quarantined (state/accept-known-red.json + a fix request in notes/requests/), the gate skips it and the same batch is re-gated; over 3 at once the train pauses until main moves; it returns to the gate once it passes alone on main | `quarantine.py` (quarantine / quarantine_cap / unquarantine) |
 | Blame by file, then probe, then bisect: files named in a failure eject only the branches touching them; an unowned failing test blames the branch touching a file its source names; an acceptance-only red bisects with only the failing tests first | blame, `probe_culprit` (probe_found / probe_none) |
 | No train without the stack's required env | `[profile] require_env` (rust on Windows: ProgramFiles(x86), which Git Bash drops) |
 | Quality has no switch. Every claim carries `must_also_before_commit` (search spec/index and the ARCHITECTURE owners first; run dup_blocks, dup_literals, shape_check, check_cycles, strict clippy). The gate runs those plus the owner guard (allowlist stays EMPTY: replace or rename, never grandfather) and the size gate; `batch_review` rejects a branch that duplicates an existing owner under any name; the pre-push hook refuses any push to main whose commit fails the quality check | claim JSON, `owner_copies`, `oversized_files` (HARNESS_FILE_LINES 500, tests 600; files already over are grandfathered until split), `batch_review`, `scripts/pre-push.hook` -> `<repo>/.git/hooks/pre-push` |
@@ -117,7 +118,7 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
   that many runs (capped per beat). Scale with several routines on staggered minutes, never by firing runs by hand.
 - The heartbeat is a health check, not a liveness check. fleet_beat prints ALARMS (TRAIN-DOWN, TRAIN-PID,
   TRAIN-KILLABLE, TRAIN-ENV, STALL, LONG-BATCH, REPEAT-RED, MAIN-RED, REJECTS, REWORK, STALE-CLAIMS, OLD-QUEUE,
-  TRAIN-ERROR, DISK, BEAT-TIMEOUT), each naming its fix; the manager fixes every one in the same beat. A failure mode
+  TRAIN-ERROR, DISK, BEAT-TIMEOUT, KNOWN-RED, REPEAT-TEST, ORIGIN-BEHIND; the last three in `beat_alarms.py`), each naming its fix; the manager fixes every one in the same beat. A failure mode
   found by hand gets a new check in fleet_beat.py.
 - Train process: `train --loop` writes state/train.pid. TRAIN-DOWN restarts it detached through WMI (Win32_Process
   Create, HARNESS_* vars on its command line), never Start-Process or Popen from an agent shell (the child dies with
