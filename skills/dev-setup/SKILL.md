@@ -1,6 +1,6 @@
 ---
 name: dev-setup
-description: Set up a computer and a new project for agent development from zero. It installs Git and the GitHub CLI if missing, gets the owner signed in, installs the ai-dev-guide skills, writes the global agent rules, creates the project folder in Documents/AppDevelopment/<name>, then walks the owner through dev-prep, dev-plan and dev-build. Use when the owner says "dev-setup", "set me up", "set up a new project", "get started", or is new to this workflow.
+description: Set up a computer and a new project for agent development from zero: Git and the GitHub CLI, sign-in, the ai-dev-guide skills, global agent rules and the project folder, then dev-prep, dev-plan and dev-build. Use when the owner says "dev-setup", "set me up", "set up a new project", "get started", or is new to this workflow.
 ---
 
 # dev-setup

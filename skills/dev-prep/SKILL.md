@@ -1,6 +1,6 @@
 ---
 name: dev-prep
-description: Brainstorm a new app or project from nothing with the owner, in rounds of multiple-choice questions plus research into similar apps and open-source projects, until every function the owner wants now, later or maybe is written into a feature map (prep/FEATURES.md, DECISIONS.md, OPEN.md) that dev-plan turns into a build spec. Use when the owner says "new app", "new project", "start a project from scratch", "brainstorm features", "what should my app do", or "dev-prep". The first of three skills: dev-prep, dev-plan, dev-build.
+description: Brainstorm a new app with the owner in rounds of multiple-choice questions plus research into similar apps, until every wanted function is in a feature map (prep/FEATURES.md) that dev-plan turns into a spec. Use when the owner says "new app", "new project", "start a project from scratch", "brainstorm features", "what should my app do" or "dev-prep".
 ---
 
 # dev-prep

@@ -1,6 +1,6 @@
 ---
 name: overhaul-check
-description: Decide whether the current project needs a full overhaul (rebuild from the ground up), a partial rewrite of some areas, targeted refactors, or nothing. Measures and scores architecture, code organization, code quality, duplication, tests and the gate, dependencies, security, bug and change history, build and delivery, roadmap fit, wordiness (AI slop in code, comments, docs and UI text) and the owner's own rules, then writes a scored report with a verdict and the repair-versus-rebuild hours. Use when the owner asks whether a project needs an overhaul or rewrite, or wants a full health or quality audit of a codebase.
+description: Decide whether a project needs a full overhaul, a partial rewrite, targeted refactors or nothing, by scoring architecture, quality, duplication, tests, dependencies, security, history, delivery and wordiness into a report with a verdict and repair-versus-rebuild hours. Use when the owner asks whether a project needs an overhaul or rewrite, or wants a full health or quality audit.
 ---
 > **RULE ZERO (the most important rule, ever):** the work must be valuable, well made, clean code that can be built
 > out and extended. A very solid foundation beats functionality depth: missing depth is acceptable, a weak foundation

@@ -1,6 +1,6 @@
 ---
 name: overhaul-plan
-description: Plan a ground-up rebuild of an existing project as a new <name>-rebuild repo of checked contracts - spec/FUNCTIONS.md (one row per user-visible behaviour), an acyclic spec/ARCHITECTURE.md, acceptance tests written now that drive only the public entry and fail, and overhaul.toml with the real toolchain - done only when plan_validate.py prints PLAN OK. Use when the owner asks to overhaul, rewrite or re-plan a whole project, after overhaul-check returns OVERHAUL, or when overhaul-build's drive.py exits 3 with a needs-plan function to split or fix.
+description: Plan a ground-up rebuild of a project as a new <name>-rebuild repo of checked contracts (FUNCTIONS, an acyclic ARCHITECTURE, failing acceptance tests through the public entry, overhaul.toml), done only at PLAN OK. Use when the owner asks to overhaul, rewrite or re-plan a whole project, after overhaul-check returns OVERHAUL, or when drive.py exits 3 with a needs-plan function.
 ---
 > **RULE ZERO (the most important rule, ever):** the work must be valuable, well made, clean code that can be built
 > out and extended. A very solid foundation beats functionality depth: missing depth is acceptable, a weak foundation
@@ -125,8 +125,8 @@ dispatch), `tests/conftest.py` holding every shared fixture once (copies fail sh
 Then fan out ONE subagent per module, all in a SINGLE message of parallel Agent calls (model sonnet), each briefed
 from `templates/module-brief.md` (beside this file) filled with that module's rows only; it reads ARCHITECTURE and
 writes the module's stubs (every function's files: signatures, types, docstrings, bodies raising NotImplementedError,
-importable), acceptance tests and 1 to 3 Hypothesis tests per function in `tests/property/test_<id>.py`. Never write
-them serially yourself: one chat writing 23 functions took 22 minutes; the fan-out targets under 10. Then run Step 7
+importable), acceptance tests (`templates/acceptance-example.md`) and 1 to 3 Hypothesis tests per function in
+`tests/property/test_<id>.py`. Never write them serially yourself; the fan-out targets under 10 minutes. Then run Step 7
 once and fix what fails. An outside service a test cannot reach: assert up to the product's boundary through a
 public entry and add one DECISIONS line. Planned tests are anchors.
 
@@ -152,27 +152,8 @@ retries_per_function = 1
 mutation_floor = 0.9
 max_mutants = 40
 ```
-Optional, all backward compatible: `[commands.acceptance_by]` maps a test-file glob to its own template (scale tests:
-`"tests/acceptance/scale_*.rs" = "cargo test --release --test {stem} -- --exact {test} --test-threads=1"`); `[tiers]
-scale = [globs]` reruns those proven tests at land only when the footprint touches their module; `[commands.extra]`
-(name = command) adds project lints land and pre-review run. A FUNCTIONS `rules` column (`P07, S18`) with `[paths]
-patterns` / `standards` cites project rule ids: plan_validate checks each id exists, each `ui:` row (or entry naming a
-`[plan] interactive_verbs` word) cites a pattern id, and each cited pattern id is named in its acceptance test.
-Rolling plan: status `deferred` marks a row planned later (id, phase, module, deps and entry checked; no files or
-tests yet; no planned row may depend on it); FUNCTIONS may hold one table per phase. `[plan] checks = ["ui_verb",
-"float_roundtrip"]` opts in to: each `ui:` row deps on a `cli:`/`http:` row; every serde_json dependency enables
-float_roundtrip. Policies `Fault hook: NAME`: every crash test body names NAME. `[plan] policy_lists = {cancellable =
-"cancel"}`: a `Cancellable:` Policies line whose ids each need a test matching the regex. `[plan] traces =
-["spec/PERFORMANCE.md"]`: each table row names an ARCHITECTURE module (owner) and a test node in a FUNCTIONS cell.
-Reuse before new (X16): a module may carry `Forbidden types: *Undo*, *Redo*` (type stems only it defines; each stem
-has one owner), `Capability: <what it does>` and `Why new: <one line>`; no module name or Capability may match another
-owner's stems. A new owner (a `Why new:` line, or missing from ARCHITECTURE at git ref `[plan] owners_since`) needs
-the reason. `spec/ROADMAP.md` (`[paths] roadmap`) holds the later phases as `| phase | behaviour | owner | why new |`:
-an owner not in ARCHITECTURE is new, needs a why-new on one row and must not match other owners' stems; phases obey
-max_phase_size. Plan the whole phase map there so plan_validate checks it, not only the current phase.
-Rust (plan_validate checks it): when documents store floats, serde_json gets `features = ["float_roundtrip"]` (else 0.059000000000000004 reads back as 0.059 and byte-equal undo/redo breaks); acceptance in `tests/acceptance/<f>.rs`, each a root Cargo.toml `[[test]]` named by its stem, through `mod entry;`;
-stubs `todo!()`; unit tests in-crate `#[cfg(test)] mod tests`; property `tests/property/test_<id>.rs` with `proptest!`; no conftest.py. Commands: test `cargo test -q --workspace --lib --bins`,
-acceptance `cargo test -q --test {stem} -- --exact {test}`, property `cargo test -q --test {stem}`, lint `cargo clippy -q --workspace --all-targets -- -D warnings`, the scripts on `crates src`. JS: `npx eslint .`, `npx jscpd src`, `node --test`.
+Optional keys (tiers, extra lints, a rules column, deferred rows, plan checks, ROADMAP) and the Rust and JS commands:
+`templates/overhaul-toml.md`, read for the parts the project needs.
 Install what is missing now (`py -3 -m pip install ruff pylint pytest`); every command but acceptance exits 0 on the skeleton.
 
 ## Step 7. Validate until PLAN OK
@@ -187,40 +168,10 @@ path, `PLAN OK, N functions, M modules`, and next: run overhaul-build (its dash.
 One numbered line per decision, no ceremony: `D3: drop export-xml; nothing reaches it.` One for every dropped old
 entry, deliberate behaviour change, dependency added after the plan, and acceptance test changed after the plan.
 ## Re-plan a needs-plan function (drive.py exited 3)
-Read only its row, `.overhaul/reviews/<id>.txt` and its `.overhaul/log.jsonl` lines, never the diff. A row parked
-oversized (a builder, land or acceptance timeout, or too big for one builder) comes back split (1), never tweaked;
-every row you add or change keeps the row size and carries its work packet (Step 4). Do one, add one
-DECISIONS line, pass Step 7, make a plan commit on a branch (only spec/, tests/, new stubs, overhaul.toml), move main
-to it only at PLAN LAND OK (rule below), then run `drive.py --repo <rebuild> --reset <id>` and restart drive.py:
-1. Split it: new ids with one new failing test each; update deps and OLD-ENTRIES lines naming it; drop its row and test.
-2. Fix its acceptance test, only where it contradicts OLD-ENTRIES or DECISIONS, never to make it easier.
-3. Fix the plan: add the missing API item or dependency, or move the function to the module that owns the code.
-Acceptance already green before the change: strengthen the test in a plan commit or, if a dep truly delivered
-it, have a blind reviewer confirm and run `drive.py --repo <rebuild> --mark-proven <id> --evidence <review file>`.
+Follow `templates/replan.md`. A row parked oversized comes back split, never tweaked; every row you add keeps the row size
+and its work packet, and main moves only at PLAN LAND OK.
 
-## What good looks like (a CLI app; F02 is `shop product add`, F03 is `shop cart show`)
-`| F04 | 1 | cart | F02,F03 | cli: shop cart add <sku> <qty> | tests/acceptance/test_cart.py::test_f04_cart_add | planned | src/shop/cart/add.py | F02:behaviour, F03:stub |`
-```python
-# tests/acceptance/_entry.py: the only door from a test into the product
-import os, subprocess, sys
-from pathlib import Path
-SRC = Path(__file__).resolve().parents[2] / "src"
-def run_cli(data, *args):
-    env = {**os.environ, "PYTHONPATH": str(SRC), "SHOP_DATA": str(data)}
-    return subprocess.run([sys.executable, "-m", "shop", *args], cwd=data, env=env,
-                          capture_output=True, text=True, timeout=60, check=False)
-# tests/acceptance/test_cart.py
-from _entry import run_cli
-def test_f04_cart_add(tmp_path):
-    assert run_cli(tmp_path, "product", "add", "MUG1", "Mug", "4.50").returncode == 0
-    added = run_cli(tmp_path, "cart", "add", "MUG1", "2")
-    assert added.returncode == 0, added.stderr
-    assert "MUG1" in added.stdout and "9.00" in added.stdout  # F03 (totals) is a code dep: its stub is enough
-    bad = run_cli(tmp_path, "cart", "add", "NOPE", "1")
-    assert bad.returncode != 0 and "unknown sku" in bad.stderr.lower()
-```
-Good: only public commands of F04 and its deps, its own data dir, what the user sees plus an error case, red today,
-`-k test_f04_cart_add` runs exactly it. Bad: importing `shop.cart`, a mocked store, or checking only the exit code.
+A good acceptance test, with what makes it good or bad: `templates/acceptance-example.md`.
 ## Rules
 - The plan is done only at PLAN OK: every function has a public entry, an acceptance test that exists and fails now, and deps in the same or an earlier phase [by plan_validate.py --run].
 - Every row is one function or one verb behaviour in at most 3 files, and its ARCHITECTURE bullet carries a work packet (files with the symbol to edit after, exact signature, helpers to call from spec/index, test command); every capability it calls exists on main or in a dep row [by plan_validate.py].
@@ -229,6 +180,6 @@ Good: only public commands of F04 and its deps, its own data dir, what the user 
 - Each cross-cutting policy has one owner, each domain rule one function, every concurrent writer a concurrent test and every boundary a negative test [by plan_validate.py].
 - Lint enforces line length and the strict set, no 20+ char literal is written twice, functions stay within 30 lines, constants sit at the top and no fixture is copied [by plan_validate.py, dup_literals.py and shape_check.py].
 - The plan commit lands a stub per function in its required `files` cell (signatures, types, docstrings, bodies raising NotImplementedError) that imports; the longest chain of blocking (`behaviour`) deps is at most max(4, ceil(N/4)), or `[plan] max_depth` [by plan_validate.py].
-- No plan commit moves main of a project with proven rows until `plan_land.py --repo R --branch B` prints PLAN LAND OK: PLAN OK, dup and literals, and every proven acceptance test the commit's files can break, green on B merged with main [by plan_land.py, run by supervise.py and by the planner]. A planner moves main only with `plan_land.py --repo R --branch B --ff` (B rebased onto main), never `git merge --ff-only`: a merge writes the files before the main guard can refuse and leaves the checkout dirty; --ff lets the guard judge the ref first, and a refusal leaves main and the checkout as they were.
+- No plan commit moves main of a project with proven rows until `plan_land.py --repo R --branch B` prints PLAN LAND OK: PLAN OK, dup and literals, and every proven acceptance test the commit's files can break, green on B merged with main [by plan_land.py, run by supervise.py and by the planner]. A planner moves main only with `plan_land.py --repo R --branch B --ff` (B rebased onto main), never `git merge --ff-only`, so the guard judges the ref before any file changes [by plan_land.py].
 - A function counts only when its test is red on main, green after the merge, and every proven test stays green [by land.py].
 - Builders never edit tests/acceptance or leave their module's Paths [by drive.py's brief and the blind review].

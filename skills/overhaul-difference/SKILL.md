@@ -1,6 +1,6 @@
 ---
 name: overhaul-difference
-description: Compare a rebuilt project (NEW) with the original (OLD) after or during an overhaul, from measurements only, and publish the difference as a dashboard artifact - verdict, OLD vs NEW scorecard on the overhaul-check dimensions, code metrics side by side, function parity, bug patterns, fleet cost and what survived. Use when the owner says "compare the overhaul with the original", asks for a "difference report", "what changed in the rebuild", or "overhaul-difference". The fourth skill after overhaul-check, overhaul-plan and overhaul-build.
+description: Compare a rebuilt project (NEW) with the original (OLD) from measurements only and publish the difference as a dashboard artifact: verdict, scorecard, code metrics, function parity, bug patterns, fleet cost. Use when the owner says "compare the overhaul with the original", "difference report", "what changed in the rebuild" or "overhaul-difference".
 ---
 
 # overhaul-difference
