@@ -651,6 +651,25 @@ def fmt_tree(cwd):
         git("commit", "-qam", "train: rustfmt", cwd=cwd, check=False)
 
 
+def regen_tree(cwd) -> str:
+    """Run the profile's optional `regen` commands (generated files: an index, a catalogue) in the train tree and commit
+    what changed as "train: regen", so the land commit holds files regenerated from the merged batch, not from each
+    row's own base. Returns "" when all is well, else the failure text (the caller fails the batch's quality with it)."""
+    for c in P.get("regen") or []:
+        try:
+            r = sh(c, cwd=cwd, check=False, timeout=600)
+        except subprocess.TimeoutExpired:
+            event("regen_error", cmd=c, rc="timeout")
+            return f"regen: `{c}` timed out after 600s"
+        if r.returncode != 0:
+            event("regen_error", cmd=c, rc=r.returncode)
+            return f"regen: `{c}` exited {r.returncode}{chr(10)}{(r.stdout + r.stderr)[-3000:]}"
+    if git("status", "--porcelain", cwd=cwd, check=False).stdout.strip():
+        git("add", "-A", cwd=cwd, check=False)
+        git("commit", "-qm", "train: regen", cwd=cwd, check=False)
+    return ""
+
+
 def unit_failures(out: str, first_only=False) -> set:
     """Failing unit test names in a unit run's output (the quick gate has always parsed only the first pattern)."""
     pats = P["unit_fail_re"][:1] if first_only else P["unit_fail_re"]
@@ -824,6 +843,9 @@ def gate(new_rows, rows, quick=False):
     """Return (ok, failed_tests, log)."""
     env = run_env(TRAIN_ENV)
     fmt_tree(TRAIN)  # auto-fix formatting, never fail on it
+    bad = regen_tree(TRAIN)  # generated files: regenerated from the merged tree; a failing command fails the batch
+    if bad:
+        return False, ["quality"], bad
     if quick:  # retry after ejecting rows whose own tests failed: lint passed with them in; unit is re-run (cheap, and
         # removing a branch can break another that used it)
         r = sh(P["unit"], cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=1800)

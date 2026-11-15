@@ -99,6 +99,11 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
   profile in `STACKS` at the top of harness.py. Pick it with `HARNESS_STACK=rust` (default) or `node`, or with
   `stack = "node"` in `<HARNESS_HOME>/harness.toml`; a `[profile]` table there overrides any key, for example
   `unit = "npm run test:unit --silent"`, `qa = ["dup_literals.py", "check_cycles.py"]`, `src_dirs = ["lib"]`.
+- Generated files: `regen = ["<shell command>", ...]` in `[profile]` (optional, default none) runs each command in the
+  train tree after the batch is merged and formatted, before the gate; changes are committed as "train: regen" so the
+  land commit holds files regenerated from the merged batch (rows regenerating on their own base leave main stale). A
+  non-zero exit or timeout (600 s) logs a `regen_error` event and fails the batch's quality stage. Example:
+  `regen = ["py -3 tools/gen_index.py", "py -3 tools/gen_catalogue.py"]`.
 - Rust: cargo test/clippy/rustfmt, crates/ layout, CARGO_TARGET_DIR per slot. Acceptance ids are
   `tests/acceptance/<stem>.rs::<test_fn>`.
 - Node: `node --test --test-reporter=tap` (or `npm test` when package.json has a test script), prettier and eslint

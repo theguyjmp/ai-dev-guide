@@ -1,5 +1,6 @@
 # fleet-train changelog
 
+- 2026-11-14: optional `regen` commands in harness.toml `[profile]`: run in the train tree after the formatter and committed as "train: regen", so generated files cannot drift on main; a failure fails the batch quality.
 - 2026-11-11: train conflict resolver (`resolve_conflict`, HARNESS_RESOLVE_MAX): 16 of 18 rows in one train of the pilot project were rejected on one hot file.
 - 2026-11-12: train start rule (HARNESS_BATCH_WAIT_BUSY): wait for a full batch while claims are in flight, start at once when none; a 1-row train had cost a full gate.
 - 2026-11-12: `unit_flaky`: new unit failures are rerun alone, single-threaded, before the batch is blamed (a timing test failed two gates under load).
