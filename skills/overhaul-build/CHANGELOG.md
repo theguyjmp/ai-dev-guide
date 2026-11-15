@@ -1,5 +1,8 @@
 # overhaul-build changelog
 
+## Ranked owner search and per-phase packets, 2026-11-15
+`index_api.py --find "<purpose words>"` ranks the committed index lines for a search (builders use it instead of a raw grep; purpose tokens are computed, no longer stored in the index files, where they were 36% of the words). plan_validate reads work packets from ARCHITECTURE plus `[paths] packets` (default spec/packets/*.md) and no longer checks proven rows, whose packets the land deletes.
+
 ## Plan fixing critical path first, 2026-11-10
 the pilot project 2026-11-10: Q09 (store::ids::next_id) blocked 80 rows and sat needs-plan for hours while live rounds fixed
 low-value rows; ready rows were 0 most of the afternoon.

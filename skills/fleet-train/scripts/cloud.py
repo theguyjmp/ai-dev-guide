@@ -11,8 +11,7 @@ The cloud builder brief is <HARNESS_CLOUD_KIT>/BUILDER.md in the repo (templates
 Run `collect` every 5 minutes (Task Scheduler / cron); it also tops the assignments up to HARNESS_CLOUD_TARGET.
 
 Env: HARNESS_CLOUD_KIT (kit folder in the repo, default tools/cloud), HARNESS_CLOUD_TARGET (rows kept assigned, default
-40), HARNESS_CLOUD_TTL (seconds a claimed row may push nothing, default 7200), HARNESS_CLOUD_QA (quality scripts copied
-to sessions, comma-separated, default the train's), plus harness.py's HARNESS_* settings.
+40), HARNESS_CLOUD_TTL (seconds a claimed row may push nothing, default 7200), plus harness.py's HARNESS_* settings.
 """
 from __future__ import annotations
 
@@ -35,8 +34,25 @@ KIT = os.environ.get("HARNESS_CLOUD_KIT", "tools/cloud")  # the builder kit insi
 BASE = "cloud-base"  # origin branch every session starts from (refreshed from local main by collect)
 CLOUD_TTL = int(os.environ.get("HARNESS_CLOUD_TTL", str(2 * 3600)))  # a session that claimed a row and pushed nothing for this long is released
 STATE = "cloud.json"
-QA = [f for f in os.environ.get("HARNESS_CLOUD_QA", ",".join(h.P["cloud_qa"])).split(",") if f]  # the train's checks (stack profile)
-QA_DIR = "/tmp/harness-qa"  # where the kit's claim.sh puts them in a session
+QA_DIR = "/tmp/harness-qa"  # claim.sh copies qa/ here
+SESSION_RULES_CHECK = (f"HARNESS_QS={QA_DIR} python3 {QA_DIR}/rules_gate.py check --dir . --base origin/{BASE} "
+                       f"--state {QA_DIR} --lang {h.STACK}")
+
+
+def qa_files() -> dict:
+    """{name: source}: the train's checks for a session (overhaul-build scripts, rules gate, its debt)."""
+    out = {p.name: p for p in sorted(Path(h.QS).glob("*.py"))}
+    here = Path(h.__file__).parent
+    out.update({n: here / n for n in ("rules_gate.py", "rules_langs.py")})
+    debt = h.ST / h.rules_gate.DEBT
+    if debt.exists():
+        out[debt.name] = debt
+    return out
+
+
+def for_session(cmds: str) -> str:
+    """harness.QUALITY_BRIEF as a session runs it."""
+    return cmds.replace(h.RULES_CHECK, SESSION_RULES_CHECK).replace(f"py -3 {h.QS}/", f"python3 {QA_DIR}/")
 
 
 def heads() -> dict:
@@ -72,8 +88,12 @@ def sync_wt():
         h.git("reset", "-q", "--hard", f"origin/{BR}", cwd=CW)
     (CW / "assign").mkdir(exist_ok=True)
     (CW / "qa").mkdir(exist_ok=True)
-    for f in QA:  # current copies of the land train's quality scripts, so sessions run exactly what the train runs
-        (CW / "qa" / f).write_bytes((Path(h.QS) / f).read_bytes())
+    qa = qa_files()
+    for f in (CW / "qa").iterdir():
+        if f.is_file() and f.name not in qa:
+            f.unlink()
+    for name, src in qa.items():
+        (CW / "qa" / name).write_bytes(src.read_bytes())
     (CW / "kit").mkdir(exist_ok=True)
     for f in h.git("ls-tree", "--name-only", "main", f"{KIT}/").stdout.split():  # the builder kit, readable even
         (CW / "kit" / Path(f).name).write_bytes(h.git("show", f"main:{f}").stdout.encode())  # while origin/main lags
@@ -102,7 +122,7 @@ def write_assignment(slot, info, hd):
     elif f"prev-{row}" in hd:  # work in progress a released cloud session saved
         prev = {"branch": f"origin/cloud/prev-{row}"}
     a = {**info, "slot": slot, "branch": f"cloud/{row}", "base": f"origin/{BASE}", "previous_branch": prev, "stack": stack,
-         "must_also_before_commit": info["must_also_before_commit"].replace(f"py -3 {h.QS}/", f"python3 {QA_DIR}/"),
+         "must_also_before_commit": for_session(info["must_also_before_commit"]),
          "assigned": h.iso(), "brief": f"{KIT}/BUILDER.md"}
     (CW / "assign" / f"{row}.json").write_text(json.dumps(a, indent=1), encoding="utf-8")
 

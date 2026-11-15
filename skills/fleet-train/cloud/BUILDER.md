@@ -18,7 +18,8 @@ Every Bash call: `cd <repo root> && source /opt/harness/env.sh && ...` (the shel
    say why earlier attempts failed: fix exactly that.
 4. You OWN this row completely. There is no planner to send it back to: if a dependency capability is missing, a stub
    is in the way, the row is too big, or a file is not in the row's file list, implement what is needed yourself, in
-   the module where it belongs. Keep it minimal and clean (no duplicated helpers: grep for an existing one first).
+   the module where it belongs. Keep it minimal and clean: find an existing owner first with
+   `python3 /tmp/harness-qa/index_api.py --find "<purpose words>"` (ranked index lines; never a raw grep).
 5. **Done** = the row's acceptance tests pass: `cargo test -q --test <stem> -- --exact <test_name>` for each test in
    `tests` (add `--release` if a debug run takes over 3 min). Then strict clippy for each crate you touched:
    `cargo clippy -q -p <crate> --all-targets -- -D warnings -D clippy::too_many_lines -D clippy::unwrap_used -D clippy::cognitive_complexity`.
@@ -36,7 +37,8 @@ Every Bash call: `cd <repo root> && source /opt/harness/env.sh && ...` (the shel
    it reports none (at most 2 rounds). The land train runs the same reviewer and rejects anything it lists.
 7b. **Rebase before push.** `git fetch -q origin cloud-base && git rebase origin/cloud-base`; resolve conflicts keeping both
    sides' behaviour, re-run the row's tests if anything changed. A row that merges clean never waits on a rebaser.
-8. **Push.** `git push -q origin HEAD:refs/heads/cloud/<row>`. Then stop and report `DONE <row>`.
+8. **Push.** Re-run the `rules_gate.py check` command from `must_also_before_commit` (it must print RULES OK), then
+   `git push -q origin HEAD:refs/heads/cloud/<row>`. Then stop and report `DONE <row>`.
 9. **Budget.** About 90 tool calls. If you cannot get it green by then, or the same step fails twice the same way, run
    `bash tools/cloud/release.sh <row> "<precise blocker: file, error, what is needed>"` (it saves your work as
    `cloud/prev-<row>` for the next attempt), then stop and report `BLOCKED <row>: <reason>`.

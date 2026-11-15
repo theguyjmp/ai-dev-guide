@@ -59,9 +59,11 @@ Problems (each is one line):
     must PASS. Planned tests are anchors: land.py rejects a branch that modifies one (anchors.py).
   - row size and work packet (owner 2026-11-10): a row's files cell names more than 3 files, or its ARCHITECTURE API
     bullet (`- <signature> [F04]`) has no `Packet: edit <file> after <symbol>; calls <helpers or ->; test <command>` line
-    (edits only inside its files cell). An error for a new or changed unproven row while [plan] work_packets = true
-    (default); a stderr warning for a proven row, work_packets = false, or a row unchanged since the baseline
-    ([plan] work_packets_since, else the main branch when the plan has proven rows);
+    (edits only inside its files cell). A packet may sit in ARCHITECTURE or in a per-phase file under [paths] packets
+    (default spec/packets/*.md) as "- `F04` [F04] Packet: ...". An error for a new or changed unproven row while
+    [plan] work_packets = true (default); a stderr warning for work_packets = false or a row unchanged since the
+    baseline ([plan] work_packets_since, else the main branch when the plan has proven rows); a proven row is done and
+    is not checked (its packet is deleted at land, 2026-11-15);
   - optional `rules` column (P07, S18; X12/X14): a cited id not defined in the [paths] patterns or standards file; with
     [paths] patterns, a `ui:` row or a row whose entry names a [plan] interactive_verbs word that cites no pattern id,
     or a cited pattern id missing from its acceptance test's name and comments. [commands.acceptance_by] templates
@@ -124,7 +126,7 @@ for name in sys.argv[1:]:
         bad.append(f"{name}: {type(e).__name__}: {e}")
 print("\\n".join(bad))
 """
-DEFAULT_PATHS = {"functions": "spec/FUNCTIONS.md", "architecture": "spec/ARCHITECTURE.md"}
+DEFAULT_PATHS = {"functions": "spec/FUNCTIONS.md", "architecture": "spec/ARCHITECTURE.md", "packets": "spec/packets"}
 MAX_ROW_FILES = 3  # owner 2026-11-10: a row is one function or one verb behaviour, ~50-150 lines in 1-3 files
 API_TAG = re.compile(r"\[([^\]]*)\]")
 PACKET = re.compile(r"\bpacket(?:\s+([A-Za-z0-9][\w.-]*))?\s*:\s*(.*)$", re.I)
@@ -1350,11 +1352,20 @@ def same_row(a, b):
     return all(bare(str(a.get(k, ""))) == bare(str(b.get(k, ""))) for k in keys)
 
 
+def packet_text(repo, arch_file, packets_dir):
+    """ARCHITECTURE's text followed by every per-phase work packet file (sorted), or '' without ARCHITECTURE."""
+    if not arch_file.is_file():
+        return ""
+    d = repo / packets_dir
+    files = [arch_file, *sorted(d.glob("*.md"))] if d.is_dir() else [arch_file]
+    return "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in files)
+
+
 def check_packets(rows, arch_text, cfg, repo, problems, notes, flabel):
     """Row size and work packets (owner 2026-11-10). Every row's files cell names at most 3 files and its ARCHITECTURE
     bullet carries a work packet. An error for a new or changed unproven row while [plan] work_packets is on (default);
-    a stderr warning for a proven row, an unproven row unchanged since the baseline, or work_packets = false. The
-    baseline is [plan] work_packets_since, else (a plan with proven rows: a live build) the main branch."""
+    a stderr warning for an unproven row unchanged since the baseline, or work_packets = false. A proven row is done:
+    not checked. The baseline is [plan] work_packets_since, else (a plan with proven rows: a live build) main."""
     plan = cfg.get("plan") or {}
     on = plan.get("work_packets", True) is not False
     ref = plan.get("work_packets_since") or (
@@ -1365,7 +1376,7 @@ def check_packets(rows, arch_text, cfg, repo, problems, notes, flabel):
     bullets, seen = api_packets(arch_text), set()
     for r in rows:
         fid, st = r.get("rid") or bare(r["id"]), r.get("st") or bare(r["status"]).lower()
-        if st == DEFERRED or fid in seen or not ID.match(fid):  # check_rows reports a bad or duplicate id
+        if st in (DEFERRED, "proven") or fid in seen or not ID.match(fid):  # check_rows reports a bad or duplicate id
             continue
         seen.add(fid)
         files, why = row_files(r), []
@@ -1454,8 +1465,8 @@ def validate(repo, run=False, timeout=600, notes=None, lint=True):
         problems += entry_match.cross_problems(repo, rows, paths["functions"], waits_on_fn(rows))
         check_stubs(rows, repo, problems, paths["functions"])
         check_property(rows, cfg, repo, problems, paths["functions"])
-        check_packets(rows, arch_file.read_text(encoding="utf-8", errors="replace") if arch_file.is_file() else "",
-                      cfg, repo, problems, notes if notes is not None else [], paths["functions"])
+        check_packets(rows, packet_text(repo, arch_file, paths["packets"]), cfg, repo, problems,
+                      notes if notes is not None else [], paths["functions"])
         if "ui_verb" in checks:
             check_ui_verb(rows, problems, paths["functions"])
         depth, width, _ = check_depth(rows, cfg, problems, paths["functions"])

@@ -10,6 +10,7 @@ bisect on red).
   py -3 harness.py release --slot N --row R --reason "..."
   py -3 harness.py train [--loop]      # land queued branches
   py -3 harness.py status              # one-line rate
+  py -3 harness.py note "<text>"       # append one line to the dated log (<HARNESS_HOME>/notes/log/YYYY-MM.md)
 
 One harness for every stack: HARNESS_STACK=rust (default) or node, or `stack = "node"` in <HARNESS_HOME>/harness.toml,
 whose [profile] table overrides any command or pattern in STACKS below.
@@ -20,6 +21,8 @@ import argparse, json, os, re, shutil, subprocess, sys, time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+import rules_gate, rules_langs
 
 REPO = Path(os.environ.get("HARNESS_REPO", "."))
 HOME = Path(os.environ.get("HARNESS_HOME", str(Path(__file__).parent)))
@@ -161,8 +164,14 @@ MODULE_CAP = {"kernel": 3}
 DEFAULT_CAP = 6
 
 
+def held_rows() -> set:
+    """Rows a ruling holds back from builders (state/held-rows.txt)."""
+    p = ST / "held-rows.txt"
+    return set(p.read_text(encoding="utf-8").split()) if p.exists() else set()
+
+
 def frontier(rows, claims, queue, attempts):
-    busy = {c["row"] for c in claims.values()} | {q["row"] for q in queue}
+    busy = {c["row"] for c in claims.values()} | {q["row"] for q in queue} | held_rows()
     # Only rows being BUILT (claims) count against the module cap and file overlap. Counting queued rows (built,
     # waiting to land) too left 0 of 93 ready rows buildable while 93 waited in the land queue: builders starved
     # exactly when landing was behind. The trial-merge batch pick handles queued-vs-new overlap at land time.
@@ -361,7 +370,6 @@ STACKS = {
         "lint_strict_brief": ("cargo clippy -q -p <each crate you touched> --all-targets -- -D warnings "
                               "-D clippy::too_many_lines -D clippy::unwrap_used -D clippy::cognitive_complexity"),
         "qa": ["dup_blocks.py", "dup_literals.py", "shape_check.py", "check_cycles.py"],  # in QS, run over src_dirs
-        "cloud_qa": ["dup_blocks.py", "dup_literals.py", "shape_check.py", "check_cycles.py", "rust_src.py"],
         "accept": "cargo",  # build the test binaries once, run each (run_tests_cargo)
         "check": "cargo check -q --workspace --tests",
         "check_exts": [".rs"],
@@ -400,7 +408,6 @@ STACKS = {
         "lint_strict": "",  # eslint on {files} when the project has eslint (load_profile)
         "lint_strict_brief": "",
         "qa": [],  # dup_literals.py / check_cycles.py read JS: turn them on in harness.toml once main passes them
-        "cloud_qa": [],
         "accept": "node --test --test-reporter=tap {names} {file}",  # one run per test file
         "accept_name": "--test-name-pattern=^{name}$",  # `file::*` runs the whole file
         "accept_fail_re": r"^\s*not ok \d+ - (.+?)(?: # .*)?$",
@@ -710,17 +717,22 @@ QUALITY_CMDS = [c.replace("{QS}", QS) if " " in c else f"py -3 {QS}/{c} {' '.joi
 CLIPPY_STRICT = P["lint_strict"]  # the strict linter (name kept from the rust-only harness)
 FILE_LINES = int(os.environ.get("HARNESS_FILE_LINES", "500"))  # spec/STANDARDS.md S8 module-size cap
 TEST_FILE_LINES = int(os.environ.get("HARNESS_TEST_FILE_LINES", "600"))  # the same cap for test files
-CHECKS_BRIEF = " ; and ".join(x for x in (" ; ".join(QUALITY_CMDS), P["lint_strict_brief"]) if x)
+RULES_CHECK = f"py -3 {Path(__file__).with_name('rules_gate.py').as_posix()} check --dir . --lang {STACK}"
+FIND_OWNER = f'py -3 {QS}/index_api.py --find "<purpose words>"'
+RULES_BRIEF = (f"{RULES_CHECK} (must print RULES OK: no swallowed error or silent default, no expect/panic or silenced "
+               "lint in product code, no type named like another owner's Forbidden types, no spec or CLAUDE.md text "
+               "over its [text] caps, no new plan_validate problem)")
+CHECKS_BRIEF = " ; and ".join(x for x in (" ; ".join(QUALITY_CMDS + [RULES_BRIEF]), P["lint_strict_brief"]) if x)
 QUALITY_BRIEF = ("The plan forbids second copies (spec/STANDARDS.md S1, S5, S6, S44): before writing ANY function, "
-                 "private helpers included, grep spec/index/*.md and spec/ARCHITECTURE.md for an owner that already has it "
+                 f"private helpers included, find the owner that already has it with {FIND_OWNER} "
                  + P["owner_note"] + " and extend the owner instead. "
                  f"Keep every file you add or grow at most {FILE_LINES} lines (tests {TEST_FILE_LINES}; STANDARDS S8): split into modules. "
                  "Clean code is part of done. "
                  + ("Before committing, from your worktree run each of: " + CHECKS_BRIEF
                     + ". Fix every problem they report in files you changed (extract repeated blocks into one named fn, "
                     "name repeated literals as consts, split functions over 30 lines into named steps). " if CHECKS_BRIEF else "")
-                 + "Before writing a "
-                 "helper, grep the workspace for an existing one and reuse it. The land train rejects branches that add any of these.")
+                 + "Before writing a helper, find its owner with index_api.py --find and reuse it. "
+                 "The land train rejects branches that add any of these.")
 
 
 def quality_on() -> bool:
@@ -788,6 +800,10 @@ def quality_problems(cwd, base: str = "main") -> str:
     if big:
         out.append("file over the S8 size cap (new or newly over; existing big files are grandfathered until split): "
                    + chr(10) + chr(10).join(big))
+    rules = rules_gate.problems(cwd, base, ST, WT, STACK)
+    if rules:
+        out.append(f"rule ratchet (rules_gate.py; a file may not grow past its state/{rules_gate.DEBT} count): "
+                   + chr(10) + chr(10).join(rules))
     env = run_env(TRAIN_ENV)
     lint = expand(CLIPPY_STRICT, changed_files(cwd, base) if "{file" in CLIPPY_STRICT else [])
     for c in QUALITY_CMDS + lint:
@@ -800,9 +816,8 @@ def quality_problems(cwd, base: str = "main") -> str:
 def cmd_quality_check(a):
     """Used by <repo>/.git/hooks/pre-push: refuse to publish a tree with quality problems."""
     d = Path(a.dir) if a.dir else REPO
-    base = a.base or ("origin/main" if git("rev-parse", "-q", "--verify", "origin/main", cwd=d, check=False).returncode == 0
-                      else "main")
-    q = quality_problems(d, base)
+    # local main: origin/main lags when a push is refused
+    q = quality_problems(d, a.base or "main")
     if q:
         print(q[-3000:])
         sys.exit(1)
@@ -963,9 +978,33 @@ def resolve_conflict(q):
     return ok
 
 
+# A proven row's prose is dead text (its test is the contract): the proven commit deletes its bullet and packet.
+PACKETS = "spec/packets"
+BULLET_RE = re.compile(r"^- ([A-Za-z0-9][\w.-]*): ")
+PACKET_RE = re.compile(r"^- `([A-Za-z0-9][\w.-]*)` ")
+
+
+def drop_items(text: str, ids, head: re.Pattern) -> str:
+    """text without the list items `head` matches with group 1 in ids, continuation lines included."""
+    out, skip = [], False
+    for line in text.splitlines(keepends=True):
+        if skip and line[:1] in (" ", "\t") and line.strip():
+            continue
+        m = head.match(line)
+        skip = bool(m) and m.group(1) in ids
+        if not skip:
+            out.append(line)
+    return "".join(out)
+
+
 def finish_spec(ids):
+    ids = set(ids)
     p = TRAIN / SPEC
-    p.write_text(mark_proven(p.read_text(encoding="utf-8"), set(ids)), encoding="utf-8")
+    p.write_text(drop_items(mark_proven(p.read_text(encoding="utf-8"), ids), ids, BULLET_RE), encoding="utf-8")
+    for f in sorted((TRAIN / PACKETS).glob("*.md")):
+        text = f.read_text(encoding="utf-8")
+        if (pruned := drop_items(text, ids, PACKET_RE)) != text:
+            f.write_text(pruned, encoding="utf-8")
     # keep spec/INDEX.md + spec/index/* current: builders search them before writing any function (STANDARDS S6)
     sh(["py", "-3", f"{QS}/index_api.py"], cwd=TRAIN, check=False, timeout=600)
     git("add", "-A", "spec", cwd=TRAIN, check=False)
@@ -1141,12 +1180,27 @@ def probe_culprit(merged, rows, fails):
 def promote(landed):
     """Fast-forward main to the train head."""
     head = git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip()
+    before = git("rev-parse", "main").stdout.strip()
     if git("status", "--porcelain", "--untracked-files=no").stdout.strip():
         git("update-ref", "refs/heads/main", head)  # main checkout dirty: move the ref only
     else:
         git("merge", "-q", "--ff-only", head)
     git("push", "-q", "origin", "main", check=False)
     event("land", rows=[q["row"] for q in landed], sha=head)
+    tighten_rules_debt(before, head)
+
+
+def tighten_rules_debt(before, head):
+    """Lower the rules debt to the landed files' counts in the train tree; an error is an event, never a failed land."""
+    files = git("diff", "--name-only", "--no-renames", before, head, check=False).stdout.split()
+    try:
+        with lock("rules-debt"):
+            cut = rules_gate.tighten(rules_langs.LANGS[STACK], ST, TRAIN, sorted(f for f in files if (TRAIN / f).exists()))
+    except (OSError, ValueError) as e:
+        event("rules_debt_error", error=str(e)[:300])
+        return
+    if cut:
+        event("rules_debt_tightened", changes=cut[:20], n=len(cut))
 
 
 def cmd_train(a):
@@ -1293,6 +1347,33 @@ def cmd_status(a):
                       "rejects_1h": sum(1 for e in ev if e["event"] == "reject" and t - e["ts"] < 3600)}))
 
 
+LOG_DIR = Path(os.environ.get("HARNESS_LOG_DIR", str(HOME / "notes" / "log")))
+NOTE_MAX_CHARS = 300
+
+
+def append_note(text: str, at: datetime | None = None) -> Path:
+    """Append one timestamped line to this month's log without reading it."""
+    line = " ".join(text.split())
+    if not line:
+        raise ValueError("empty note")
+    if len(line) > NOTE_MAX_CHARS:
+        raise ValueError(f"note is {len(line)} chars, cap {NOTE_MAX_CHARS}: put details in a hand-back or commit")
+    at = at or datetime.now(timezone.utc)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = LOG_DIR / f"{at:%Y-%m}.md"
+    head = "" if path.exists() else f"# Harness log, {at:%Y-%m}\nAppend-only: `harness.py note \"<text>\"`.\n\n"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"{head}- {at:%Y-%m-%d %H:%M}Z {line}\n")
+    return path
+
+
+def cmd_note(a):
+    try:
+        print(append_note(a.text))
+    except ValueError as e:
+        sys.exit(f"note refused: {e}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest="cmd", required=True)
@@ -1306,9 +1387,10 @@ def main():
     p = sp.add_parser("clean-start"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
     p = sp.add_parser("self-review"); p.add_argument("--slot", type=int, required=True)
     p = sp.add_parser("clean-submit"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
+    sp.add_parser("note", help="append one line to the dated log").add_argument("text")
     a = ap.parse_args()
     {"frontier": cmd_frontier, "claim": cmd_claim, "submit": cmd_submit, "release": cmd_release,
-     "train": cmd_train, "status": cmd_status,
+     "train": cmd_train, "status": cmd_status, "note": cmd_note,
      "clean-start": cmd_clean_start, "self-review": cmd_self_review, "quality-check": cmd_quality_check, "clean-submit": cmd_clean_submit}[a.cmd](a)
 
 

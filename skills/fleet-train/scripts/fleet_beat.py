@@ -128,6 +128,12 @@ if free < 60:
     alarms.append(f"DISK {round(free)} GB free: clear old target dirs and stale worktrees")
 if TIMEOUTS:
     alarms.append(f"BEAT-TIMEOUT {TIMEOUTS[:3]} timed out: the numbers above may be partial")
+try:
+    import brevity_check
+    _brev = brevity_check.breaches(h.HOME, h.REPO)
+    alarms += _brev[:5] + ([f"BREVITY +{len(_brev) - 5} more: py -3 brevity_check.py"] if len(_brev) > 5 else [])
+except (OSError, ValueError, RuntimeError) as e:  # a broken check is an alarm
+    alarms.append(f"BREVITY-ERROR {type(e).__name__}: {str(e)[:120]}")
 ping = Path.home() / ".claude/devping/devping.py"  # optional owner notification
 project = os.environ.get("HARNESS_PROJECT", "")
 if alarms and ping.exists() and project:

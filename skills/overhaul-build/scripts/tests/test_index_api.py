@@ -322,7 +322,8 @@ class TestIndex(Repo):
                                    "spec/index/samples.md", "spec/index/store.md", "spec/index/tools.md"])
         core = (self.repo / "spec/index/core.md").read_text(encoding="utf-8")
         self.assertIn("crates/core/src/lib.rs:33  pub fn invalid(message: &str, field: &str) -> Refusal  "
-                      "// An `invalid-args` refusal naming `field`.  [purpose: ", core)
+                      "// An `invalid-args` refusal naming `field`.\n", core)
+        self.assertNotIn("[purpose: ", core)  # tokens are computed from the items, never stored (2026-11-15)
         self.assertIn("pub struct Refusal  // Why a verb refused.", core)
         self.assertIn("pub method Refusal::with_field(mut self, field: &str) -> Self", core)
         self.assertNotIn("helper_in_tests", core)  # cfg(test) items are not capabilities
@@ -338,9 +339,9 @@ class TestIndex(Repo):
         summary = (self.repo / "spec/INDEX.md").read_text(encoding="utf-8")
         self.assertIn("| core | 8 |", summary)
         self.assertIn(index_api.HEADER, summary)
-        purpose = core.split("pub fn invalid(", 1)[1].split("[purpose: ", 1)[1].split("]", 1)[0].split()
-        for w in ("invalid", "arg", "refusal", "field", "message"):
-            self.assertIn(w, purpose)
+        lines = index_api.find(str(self.repo), "build an invalid args refusal naming the field", top=3)
+        self.assertIn("pub fn invalid(message: &str, field: &str)", lines[0])
+        self.assertEqual(index_api.find(str(self.repo), "zebra"), [])
 
     def test_output_is_deterministic_and_check_sees_staleness(self):
         index_api.write(self.repo, self.mods)
@@ -392,7 +393,7 @@ class TestRanking(unittest.TestCase):
         lines = index_api.ranked(items, "Reads the `path` param: a relative path inside the data directory", top=3)
         self.assertEqual(len(lines), 3)
         self.assertIn("path_param", lines[0])
-        self.assertTrue(all("[purpose: " in ln for ln in lines))
+        self.assertFalse(any("[purpose: " in ln for ln in lines))
 
 
 class TestBriefs(Toy):

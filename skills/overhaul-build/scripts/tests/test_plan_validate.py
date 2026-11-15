@@ -663,10 +663,18 @@ class WorkPackets(Base):
         p, _ = self.checked(self.make(arch=ARCH.replace(F002_PACKET, "")))
         self.only(p, "F002", "no work packet", "Packet: edit <file> after <symbol>")
 
-    def test_proven_row_without_a_packet_only_warns(self):
+    def test_proven_row_without_a_packet_is_not_checked(self):
         p, notes = self.checked(self.make(arch=ARCH.replace(F001_PACKET, "")))
         self.assertEqual(p, [])
-        self.assertTrue(any("F001" in n and "no work packet" in n and "(warning)" in n for n in notes), notes)
+        self.assertFalse(any("F001" in n for n in notes), notes)  # its packet was deleted at land (2026-11-15)
+
+    def test_packet_in_a_per_phase_file_counts(self):
+        repo = self.make(arch=ARCH.replace(F002_PACKET, ""))
+        self.only(self.checked(repo)[0], "F002", "no work packet")
+        (repo / "spec/packets").mkdir()
+        (repo / "spec/packets/phase-1.md").write_text(f"# Work packets\n\n- `F002` [F002] {F002_PACKET.strip()}\n",
+                                                      encoding="utf-8")
+        self.assertEqual(self.checked(repo)[0], [])
 
     def test_packet_needs_edit_calls_test_and_stays_in_the_files_cell(self):
         no_test = ARCH.replace("calls -; test pytest tests/acceptance/test_calc.py -k test_sub", "calls -")

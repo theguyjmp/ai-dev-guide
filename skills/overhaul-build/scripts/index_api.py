@@ -3,7 +3,7 @@
 One INDEX file per ARCHITECTURE.md module (spec/index/<module>.md) lists every item the module defines, public and
 private helpers alike, one line each:
 
-    path:line  kind name(signature) -> ret  // first doc line  [purpose: tokens]
+    path:line  kind name(signature) -> ret  // first doc line
 
 plus spec/INDEX.md, the module -> item count summary. Rust is read with rust_src's lexer, Python with ast, JS/TS with
 regexes; no other dependency. Output is deterministic (sorted by path, then line). The files are generated (S28):
@@ -11,10 +11,14 @@ land.py rewrites them on every land, never by hand.
 
 The same items drive the semantic duplicate gate (`dups`): a new function whose purpose tokens and normalized
 signature match an indexed one scores at or over [harness] dup_semantic_min and is named as "reuse <path::name>".
+Purpose tokens are computed from the parsed items, never stored in the files (2026-11-15: the stored bag was 36% of
+the index words and flooded every grep); `--find` ranks the index lines for a search instead of a raw grep.
 
     py -3 index_api.py [repo]            write spec/index/*.md and spec/INDEX.md from the working tree
     py -3 index_api.py [repo] --check    exit 1 when the committed files differ from a fresh generation
     py -3 index_api.py [repo] --pairs N  print the N strongest duplicate pairs of the tree (threshold tuning)
+    py -3 index_api.py [repo] --find "<purpose words>" [--top 25]
+                                         print the index lines most related to the words, best first
 """
 import ast
 import math
@@ -412,13 +416,12 @@ def label(item):
 
 
 def line_of(item):
-    """`path:line  kind name(signature) -> ret  // first doc line  [purpose: ..]`."""
+    """`path:line  kind name(signature) -> ret  // first doc line`."""
     vis = "pub " if item["vis"] else ""
     sig = item["sig"] if item["kind"] in ("fn", "method", "trait fn") else (item["sig"] or "")
     ret = f" -> {item['ret']}" if item["ret"] else ""
     doc = f"  // {item['doc']}" if item["doc"] else ""
-    return (f"{item['path']}:{item['line']}  {vis}{item['kind']} {label(item)}{sig}{ret}{doc}"
-            f"  [purpose: {' '.join(purpose(item))}]")
+    return f"{item['path']}:{item['line']}  {vis}{item['kind']} {label(item)}{sig}{ret}{doc}"
 
 
 def items_of(path, text):
@@ -477,7 +480,8 @@ def render(index, mods):
         items = index[m]
         body = [HEADER, f"# INDEX {m}", "",
                 f"{len(items)} items. Paths: {', '.join(mods.get(m, []))}. Search by purpose before writing a "
-                f"function: `git grep -n -i -E \"<word>|<word>\" -- {INDEX_DIR}/`; reuse or extend the owner.", ""]
+                f"function: `index_api.py --find \"<purpose words>\"` (overhaul-build scripts), not a raw grep; "
+                f"reuse or extend the owner.", ""]
         cur = None
         for it in items:
             if it["path"] != cur:
@@ -759,26 +763,53 @@ def semantic_problem(repo, base_rev, head_rev, changed, mods, threshold=DUP_SEMA
             "writing a function; a new helper whose job an indexed one does is a review FAIL (C05)")
 
 
-# ---- ranking for the briefs ----
-def ranked(items, text, top=40):
-    """The INDEX lines of items most related to text (a row and its acceptance test), by IDF-weighted overlap of
-    purpose tokens; ties keep index order. Only items sharing at least one word are listed."""
+# ---- ranking for the briefs and for --find ----
+def rank(entries, text, top=40):
+    """The lines of entries ([(line, token set, name token set)]) most related to text, by IDF-weighted overlap of
+    tokens, a word of the item's own name counting twice; ties keep entry order. Only entries sharing at least one
+    word are listed."""
     want = set(words(text))
-    profs = [(it, set(purpose(it))) for it in items]
-    n = max(1, len(profs))
-    df = Counter(w for _, ws in profs for w in ws)
+    n = max(1, len(entries))
+    df = Counter(w for _, ws, _ in entries for w in ws)
     scored = []
-    for k, (it, ws) in enumerate(profs):
-        s = sum(math.log(1 + n / (1 + df[w])) for w in ws & want)
+    for k, (line, ws, name) in enumerate(entries):
+        s = sum(math.log(1 + n / (1 + df[w])) * (2 if w in name else 1) for w in ws & want)
         if s > 0:
-            scored.append((-s, k, it))
+            scored.append((-s, k, line))
     scored.sort(key=lambda x: (x[0], x[1]))
-    return [line_of(it) for _, _, it in scored[:top]]
+    return [line for _, _, line in scored[:top]]
+
+
+def ranked(items, text, top=40):
+    """The INDEX lines of items most related to text (a row and its acceptance test), by their purpose tokens."""
+    return rank([(line_of(it), set(purpose(it)), set(words(label(it)))) for it in items], text, top)
+
+
+INDEX_LINE = re.compile(r"^\S+:\d+  (?:pub )?(?:trait fn|\w+) ([\w:]+)(.*)$")  # line_of: name, then the rest
+
+
+def find(repo, text, top=25):
+    """The committed INDEX lines most related to text. Reads the generated files, not the source (a full parse takes
+    about 30 s on a large tree), so a line's tokens are those of its name, signature and first doc line."""
+    d = os.path.join(repo, INDEX_DIR)
+    entries = []
+    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        with open(os.path.join(d, name), encoding="utf-8") as fh:
+            for ln in fh.read().splitlines():
+                m = INDEX_LINE.match(ln)
+                if m:
+                    entries.append((ln, set(words(m.group(2))), set(words(m.group(1)))))
+    return rank(entries, text, top)
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     repo = argv.pop(0) if argv and not argv[0].startswith("--") else "."
+    if "--find" in argv:
+        top = int(argv[argv.index("--top") + 1]) if "--top" in argv else 25
+        lines = find(repo, argv[argv.index("--find") + 1], top)
+        print("\n".join(lines) if lines else "no index line shares a word with the search")
+        return 0
     import land  # the CLI only: land.py's ARCHITECTURE parser, one copy
     apath = os.path.join(repo, "spec", "ARCHITECTURE.md")
     with open(apath, encoding="utf-8") as fh:
