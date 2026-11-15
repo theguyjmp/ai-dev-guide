@@ -137,12 +137,23 @@ try:
     alarms += _brev[:5] + ([f"BREVITY +{len(_brev) - 5} more: py -3 brevity_check.py"] if len(_brev) > 5 else [])
 except (OSError, ValueError, RuntimeError) as e:  # a broken check is an alarm
     alarms.append(f"BREVITY-ERROR {type(e).__name__}: {str(e)[:120]}")
-ping = Path.home() / ".claude/devping/devping.py"  # optional owner notification
+if [e for e in ev if e.get("event") == "dispatch_error" and now - e["ts"] < 3600]:
+    alarms.append("DISPATCH-ERROR alarm_dispatch.py failed in the last hour (events.jsonl dispatch_error)")
+# every alarm has a handler (alarm_handlers.TABLE, run by alarm_dispatch.py): the manager sees only ESCALATE items
+import alarm_dispatch, alarm_handlers
+_disp = alarm_dispatch.annotate(h, alarms, alarm_handlers.TABLE, alarm_handlers.alarm_id, now)
+h.save("health.json", {"ts": now, "alarms": [("ESCALATE " if st.startswith("ESCALATE") else "") + alarm_handlers.alarm_id(a)
+                                             for a, st in _disp], "detail": alarms})
+_esc = [f"{a} [{st}]" for a, st in _disp if st.startswith("ESCALATE")]
+_handled = [f"{alarm_handlers.alarm_id(a)} [{st}]" for a, st in _disp if not st.startswith("ESCALATE")]
+ping = Path.home() / ".claude/devping/devping.py"  # optional owner notification: ESCALATE items only
 project = os.environ.get("HARNESS_PROJECT", "")
-if alarms and ping.exists() and project:
-    run([sys.executable, str(ping), "alert", project, "HEALTH: " + "; ".join(a.split(" (")[0] for a in alarms)], timeout=60)
+if _esc and ping.exists() and project:
+    run([sys.executable, str(ping), "alert", project, "ESCALATE: " + "; ".join(a.split(" (")[0] for a in _esc)], timeout=60)
 waiting = cs.get("waiting_for_a_session", 0)
 fire = min(waiting, 30)  # scale builders to every assigned row; landing keeps up via the trial-merge batch pick
 print(f"cloud claimed {cs.get('claimed')} waiting {waiting} | landed 1h {landed1} | train {'up' if train else 'down'}, "
       f"last event {round((now - last) / 60)} min ago | plan branches {plans} | FIRE {fire}"
-      + (" | ALARMS: " + " || ".join(alarms) + " -> fix each this beat" if alarms else " | HEALTH OK"))
+      + (" | HANDLED: " + "; ".join(_handled) if _handled else "")
+      + (" | ESCALATE: " + " || ".join(_esc) + " -> the manager fixes each this beat" if _esc else
+         "" if alarms else " | HEALTH OK"))

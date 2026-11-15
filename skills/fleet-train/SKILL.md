@@ -118,7 +118,15 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
   that many runs (capped per beat). Scale with several routines on staggered minutes, never by firing runs by hand.
 - The heartbeat is a health check, not a liveness check. fleet_beat prints ALARMS (TRAIN-DOWN, TRAIN-PID,
   TRAIN-KILLABLE, TRAIN-ENV, STALL, LONG-BATCH, REPEAT-RED, MAIN-RED, REJECTS, REWORK, STALE-CLAIMS, OLD-QUEUE,
-  TRAIN-ERROR, DISK, BEAT-TIMEOUT, KNOWN-RED, REPEAT-TEST, ORIGIN-BEHIND; the last three in `beat_alarms.py`), each naming its fix; the manager fixes every one in the same beat. A failure mode
+  TRAIN-ERROR, DISK, BEAT-TIMEOUT, KNOWN-RED, REPEAT-TEST, ORIGIN-BEHIND; the last three in `beat_alarms.py`). Every alarm
+  has a handler in `scripts/alarm_handlers.py` (one table; a test fails on an alarm without one) and
+  `scripts/alarm_dispatch.py` runs them: install it as a scheduled task every 10 min (it runs fleet_beat first).
+  Auto: an idempotent, time-boxed fix (push origin, free disk, release stale claims, archive finished briefs).
+  Agent: one headless `claude -p` per alarm from `scripts/alarm_briefs/<template>.md` (RULE ZERO on top), at most 2
+  at once, CARGO_BUILD_JOBS=2. Its lock holds pid, process start time and a deadline; past it the tree is killed. The
+  check judges each attempt (alarm still firing unchanged = failed), a cooldown follows, 2 failed = ESCALATE until the
+  alarm clears or `alarm_dispatch.py --reset KEY`. fleet_beat shows each alarm as handled-by/cooldown/ESCALATE; the
+  manager fixes only ESCALATE items. A failure mode
   found by hand gets a new check in fleet_beat.py.
 - Train process: `train --loop` writes state/train.pid. TRAIN-DOWN restarts it detached through WMI (Win32_Process
   Create, HARNESS_* vars on its command line), never Start-Process or Popen from an agent shell (the child dies with
