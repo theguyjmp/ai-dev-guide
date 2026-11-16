@@ -36,7 +36,7 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
 |---|---|
 | A conflicted branch gets one short resolve pass; the rest go back to their builders with the reason | `resolve_conflict` (at most 4 files, no markers left, check clean), HARNESS_RESOLVE_MAX (12) |
 | Start at HARNESS_MIN_BATCH rows (8), waiting up to HARNESS_BATCH_WAIT_BUSY (25 min) while claims are in flight; with none in flight, start at once | `train` |
-| A batch holds at most HARNESS_BATCH_CAP rows (20), picked by trial merges so rows never conflict in the gate | `disjoint()` (git merge-tree, file-disjoint fallback) |
+| A batch holds at most HARNESS_BATCH_CAP rows (20), picked by trial merges so rows never conflict in the gate; a second gate lane gets only the picks beyond the cap, never half of a smaller batch (it lands only when lane one lands whole) | `disjoint()` (git merge-tree, file-disjoint fallback) |
 | Under HARNESS_MIN_BATCH clean picks while queued rows are out for cloud rebase, hold up to HARNESS_FILL_WAIT (20 min) for them; a CLEAN-* pick never waits | `fill_wait()` (train_idle "filling: ...") |
 | Gate once per batch: format (auto-fixed in file batches), clippy -D warnings (skipped when the quality stage runs), unit, then acceptance of every proven row plus the batch, built once in release and run as parallel binaries | `gate()` |
 | Rerun before blaming: a failed test reruns alone; perf-budget failures go to state/perf-debt.jsonl; stale fixture locks are cleared and rerun once; unit failures main already has are not blamed; up to 5 new unit failures rerun single-threaded | `gate()`, state/unit-baseline.json, `unit_flaky` |
@@ -97,7 +97,8 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
   pushed by `collect`; origin/main can lag when a push is refused), self-reviews and pushes `cloud/<row>`.
 - `cloud.py collect` (every 5 min) queues new `cloud/<row>` heads for the train, releases `cloud/release-<row>`
   (blocker in REASON; WIP kept as `cloud/prev-<row>`), expires claims silent for HARNESS_CLOUD_TTL (2 h) and tops
-  assignments up to HARNESS_CLOUD_TARGET (40). `cloud.py status` shows assigned/claimed/pushed/landed.
+  assignments up to HARNESS_CLOUD_TARGET (40). `cloud.py status` shows assigned/claimed/pushed/landed. Never stop
+  `collect` while rows are queued: it pushes cloud-base, and rebasers would rebase onto a stale base.
 - Builders and planners are both routines. A builder claims one assigned row (`BUILDER.md`); a planner claims one phase
   from `plan-tasks.txt` on `harness-cloud` and turns up to 15 roadmap rows into planned rows (`PLANNER.md`). Every claim
   is a UNIQUE commit pushed to a new ref (an identical commit pushes as a no-op "success", so two sessions would both win).
@@ -127,8 +128,10 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
   at once, CARGO_BUILD_JOBS=2. Its lock holds pid, process start time and a deadline; past it the tree is killed. The
   check judges each attempt (alarm still firing unchanged = failed), a cooldown follows, 2 failed = ESCALATE until the
   alarm clears or `alarm_dispatch.py --reset KEY`. fleet_beat shows each alarm as handled-by/cooldown/ESCALATE; the
-  manager fixes only ESCALATE items. A failure mode
-  found by hand gets a new check in fleet_beat.py.
+  manager fixes only ESCALATE items. With the dispatcher off no auto-fix runs, DISK included: the manager frees disk
+  by hand. A failure mode found by hand gets a new check in fleet_beat.py.
+- An owner card or dashboard reading state/health.json shows its alarms only while `ts` is under 20 min old, else
+  "beat off since HH:MMZ" (stale alarms read as live ones); a pause shows the first line of state/pause as its reason.
 - Train process: `train --loop` writes state/train.pid. TRAIN-DOWN restarts it detached through WMI (Win32_Process
   Create, HARNESS_* vars on its command line), never Start-Process or Popen from an agent shell (the child dies with
   the shell's job). Restart and kill scripts act only on their own state/train.pid tree (`taskkill /T /PID`), never on
@@ -140,17 +143,19 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
   rows. Check `harness.py frontier` against the count of rows whose deps are all proven or queued.
 - NEVER attach a GitHub push webhook to a builder routine: builders push, so every push starts another builder. If one
   is attached by mistake, disable that routine at once.
-- Rebaser routine (`cloud/REBASER.md`): cloud agents rebase queued rows that stopped merging onto main.
+- Rebaser routine (`cloud/REBASER.md`): cloud agents rebase queued rows that stopped merging onto main. Fire it the
+  moment a train lands: that is when queued rows stop merging.
 
 ## Run
 1. Set HARNESS_REPO, HARNESS_HOME (state dir parent), HARNESS_WT (fast drive), HARNESS_STACK (rust or node).
 2. Rename an old overhaul guard hook (`.git/hooks/reference-transaction` -> `*.disabled`): it blocks every main update
    the train makes. `py -3 harness.py frontier` must show rows. Free disk first (keep 80 GB+; slot targets about 5-9 GB each, the
-   train's release target about 30 GB).
+   train's release target about 30 GB). Prune acceptance tests' leftover temp dirs too (they once filled 26 GB).
 3. Start the train from PowerShell or cmd (never Git Bash), detached from any agent shell: `py -3 scripts/fleet_beat.py`
    starts it when state/train.pid is set and dead; the first time, start it with the quoted full path,
    `"<python>" -u "<full path>\harness.py" train --loop >> state/train.log 2>&1`, through Win32_Process Create.
 4. Workflow tool: run workflows/builders.js with args {"slots": 16, "max": 40, "idle": 8, "home": "<HARNESS_HOME>"}.
 5. Optional: `py -3 -u remote.py --slot 100` (one per desktop slot), or the cloud fleet instead of steps 4-5.
 6. Watch only `train_end`, `train_error` and disk with one Monitor; measure with `harness.py status`
-   (landed counts unique rows). The number is rows landed per hour, never agents busy.
+   (landed counts unique rows). The bar is functions proven on main per wall-clock hour, never rows per train-second
+   or agents busy.
