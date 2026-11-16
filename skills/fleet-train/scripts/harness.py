@@ -668,50 +668,96 @@ def run_one_alone(exes, t, env) -> str:
     return out[-1500:] or f"exit {rr.returncode}"
 
 
+ACCEPT_TIMES = "accept-times.json"  # {stem: seconds its binary last took in the parallel phase}: start order
+SOLO_DAYS = 2  # a test with a perf-budget miss this recent runs alone only (see solo_tests)
+
+
+def solo_tests(tests) -> set:
+    """The tests among `tests` with a perf-budget miss in state/perf-debt.jsonl in the last SOLO_DAYS days. They fail
+    under parallel load every batch and are then re-run alone anyway (pilot: the same 6-9 tests, 500-1700 s of serial
+    tail per gate, after their parallel attempt loaded every other test), so they skip the parallel phase and get the
+    same alone run directly: same asserts, same verdict, one run instead of two."""
+    p = ST / "perf-debt.jsonl"
+    if not p.exists():
+        return set()
+    cut = datetime.fromtimestamp(now() - SOLO_DAYS * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    recent = set()
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("t", "") >= cut:
+            recent.add(e.get("test"))
+    return recent & set(tests)
+
+
+def longest_first(stems, known: dict) -> list:
+    """`stems` in start order: longest recorded time first, an unknown binary (a new row's) before all. Alphabetical
+    order started the slow bench binaries last, so they were the parallel phase's tail."""
+    return sorted(stems, key=lambda s: (-known.get(s, float("inf")), s))
+
+
 def run_tests_cargo(tests, timeout=1800):
-    """Build the needed test binaries once (release, incremental), run them in parallel.
-    Returns list of failed 'file::name' (empty = pass)."""
+    """Build the needed test binaries once (release, incremental), run them in parallel, longest first; tests that
+    recently missed a perf budget under load run alone (solo_tests). Returns list of failed 'file::name' (empty = pass).
+    Logs accept_split (build / parallel / serial seconds, slowest binaries and alone runs) and keeps per-binary times."""
     if not tests:
         return []
     from concurrent.futures import ThreadPoolExecutor
+    t0 = now()
+    solo = solo_tests(tests)
     by_stem = {}
     for t in tests:
-        by_stem.setdefault(Path(t.split("::")[0]).stem, []).append(t.split("::")[1])
+        if t not in solo:
+            by_stem.setdefault(Path(t.split("::")[0]).stem, []).append(t.split("::")[1])
     env = run_env(TRAIN_ENV)
-    exes, r = build_test_exes(sorted(by_stem), env, timeout)
+    stems = sorted(set(by_stem) | {Path(t.split("::")[0]).stem for t in solo})
+    exes, r = build_test_exes(stems, env, timeout)
     if r.returncode != 0:
         (ST / "last-gate.txt").write_text((r.stdout[-5000:] + r.stderr[-15000:]), encoding="utf-8")
-        missing = [s for s in by_stem if s not in exes]
-        return [f"tests/acceptance/{s}.rs::{n}" for s in (missing or by_stem) for n in by_stem[s]] or ["build"]
+        missing = [s for s in stems if s not in exes]
+        return [t for t in sorted(set(tests)) if Path(t.split("::")[0]).stem in (missing or stems)] or ["build"]
+    t_build = now()
 
     def one(stem):
-        exe = exes.get(stem)
+        exe, s0 = exes.get(stem), now()
         if not exe:
-            return stem, by_stem[stem], "no executable"
+            return stem, by_stem[stem], "no executable", 0.0
         try:
             rr = sh([exe, "--exact", "--test-threads=4", *by_stem[stem]], cwd=TRAIN, check=False, env=env, timeout=900)
         except subprocess.TimeoutExpired:
-            return stem, by_stem[stem], "timeout 900s"
+            return stem, by_stem[stem], "timeout 900s", round(now() - s0, 1)
+        secs = round(now() - s0, 1)
         if rr.returncode == 0:
-            return stem, [], ""
+            return stem, [], "", secs
         out = rr.stdout + rr.stderr
         bad = set(re.findall(r"^test (test_\w+) \.\.\. FAILED", out, re.M)) | set(re.findall(r"^\s{4}(test_\w+)$", out, re.M))
-        return stem, [n for n in by_stem[stem] if n in bad] or by_stem[stem], out[-1500:]
+        return stem, [n for n in by_stem[stem] if n in bad] or by_stem[stem], out[-1500:], secs
 
-    fails, logs = [], []
+    fails, logs, took = [], [], {}
     with ThreadPoolExecutor(10) as ex:
-        for stem, bad, log in ex.map(one, sorted(by_stem)):
+        for stem, bad, log, secs in ex.map(one, longest_first(by_stem, load(ACCEPT_TIMES, {}))):
+            took[stem] = secs
             fails += [f"tests/acceptance/{stem}.rs::{n}" for n in bad]
             if bad:
                 logs.append(f"== {stem}: {log}")
-    if fails:  # perf/bench tests fail under parallel load: re-run each failure alone, serially
-        retry, fails, logs = fails, [], []
-        for t in retry:
-            if tail := run_one_alone(exes, t, env):
-                fails.append(t)
-                logs.append(f"== {Path(t.split('::')[0]).stem}::{t.split('::')[1]} (serial): {tail}")
+    t_par = now()
+    # perf/bench tests fail under parallel load: re-run each failure alone, serially, with the solo tests
+    retry, fails, logs, alone = fails + sorted(solo), [], [], {}
+    for t in retry:
+        s0 = now()
+        tail = run_one_alone(exes, t, env)
+        alone[t.split("/")[-1]] = round(now() - s0)
+        if tail:
+            fails.append(t)
+            logs.append(f"== {Path(t.split('::')[0]).stem}::{t.split('::')[1]} (serial): {tail}")
     if logs:
         (ST / "last-gate.txt").write_text(chr(10).join(logs)[-20000:], encoding="utf-8")
+    save(ACCEPT_TIMES, {**load(ACCEPT_TIMES, {}), **took})
+    event("accept_split", build=round(t_build - t0), parallel=round(t_par - t_build), serial=round(now() - t_par),
+          tests=len(set(tests)), solo=len(solo), retried=len(retry) - len(solo),
+          slowest=sorted(took.items(), key=lambda kv: -kv[1])[:10], alone=sorted(alone.items(), key=lambda kv: -kv[1])[:10])
     want = set(tests)
     return [f for f in fails if f in want] or fails
 
