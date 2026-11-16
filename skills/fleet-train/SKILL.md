@@ -36,8 +36,8 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
 |---|---|
 | A conflicted branch gets one short resolve pass; the rest go back to their builders with the reason | `resolve_conflict` (at most 4 files, no markers left, check clean), HARNESS_RESOLVE_MAX (12) |
 | Start at HARNESS_MIN_BATCH rows (8), waiting up to HARNESS_BATCH_WAIT_BUSY (25 min) while claims are in flight; with none in flight, start at once | `train` |
-| A batch holds at most HARNESS_BATCH_CAP rows (20), picked by trial merges so rows never conflict in the gate; a second gate lane gets only the picks beyond the cap, never half of a smaller batch (it lands only when lane one lands whole) | `disjoint()` (git merge-tree, file-disjoint fallback) |
-| Under HARNESS_MIN_BATCH clean picks while queued rows are out for cloud rebase, hold up to HARNESS_FILL_WAIT (20 min) for them; a CLEAN-* pick never waits | `fill_wait()` (train_idle "filling: ...") |
+| A batch holds at most HARNESS_BATCH_CAP rows (20), picked by trial merges so rows never conflict in the gate | `disjoint()` (git merge-tree, file-disjoint fallback) |
+| Under HARNESS_MIN_BATCH clean picks while queued rows are out for cloud rebase, hold up to HARNESS_FILL_WAIT (20 min, 0 = off) for them; a CLEAN-* pick never waits | `fill_wait()` (train_idle "filling: ...") |
 | Gate once per batch: format (auto-fixed in file batches), clippy -D warnings (skipped when the quality stage runs), unit, then acceptance of every proven row plus the batch, built once in release and run as parallel binaries | `gate()` |
 | Rerun before blaming: a failed test reruns alone; perf-budget failures go to state/perf-debt.jsonl; stale fixture locks are cleared and rerun once; unit failures main already has are not blamed; up to 5 new unit failures rerun single-threaded | `gate()`, state/unit-baseline.json, `unit_flaky` |
 | Main-red tests are nobody's fault: a failing test no batch row owns runs alone on main first; red there, it is quarantined (state/accept-known-red.json + a fix request in notes/requests/), the gate skips it and the same batch is re-gated; over 3 at once the train pauses until main moves; it returns to the gate once it passes alone on main | `quarantine.py` (quarantine / quarantine_cap / unquarantine) |
@@ -143,6 +143,8 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
   rows. Check `harness.py frontier` against the count of rows whose deps are all proven or queued.
 - NEVER attach a GitHub push webhook to a builder routine: builders push, so every push starts another builder. If one
   is attached by mistake, disable that routine at once.
+- A second gate lane, if a project adds one, gets only the picks beyond HARNESS_BATCH_CAP, never half of a smaller
+  batch: it lands only when lane one lands whole.
 - Rebaser routine (`cloud/REBASER.md`): cloud agents rebase queued rows that stopped merging onto main. Fire it the
   moment a train lands: that is when queued rows stop merging.
 

@@ -1430,30 +1430,32 @@ BATCH_WAIT = 600
 BATCH_CAP = int(os.environ.get("HARNESS_BATCH_CAP", "20"))
 
 
-FILL_WAIT = int(os.environ.get("HARNESS_FILL_WAIT", str(20 * 60)))
+FILL_WAIT = int(os.environ.get("HARNESS_FILL_WAIT", str(20 * 60)))  # 0 = off
+FILL_GAP_MIN = 300  # a short FILL_WAIT must not restart a hold
 FILLING = "filling: "
 CLOUD_STATE = "cloud.json"  # owned here, written by cloud.py
 
 
 def fill_hold(clean: int, out: int, fix_row: bool, since: float | None, t: float) -> bool:
     """Hold the train: few clean picks, rows out for rebase, no CLEAN-* pick, hold under FILL_WAIT old."""
-    if fix_row or not out or clean >= MIN_BATCH:
+    if FILL_WAIT <= 0 or fix_row or not out or clean >= MIN_BATCH:
         return False
     return since is None or t - since < FILL_WAIT
 
 
 def fill_since(events: list, t: float) -> float | None:
-    """Start of the fill hold running at t, else None; a train_start, other idle or FILL_WAIT gap ends it."""
+    """Start of the fill hold running at t, else None; a train_start, other idle or a long gap ends it."""
     since = last = None
+    gap = max(FILL_WAIT, FILL_GAP_MIN)
     for e in events:
         kind = e.get("event")
         if kind == "train_idle" and str(e.get("reason", "")).startswith(FILLING):
-            if since is None or e["ts"] - last > FILL_WAIT:
+            if since is None or e["ts"] - last > gap:
                 since = e["ts"]
             last = e["ts"]
         elif kind in ("train_start", "train_idle"):
             since = last = None
-    return since if last is not None and t - last <= FILL_WAIT else None
+    return since if last is not None and t - last <= gap else None
 
 
 def rebase_out(queue: list, picks: list, sent: dict) -> int:

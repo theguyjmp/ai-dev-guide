@@ -72,6 +72,13 @@ def test_fill_wait_end_to_end():
     check("still holding inside the wait", h.fill_wait(QUEUE, QUEUE[:1]))
     clock[0] = T0 + WAIT
     check("starts after FILL_WAIT", not h.fill_wait(QUEUE, QUEUE[:1]))
+    for wait in (0, 10):  # shorter than the loop's 30 s sleep: one short hold at most, never a hold forever
+        h.FILL_WAIT = wait
+        clock[0] += 3600
+        first = h.fill_wait(QUEUE, QUEUE[:1])
+        clock[0] += 30
+        check(f"FILL_WAIT {wait}: released by the next loop", (first == bool(wait)) and not h.fill_wait(QUEUE, QUEUE[:1]), first)
+    h.FILL_WAIT = WAIT
     (h.ST / h.CLOUD_STATE).unlink()
     check("no cloud fleet: never holds", not h.fill_wait(QUEUE, QUEUE[:1]))
 
