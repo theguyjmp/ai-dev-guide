@@ -18,7 +18,7 @@ whose [profile] table overrides any command or pattern in STACKS below.
 from __future__ import annotations
 
 import argparse, json, os, re, shutil, subprocess, sys, time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1137,10 +1137,14 @@ def finish_spec(ids):
     git("commit", "-qam", f"train: proven {' '.join(ids)}", cwd=TRAIN, check=False)
 
 
-def reject(q, reason):
-    rj = load("rejects.json", {})
-    rj.setdefault(q["row"], []).append({"t": iso(), "by": "train", "sha": q["sha"], "reason": reason[:1500]})
-    save("rejects.json", rj)
+def reject(q, reason, locked=False):
+    """Record the reject AND dequeue the row (every reject path: pick checks, rulings, batch rejects). A rejected row
+    left in queue.json was picked again forever. locked=True when the caller already holds the state lock."""
+    with nullcontext() if locked else lock("state"):
+        rj = load("rejects.json", {})
+        rj.setdefault(q["row"], []).append({"t": iso(), "by": "train", "sha": q["sha"], "reason": reason[:1500]})
+        save("rejects.json", rj)
+        save("queue.json", [x for x in load("queue.json", []) if x["sha"] != q["sha"]])
     event("reject", row=q["row"], reason=reason[:300])
 
 
@@ -1481,9 +1485,8 @@ def pick_screen(picks: list, budget: float = float("inf")) -> set:
     shas = {q["sha"] for q, _ in bad}
     with lock("state"):
         for q, why in bad:
-            reject(q, why)
-        queue = [q for q in load("queue.json", []) if q["sha"] not in shas]
-        save("queue.json", queue)
+            reject(q, why, locked=True)
+        queue = load("queue.json", [])
     live = {q["sha"] for q in queue} | {"_main"}
     save(PICK_CACHE, {k: v for k, v in cache.items() if k in live})
     return shas
@@ -1523,6 +1526,11 @@ def train_once():
                 break
             queue = [q for q in queue if q["sha"] not in bad]
             batch = disjoint(queue)[:BATCH_CAP]
+        if not batch:  # every queued row conflicts with main: normal conflict handling, then idle (never an empty train)
+            for q in queue:
+                reject(q, "merge conflict with main; merge main into your branch and resolve")
+            event("train_idle", queued=len(load("queue.json", [])), reason="no row merges cleanly with main")
+            return False
         for q in batch:
             if q["row"] not in rows:
                 rows[q["row"]] = {"id": q["row"], "tests": [], "status": "cleanup", "file_list": [], "deps": [], "module": "cleanup"}
