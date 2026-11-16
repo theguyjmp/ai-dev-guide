@@ -1,0 +1,152 @@
+"""Tests of the pick check (harness.pick_screen) and the machine-wide cargo cap (cargo_slots.py + alarm_dispatch).
+Temp state, worktrees and a fixture git repo; the static checks, reviewer and launcher are fakes.
+
+  py -3 tests/test_fail_fast.py
+"""
+from __future__ import annotations
+
+import json, os, subprocess, sys, tempfile, threading
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+TMP = Path(tempfile.mkdtemp(prefix="test-failfast-"))
+os.environ.update({"HARNESS_HOME": str(TMP / "home"), "HARNESS_REPO": str(TMP / "repo"), "HARNESS_WT": str(TMP / "wt")})
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "tests"))
+import cargo_slots as C  # noqa: E402
+import test_alarm_dispatch as T  # noqa: E402  (fake_h, FakeLauncher)
+import alarm_dispatch as D  # noqa: E402
+import alarm_handlers as H  # noqa: E402
+import harness as h  # noqa: E402
+
+check, FAILS = T.check, T.FAILS
+CARGO_ALARM = next(f"{k} x" for k, v in H.TABLE.items() if isinstance(v, D.Agent) and v.slot and not v.per_subject)
+
+
+def spawn_with(ln):
+    return lambda: ln.start(None, None, None, "", 0)
+
+
+def test_cargo_cap_shared_by_fleets():
+    with tempfile.TemporaryDirectory() as td:
+        ln = T.FakeLauncher()
+        a, b = C.CargoSlots(ln.alive, Path(td) / "s.json", 3), C.CargoSlots(ln.alive, Path(td) / "s.json", 3)
+        for i in range(3):
+            (a if i % 2 else b).claim(f"fleet{i % 2}", f"t{i}", spawn_with(ln))
+        try:
+            a.claim("fleet0", "t3", spawn_with(ln))
+            check("claim over the cap is refused", False)
+        except C.Full as x:
+            check("claim over the cap is refused, naming the holders", "fleet1:t1" in str(x), x)
+        check("a refused claim spawns nothing", len(ln.started) == 3)
+        ln.kill(sorted(ln.live)[0])
+        check("a dead holder frees its slot", len(b.holders()) == 2)
+        held = json.loads((Path(td) / "s.json").read_text(encoding="utf-8"))
+        ln.live[held[-1]["pid"]] = "reused"
+        check("a reused pid (other start time) holds nothing", len(a.holders()) == 1)
+
+
+def test_cargo_claims_race():
+    with tempfile.TemporaryDirectory() as td:
+        ln, won, lk = T.FakeLauncher(), [], threading.Lock()
+
+        def one(i):
+            def spawn():
+                with lk:
+                    return ln.start(None, None, None, "", 0)
+            try:
+                C.CargoSlots(ln.alive, Path(td) / "s.json", 3).claim("f", str(i), spawn)
+                won.append(i)
+            except C.Full:
+                pass
+        ts = [threading.Thread(target=one, args=(i,)) for i in range(8)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        check("8 racing claims: exactly 3 win", len(won) == 3 and len(ln.started) == 3, (won, len(ln.started)))
+
+
+def test_dispatch_cap_and_acceptance():
+    with tempfile.TemporaryDirectory() as td:
+        h_, ln = T.fake_h(Path(td)), T.FakeLauncher()
+        cargo = C.CargoSlots(ln.alive, Path(td) / "s.json", 1)
+        cargo.claim("other", "x", spawn_with(ln))
+        d = D.Dispatcher(h_, H.TABLE, H.alarm_id, ln, briefs=HERE / "alarm_briefs", cargo=cargo, fleet="me")
+        st = d.run([CARGO_ALARM])
+        key = next(iter(st))
+        check("cap held by another fleet: no cargo agent", len(ln.started) == 1 and "cargo slots" in st[key].get("note", ""),
+              st[key])
+        ln.kill(sorted(ln.live)[0])
+        ln.live[999] = "train"
+        h_.save(D.TRAIN_STAGE, {"stage": "acceptance", "pid": 999})
+        st = d.run([CARGO_ALARM])
+        check("train in acceptance: no cargo agent", len(ln.started) == 1 and "acceptance" in st[key].get("note", ""), st[key])
+        ln.live.pop(999)
+        d.run([CARGO_ALARM])
+        check("dead train's mark ignored; agent holds the slot", len(ln.started) == 2
+              and [x["fleet"] for x in cargo.holders()] == ["me"], cargo.holders())
+
+
+def test_harness_marks_acceptance():
+    seen = {}
+    with h.train_stage("acceptance"):
+        seen.update(h.load(h.TRAIN_STAGE, {}))
+    check("stage marked with the train's pid, cleared after", seen.get("pid") == os.getpid()
+          and h.load(h.TRAIN_STAGE, None) == {} and h.TRAIN_STAGE == D.TRAIN_STAGE, seen)
+
+
+def git(*a):
+    return subprocess.run(["git", *a], cwd=str(h.REPO), capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_pick_screen():
+    h.REPO.mkdir(parents=True, exist_ok=True)
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    (h.REPO / "a.txt").write_text("a\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "main")
+    queue = []
+    for i, r in enumerate(("R1", "R2", "R3")):
+        git("checkout", "-q", "-B", r, "main")
+        (h.REPO / f"{r}.txt").write_text(r, encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", r)
+        queue.append({"row": r, "sha": git("rev-parse", "HEAD"), "ts": i})
+        git("checkout", "-q", "main")
+    h.save("queue.json", queue)
+    reviews, main_red = [], [False]
+
+    def static(cwd, base="main", plan=True):
+        if main_red[0]:
+            return "main problem"
+        return "R2.txt: 1 x S25 expect" if (Path(cwd) / "R2.txt").exists() else ""
+
+    def review(merged, cwd=None, base="main"):
+        reviews.append(merged[0]["row"])
+        return [{"file": "R3.txt", "fn": "f", "existing": "a.txt:1"}] if merged[0]["row"] == "R3" else []
+    h.static_problems, h.batch_review = static, review
+    h.adds_fn = lambda q, d: q["row"] == "R3"
+    bad = h.pick_screen(queue)
+    rej = h.load("rejects.json", {})
+    check("static failure rejected with its message", "S25" in rej.get("R2", [{}])[0].get("reason", ""), rej)
+    check("reviewer duplicate rejected", "duplicate capability" in rej.get("R3", [{}])[0].get("reason", ""), rej)
+    check("rejected rows dequeued", bad == {queue[1]["sha"], queue[2]["sha"]}
+          and [q["row"] for q in h.load("queue.json", [])] == ["R1"])
+    check("no review for a row the static checks reject", "R2" not in reviews, reviews)
+    n = len(reviews)
+    h.pick_screen(h.load("queue.json", []))
+    check("a passed sha is not checked again", len(reviews) == n, reviews)
+    main_red[0] = True
+    q4 = dict(queue[1], row="R4", sha=queue[1]["sha"])
+    h.save("queue.json", h.load("queue.json", []) + [q4])
+    h.save(h.PICK_CACHE, {})
+    check("a main red on the static checks rejects no row", h.pick_screen([q4]) == set())
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+    print(f"{len(FAILS)} failed" if FAILS else "ALL PASS")
+    sys.exit(1 if FAILS else 0)

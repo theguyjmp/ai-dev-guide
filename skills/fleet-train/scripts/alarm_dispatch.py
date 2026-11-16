@@ -2,7 +2,9 @@
 Auto: an idempotent, time-boxed fix. Owned: an existing owner fixes it. Agent: one headless `claude -p` per lock key.
 Manager: ESCALATE at once. An agent lock is live only while its exact process (pid + start time) runs before its
 deadline, else the tree is killed and the attempt judged by the check: alarm still firing unchanged = failed. A failed
-attempt starts a cooldown; two are ESCALATE until the alarm clears or `--reset KEY`.
+attempt starts a cooldown; two are ESCALATE until the alarm clears or `--reset KEY`. A cargo-building (slot) agent also
+needs a free machine-wide cargo slot (cargo_slots.py, shared with every fleet on this PC) and a train outside its
+acceptance stage (state/train-stage.json, written by harness.acceptance_tests).
 
   py -3 alarm_dispatch.py [--no-beat] [--dry] [--reset KEY]   # supervisor.py starts it every 10 min
 """
@@ -15,7 +17,9 @@ from typing import Callable
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import cargo_slots  # noqa: E402
 STATE = "dispatch.json"
+TRAIN_STAGE = "train-stage.json"  # harness.TRAIN_STAGE
 MAX_AGENTS = 2  # the laptop is the gate machine
 MAX_ATTEMPTS = 2  # failed agents per key before ESCALATE
 AUTO_FAILS = 2  # consecutive failed auto fixes before ESCALATE
@@ -191,9 +195,11 @@ def status(entry: dict | None, handler, now: float) -> str:
 
 class Dispatcher:
     def __init__(self, h, table: dict, alarm_id: Callable, launcher=None, dry: bool = False,
-                 briefs: Path = HERE / "alarm_briefs", slots: tuple = (300, 301), busy: Callable | None = None):
+                 briefs: Path = HERE / "alarm_briefs", slots: tuple = (300, 301), busy: Callable | None = None,
+                 cargo: cargo_slots.CargoSlots | None = None, fleet: str = ""):
         self.h, self.table, self.alarm_id, self.launcher, self.dry = h, table, alarm_id, launcher, dry
         self.briefs, self.slots, self.busy = briefs, slots, busy or (lambda h, a, handler: "")
+        self.cargo, self.fleet = cargo, fleet or Path(getattr(h, "HOME", HERE)).name
         self.log: list[str] = []
 
     def act(self, action: str, key: str, **kw) -> None:
@@ -317,12 +323,28 @@ class Dispatcher:
             if slot is None:
                 e["note"] = "waiting for a dispatch slot"
                 return
+            hold = self.cargo_hold()
+            if hold:
+                e["note"] = hold
+                return
         lane = self.busy(self.h, a, handler)
         if lane:
             e["note"] = f"handled-by lane {lane}"
             return
         e.pop("note", None)
-        self.launch(a, handler, e, slot, now)
+        try:
+            self.launch(a, handler, e, slot, now)
+        except cargo_slots.Full as x:
+            e["note"] = f"waiting: {x}"
+
+    def cargo_hold(self) -> str:
+        if train_stage(self.h, self.launcher.alive) == "acceptance":
+            return "waiting: the train is in its acceptance stage (no cargo-building dispatch)"
+        if self.cargo is not None:
+            live = self.cargo.holders()
+            if len(live) >= self.cargo.cap:
+                return f"waiting: {len(live)}/{self.cargo.cap} machine-wide cargo slots held"
+        return ""
 
     def launch(self, a: Alarm, handler: Agent, e: dict, slot, now: float) -> None:
         h = self.h
@@ -341,7 +363,11 @@ class Dispatcher:
         else:
             work.mkdir(parents=True, exist_ok=True)
             brief.write_text(text, encoding="utf-8")
-            pid, start = self.launcher.start(brief, Path(h.HOME), out, handler.model, handler.calls)
+
+            def spawn() -> tuple[int, str]:
+                return self.launcher.start(brief, Path(h.HOME), out, handler.model, handler.calls)
+            cargo = handler.slot and self.cargo is not None
+            pid, start = self.cargo.claim(self.fleet, tag, spawn) if cargo else spawn()
         e["attempts"].append({"tag": tag, "ts": now, "pid": pid, "start": start, "deadline": now + handler.cap_min * 60,
                               "brief": brief.as_posix(), "out": out.as_posix(), "slot": slot, "fp": fingerprint(a.text)})
         self.act("launch", a.key, tag=tag, template=handler.template, model=handler.model, slot=slot, pid=pid,
@@ -355,6 +381,12 @@ def annotate(h, texts: list, table: dict, alarm_id: Callable, now: float) -> lis
         a = classify(t, table, alarm_id)
         out.append((t, status(st.get(a.key), table.get(a.id), now)))
     return out
+
+
+def train_stage(h, alive: Callable[[int, str], bool]) -> str:
+    """The gate stage the train marked in state/train-stage.json ('' when none, or its process is gone)."""
+    mark = h.load(TRAIN_STAGE, {})
+    return mark.get("stage", "") if mark.get("pid") and alive(mark["pid"], "") else ""
 
 
 def fingerprint(text: str) -> str:
@@ -392,8 +424,10 @@ def main(argv=None) -> int:
             if not a.no_beat:
                 run_beat(h)
             texts = h.load("health.json", {}).get("detail", [])
-            d = Dispatcher(h, alarm_handlers.TABLE, alarm_handlers.alarm_id, Launcher(str(h.QS)), dry=a.dry,
-                           busy=alarm_handlers.manual_lane)
+            launcher = Launcher(str(h.QS))
+            d = Dispatcher(h, alarm_handlers.TABLE, alarm_handlers.alarm_id, launcher, dry=a.dry,
+                           busy=alarm_handlers.manual_lane, cargo=cargo_slots.CargoSlots(launcher.alive),
+                           fleet=os.environ.get("FLEET_NAME", ""))
             d.run(texts)
             print("\n".join(d.log) or "dispatch: nothing to do")
     except TimeoutError:

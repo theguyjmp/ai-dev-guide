@@ -879,6 +879,18 @@ def oversized_files(cwd, base: str) -> list:
 
 def quality_problems(cwd, base: str = "main") -> str:
     """Output of every quality check that fails (empty = clean). `base` is what the size gate measures growth from."""
+    static = static_problems(cwd, base)
+    out = [static] if static else []
+    env = run_env(TRAIN_ENV)
+    for c in expand(CLIPPY_STRICT, changed_files(cwd, base) if "{file" in CLIPPY_STRICT else []):
+        r = sh(c, cwd=cwd, check=False, env=env, timeout=1800)
+        if r.returncode != 0:
+            out.append((r.stdout + r.stderr)[-4000:])
+    return chr(10).join(out)
+
+
+def static_problems(cwd, base: str = "main", plan: bool = True) -> str:
+    """quality_problems without the lint (no build); plan=False also skips the plan check (minutes)."""
     out = []
     allow = set((ST / "owner-allowlist.txt").read_text(encoding="utf-8").split()) if (ST / "owner-allowlist.txt").exists() else set()
     new_copies = sorted(owner_copies(cwd) - allow)
@@ -889,16 +901,13 @@ def quality_problems(cwd, base: str = "main") -> str:
     if big:
         out.append("file over the S8 size cap (new or newly over; existing big files are grandfathered until split): "
                    + chr(10) + chr(10).join(big))
-    rules = rules_gate.problems(cwd, base, ST, WT, STACK)
+    rules = rules_gate.problems(cwd, base, ST, WT, STACK, plan=plan)
     if rules:
         out.append(f"rule ratchet (rules_gate.py; a file may not grow past its state/{rules_gate.DEBT} count): "
                    + chr(10) + chr(10).join(rules))
     env = run_env(TRAIN_ENV)
-    wants = "{file" in CLIPPY_STRICT or any("{changed}" in c for c in QUALITY_CMDS)
-    changed = changed_files(cwd, base) if wants else []
-    lint = expand(CLIPPY_STRICT, changed if "{file" in CLIPPY_STRICT else [])
-    qa = [x for c in QUALITY_CMDS for x in (expand(c, changed) if "{changed}" in c else [c])]
-    for c in qa + lint:
+    changed = changed_files(cwd, base) if any("{changed}" in c for c in QUALITY_CMDS) else []
+    for c in [x for c in QUALITY_CMDS for x in (expand(c, changed) if "{changed}" in c else [c])]:
         r = sh(c, cwd=cwd, check=False, env=env, timeout=1800)
         if r.returncode != 0:
             out.append((r.stdout + r.stderr)[-4000:])
@@ -951,6 +960,19 @@ def known_red() -> dict:
     return load(quarantine.KNOWN, {})
 
 
+TRAIN_STAGE = "train-stage.json"
+
+
+@contextmanager
+def train_stage(stage: str):
+    """Mark `stage` (alarm_dispatch holds cargo agents meanwhile)."""
+    save(TRAIN_STAGE, {"stage": stage, "pid": os.getpid(), "t": iso()})
+    try:
+        yield
+    finally:
+        save(TRAIN_STAGE, {})
+
+
 def gate_tests(new_rows, rows) -> list:
     kr = known_red()
     tests = [t for i in new_rows for t in rows[i]["tests"]]
@@ -977,7 +999,8 @@ def gate(new_rows, rows, quick=False):
         if q:
             return False, ["quality"], q
         t0 = now()
-        fails = run_tests(gate_tests(new_rows, rows))
+        with train_stage("acceptance"):
+            fails = run_tests(gate_tests(new_rows, rows))
         event("gate_stage", stage="acceptance-quick", secs=round(now() - t0), fails=len(fails), failed=sorted(fails)[:20])
         log = (ST / "last-gate.txt").read_text(encoding="utf-8", errors="replace")[-20000:] if fails else ""
         return (not fails), fails, log
@@ -1015,7 +1038,8 @@ def gate(new_rows, rows, quick=False):
             return False, ["quality"], q
     tests = gate_tests(new_rows, rows)
     t0 = now()
-    fails = run_tests(tests)
+    with train_stage("acceptance"):
+        fails = run_tests(tests)
     event("gate_stage", stage="acceptance", secs=round(now() - t0), n=len(tests), fails=len(fails), failed=sorted(fails)[:20])
     # 2026-11-13: an empty log here sent every unowned acceptance failure to bisect (~18 min a level, 6 h with 0 landed)
     log = (ST / "last-gate.txt").read_text(encoding="utf-8", errors="replace")[-20000:] if fails else ""
@@ -1120,6 +1144,12 @@ def reject(q, reason):
     event("reject", row=q["row"], reason=reason[:300])
 
 
+def dup_reason(q, dups) -> str:
+    why = "; ".join(f"{d['file']}::{d['fn']} duplicates {d['existing']} ({d.get('why', '')[:120]})"
+                    for d in dups if adds_fn(q, d))
+    return ("duplicate capability (STANDARDS S1/S6): reuse or extend the owner, delete your copy: " + why) if why else ""
+
+
 def adds_fn(q, d) -> bool:
     """True when branch q itself adds fn d["fn"] in d["file"] (not merely touches the file)."""
     diff = git("diff", "-U0", f"main...{q['sha']}", "--", d["file"], check=False).stdout
@@ -1195,12 +1225,11 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     # review first (about a minute): a duplicate found after a 15-min gate would cost a whole second gate run
     if not quick and not reviewed:
         dups = batch_review(merged)
-        guilty = [q for q in merged if any(adds_fn(q, d) for d in dups)]
+        why = {q["sha"]: dup_reason(q, dups) for q in merged}
+        guilty = [q for q in merged if why[q["sha"]]]
         if guilty:
             for q in guilty:
-                why = "; ".join(f"{d['file']}::{d['fn']} duplicates {d['existing']} ({d.get('why', '')[:120]})"
-                                for d in dups if adds_fn(q, d))
-                reject(q, "duplicate capability (STANDARDS S1/S6): reuse or extend the owner, delete your copy: " + why)
+                reject(q, why[q["sha"]])
             event("review_reject", rows=[q["row"] for q in guilty])
             rest = [q for q in merged if q not in guilty]
             return try_batch(rest, rows, depth + 1, quick=False, reviewed=True) if rest else []
@@ -1376,6 +1405,84 @@ def _disjoint_files(queue: list) -> list:
     return out
 
 
+# ---------------------------------------------------------------- pick check: no-build checks before a row enters a batch
+PICK_WT = WT / "pick"
+PICK_CACHE = "pick-verdicts.json"  # {sha: {row, base, reviewed}}: one pass per sha; what a later main brings is the gate's
+PICK_IDLE_SECS = 120
+
+
+def pick_checkout(commit: str) -> None:
+    if not (PICK_WT / ".git").exists():
+        git("worktree", "add", "-q", "--detach", str(PICK_WT), commit)
+    else:
+        git("checkout", "-q", "-f", "--detach", commit, cwd=PICK_WT)
+        git("clean", "-q", "-f", "-d", cwd=PICK_WT)
+
+
+def merged_commit(base: str, sha: str) -> str | None:
+    r = git("merge-tree", "--write-tree", base, sha, check=False)
+    if r.returncode != 0 or not r.stdout.split():
+        return None
+    return git("commit-tree", r.stdout.split()[0], "-p", base, "-p", sha, "-m", "pick check").stdout.strip()
+
+
+def main_static_clean(base: str, cache: dict) -> bool:
+    """A main that fails the static checks itself rejects no row (its problems are not the row's)."""
+    if cache.get("_main", {}).get("sha") != base:
+        pick_checkout(base)
+        cache["_main"] = {"sha": base, "clean": not static_problems(PICK_WT, base, plan=False)}
+    return cache["_main"]["clean"]
+
+
+def pick_verdict(q: dict, base: str, cache: dict) -> str:
+    """'' or the reject reason of queued row q on commit `base` (a conflict is ''); raises ReviewUnavailable."""
+    merged = merged_commit(base, q["sha"])
+    if merged is None:
+        return ""
+    entry = cache.setdefault(q["sha"], {"row": q["row"]})
+    pick_checkout(merged)
+    if not entry.get("base"):
+        log = static_problems(PICK_WT, base, plan=False)
+        if log:
+            return "pick check: gate red (['quality']): " + log[-1500:]
+        entry["base"] = base
+    if not entry.get("reviewed"):
+        why = dup_reason(q, batch_review([q], cwd=PICK_WT, base=base))
+        if why:
+            return "pick check: " + why
+        entry["reviewed"] = True
+    return ""
+
+
+def pick_screen(picks: list, budget: float = float("inf")) -> set:
+    """Reject and dequeue the `picks` failing the pick check; their shas. A row with no verdict goes on to the gate."""
+    cache, t0, bad = load(PICK_CACHE, {}), now(), []
+    base = git("rev-parse", "main").stdout.strip()
+    todo = [q for q in picks if not (cache.get(q["sha"], {}).get("base") and cache[q["sha"]].get("reviewed"))]
+    if not todo or not main_static_clean(base, cache):
+        return set()
+    for q in todo:
+        if now() - t0 > budget:
+            break
+        try:
+            why = pick_verdict(q, base, cache)
+        except Exception as e:  # noqa: BLE001 - no verdict
+            event("pick_error", row=q["row"], error=f"{type(e).__name__}: {str(e)[-300:]}")
+            continue
+        event("pick_check", row=q["row"], ok=not why)
+        if why:
+            bad.append((q, why))
+    shas = {q["sha"] for q, _ in bad}
+    with lock("state"):
+        for q, why in bad:
+            reject(q, why)
+        queue = [q for q in load("queue.json", []) if q["sha"] not in shas]
+        save("queue.json", queue)
+    live = {q["sha"] for q in queue} | {"_main"}
+    save(PICK_CACHE, {k: v for k, v in cache.items() if k in live})
+    return shas
+
+
 def train_once():
     with lock("train", wait=5):
         with lock("state"):
@@ -1397,11 +1504,19 @@ def train_once():
         # claims, wait up to BATCH_WAIT_BUSY for a fuller batch; with no claims in flight nothing more is coming: go now.
         in_flight = len(load("claims.json", {}))
         wait = BATCH_WAIT_BUSY if in_flight else 0
-        if not queue or (len(queue) < MIN_BATCH and now() - min(q["ts"] for q in queue) < wait):
+        queue = sorted(queue, key=lambda q: q["ts"])
+        if not queue or (len(queue) < MIN_BATCH and now() - queue[0]["ts"] < wait):
+            pick_screen(queue, PICK_IDLE_SECS)
             return False
         if quarantine.paused(sys.modules[__name__]):
             return False
-        batch = disjoint(sorted(queue, key=lambda q: q["ts"]))[:BATCH_CAP]
+        batch = disjoint(queue)[:BATCH_CAP]
+        while batch:
+            bad = pick_screen(batch)
+            if not bad:
+                break
+            queue = [q for q in queue if q["sha"] not in bad]
+            batch = disjoint(queue)[:BATCH_CAP]
         for q in batch:
             if q["row"] not in rows:
                 rows[q["row"]] = {"id": q["row"], "tests": [], "status": "cleanup", "file_list": [], "deps": [], "module": "cleanup"}

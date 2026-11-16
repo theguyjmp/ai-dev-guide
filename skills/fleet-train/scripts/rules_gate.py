@@ -384,14 +384,15 @@ def plan_problems(cwd, base, st, scratch, changed) -> list:
             + "".join(f"\n  {x[:400]}" for x in new[:15])] if new else []
 
 
-def problems(cwd, base="main", st=None, scratch=None, lang=None) -> list:
+def problems(cwd, base="main", st=None, scratch=None, lang=None, plan=True) -> list:
     """Every rule problem of the tree at `cwd` that `base` does not carry (empty = clean)."""
     st = Path(st or default_state())
     lg = rl.LANGS[lang or rl.detect(cwd)]
     changed = changed_files(cwd, base)
     if changed is None:
         return [f"rules gate: git diff against {base} failed in {cwd}"]
-    return count_problems(lg, cwd, base, st, changed) + plan_problems(cwd, base, st, Path(scratch or st), changed)
+    return count_problems(lg, cwd, base, st, changed) + (plan_problems(cwd, base, st, Path(scratch or st), changed)
+                                                         if plan else [])
 
 
 def main(argv=None) -> int:

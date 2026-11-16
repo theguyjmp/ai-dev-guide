@@ -62,8 +62,8 @@ class FakeLauncher:
         self.live[self.pid] = f"start-{self.pid}"
         return self.pid, f"start-{self.pid}"
 
-    def alive(self, pid, start):
-        return self.live.get(pid) == start
+    def alive(self, pid, start):  # drivelock.live: an empty start matches any process on that pid
+        return pid in self.live and (not start or self.live[pid] == start)
 
     def kill(self, pid):
         self.killed.append(pid)
