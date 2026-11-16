@@ -6,6 +6,7 @@ Run by harness.quality_problems (train, pre-push) and by cloud sessions (`check 
 another module's ARCHITECTURE `Forbidden types:` stem; `Overlaps: <path>::<Name>` exempts one), text (spec and
 CLAUDE.md over the overhaul.toml [text] caps, which may only be tightened). A file fails above its count in
 <state>/rules-debt.json (absent = 0; a new project runs `init` on main once); `tighten` after each land, never growth.
+Debt is per file and never moves: code moved into a new file must be clean (fix its findings in the same change).
 A tree that changes spec/*.md must add no plan_validate problem line.
 
     py -3 rules_gate.py check   [--dir D] [--base main] [--state S] [--lang L]   exit 1 on any problem
