@@ -1433,9 +1433,16 @@ def disjoint(queue: list) -> list:
     Measured: every conflict the train resolved was row-vs-row inside one batch (0 of 58 queued rows conflicted with
     main), ~2 min each and serial ahead of a 15 min gate. 2026-11-13: file-disjoint picks took 23 of 106 queued rows
     (40 rows touched one hot file in different hunks); trial merges take 39, still with no resolves. Falls back to
-    file-disjoint if merge-tree is unavailable (git < 2.38)."""
-    acc, out = git("rev-parse", "main").stdout.strip(), []
+    file-disjoint if merge-tree is unavailable (git < 2.38). A row whose branch carries another unproven row's commits
+    (a stacked build) waits until that row is picked earlier in the batch or proven (state/pick-held.json)."""
+    acc, out, held = git("rev-parse", "main").stdout.strip(), [], {}
+    spec = main_spec()
+    proven = {i for i, r in spec.items() if r["status"] == "proven"}
     for q in queue:
+        dep = carried_rows(q, spec) - proven - {p["row"] for p in out}
+        if dep:
+            held[q["row"]] = sorted(dep)
+            continue
         r = git("merge-tree", "--write-tree", acc, q["sha"], check=False)
         if r.returncode == 1:  # conflicts: next batch
             continue
@@ -1446,7 +1453,16 @@ def disjoint(queue: list) -> list:
             return _disjoint_files(queue)
         acc = c
         out.append(q)
+    save("pick-held.json", held)
     return out
+
+
+def carried_rows(q, spec: dict) -> set:
+    """Rows other than q's own whose commits (not on main) q's branch carries: a commit subject starting `<row id>:`
+    or `stack: <row id>` for a spec row or a CLEAN-* fix. A stacked row landing without them fails the plan check."""
+    subj = git("log", "--no-merges", "--format=%s", f"main..{q['sha']}", check=False).stdout
+    ids = {m.group(1).rstrip(":") for m in re.finditer(r"^(?:stack: )?(\S+)", subj, re.M)}
+    return {i for i in ids if i in spec or i.startswith("CLEAN-")} - {q["row"]}
 
 
 def _disjoint_files(queue: list) -> list:

@@ -126,6 +126,13 @@ if stale:
     alarms.append(f"STALE-CLAIMS {stale[:6]} held over 3h: release them")
 if queue and now - min(q["ts"] for q in queue) > 4 * 3600:
     alarms.append(f"OLD-QUEUE oldest queued row waited {round((now - min(q['ts'] for q in queue)) / 3600, 1)} h")
+# a stacked row held at pick (harness.carried_rows) whose carried row is neither queued nor claimed waits forever
+_live = {q["row"] for q in queue} | {c["row"] for c in h.load("claims.json", {}).values()}
+_orph = {r: [d for d in ds if d not in _live] for r, ds in h.load("pick-held.json", {}).items() if set(ds) - _live}
+if _orph:
+    r0 = sorted(_orph)[0]
+    alarms.append(f"STACK-ORPHAN {len(_orph)} queued rows carry commits of rows neither queued nor claimed (e.g. {r0} "
+                  f"carries {_orph[r0]}): rebase each onto main without them, or requeue the carried row")
 if [e for e in ev if e.get("event") == "train_error" and now - e["ts"] < 3600]:
     alarms.append("TRAIN-ERROR in the last hour (events.jsonl train_error, train.err)")
 free = shutil.disk_usage(h.ST).free / 1e9

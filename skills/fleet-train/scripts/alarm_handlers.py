@@ -212,6 +212,7 @@ TABLE = {
     "TRAIN-DOWN": Owned("fleet_beat.py (restarts the train detached)", patience=1800),
     "SUPPLY": Owned("the land train: builder supply returns as rows land", patience=6 * 3600),
     "OLD-QUEUE": Owned("the land train: the queue drains as rows land", patience=6 * 3600),
+    "STACK-ORPHAN": Owned("the rebaser: rebases the held row onto main without the carried commits", patience=6 * 3600),
     "REPEAT-TEST": Agent("fix-test", slot=True, per_subject=True, cap_min=120, cooldown_min=LANDS),
     "KNOWN-RED": Agent("fix-test", slot=True, per_subject=True, cap_min=120, cooldown_min=LANDS),
     "MAIN-RED": Agent("main-red", slot=True, cap_min=120, cooldown_min=LANDS),
