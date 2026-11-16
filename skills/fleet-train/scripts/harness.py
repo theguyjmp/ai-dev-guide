@@ -1563,7 +1563,8 @@ def train_once():
         if not queue or (len(queue) < MIN_BATCH and now() - queue[0]["ts"] < wait):
             pick_screen(queue, PICK_IDLE_SECS)
             return False
-        if quarantine.paused(sys.modules[__name__]):
+        queue = quarantine.train_queue(sys.modules[__name__], queue)  # a cap pause leaves only CLEAN-* rows
+        if not queue:
             return False
         batch = disjoint(queue)[:BATCH_CAP]
         while batch:

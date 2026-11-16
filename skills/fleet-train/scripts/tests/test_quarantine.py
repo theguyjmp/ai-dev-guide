@@ -113,6 +113,19 @@ class Heal(Fixture):
         self.assertFalse(Q.paused(h))
         self.assertIn("main_unpaused", self.events())
 
+    def test_pause_leaves_only_fix_rows_and_clears_when_tests_pass_alone(self):
+        pq = [{"row": "R1", "ts": 1}, {"row": "CLEAN-fix-main", "ts": 2}]
+        broken = {"t": h.iso(), "sha": "e" * 40, "quarantined": [], "red": [OTHER]}
+        h.save(Q.BROKEN, dict(broken))
+        self.main("e" * 40, {OTHER: "still red"})
+        self.assertEqual([q["row"] for q in Q.train_queue(h, pq)], ["CLEAN-fix-main"])
+        self.assertTrue(Q.paused(h))
+        self.assertEqual(Q.train_queue(h, pq[:1]), [])
+        h.save(Q.BROKEN, dict(broken))  # forget the recheck throttle
+        self.main("e" * 40, {})  # green alone now, main unchanged
+        self.assertFalse(Q.paused(h))
+        self.assertEqual(Q.train_queue(h, pq), pq)
+
 
 class Release(Fixture):
     def test_green_on_main_returns_to_the_gate_and_is_throttled(self):

@@ -148,16 +148,43 @@ def release(h) -> list:
 
 
 def paused(h) -> bool:
-    """True while a quarantine_cap pause holds on an unchanged main."""
+    """True while a quarantine_cap pause holds: main unchanged and the red tests still red alone on it.
+    The pause ends when main moves or when the tests behind it pass alone again (recovered)."""
     b = h.load(BROKEN, None)
     if b is None:
         return False
     sha = h.git("rev-parse", "main").stdout.strip()
-    if sha == b.get("sha"):
+    if sha == b.get("sha") and not recovered(h, b):
         return True
     (h.ST / BROKEN).unlink(missing_ok=True)
     h.event("main_unpaused", was=b.get("sha"), sha=sha)
     return False
+
+
+def recovered(h, b: dict) -> bool:
+    """True when every test behind the pause passes alone on main now (rechecked uncached, at most every
+    RECHECK_SECS): a fix landed outside the train, or the red was environmental."""
+    if h.now() - b.get("checked", 0) < RECHECK_SECS:
+        return False
+    tests = sorted(set(b.get("quarantined", [])) | set(b.get("red", [])))
+    if not tests:
+        return True
+    with h.at_main():
+        red = h.run_alone(tests)
+    b["checked"] = h.now()
+    h.save(BROKEN, b)
+    return not red
+
+
+FIX_PREFIX = "CLEAN-"  # fix rows (clean-submit): the only rows that can repair a red main
+
+
+def train_queue(h, queue: list) -> list:
+    """The rows the train may pick from. While a pause holds only fix rows go (a clean-only batch), so the fix
+    for a red main can land; feature rows wait until the pause clears."""
+    if not paused(h):
+        return queue
+    return [q for q in queue if q["row"].startswith(FIX_PREFIX)]
 
 
 DISPATCH_RE = re.compile(r"^\s*([\w.-]+)\s*\|\s*\w+\s*\|\s*(\S+)\s*\|\s*(\w+)")
