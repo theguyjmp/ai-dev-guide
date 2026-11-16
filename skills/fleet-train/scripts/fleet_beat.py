@@ -139,7 +139,8 @@ free = shutil.disk_usage(h.ST).free / 1e9
 if free < 60:
     alarms.append(f"DISK {round(free)} GB free: clear old target dirs and stale worktrees")
 try:  # a deps prune left fingerprints claiming deleted rlibs fresh: every test fails to link on a green main
-    if "extern location for" in lg.read_text(encoding="utf-8", errors="replace") and now - lg.stat().st_mtime < 3 * 3600:
+    if "extern location for" in lg.read_text(encoding="utf-8", errors="replace") and now - lg.stat().st_mtime < 3 * 3600 \
+            and lg.stat().st_mtime > born:
         alarms.append("CACHE-BROKEN the last gate could not link pruned rlibs (extern location ... does not exist): "
                       "drop the stale fingerprints in the train target")
 except OSError:
