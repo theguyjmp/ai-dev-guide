@@ -48,6 +48,35 @@ def newest_mtime(d: Path) -> float:
     return max(times)
 
 
+def drop_stale_fingerprints(root: Path) -> int:
+    """Delete cargo fingerprints whose library output is gone, so cargo rebuilds the crate instead of failing with
+    'extern location does not exist'. Any prune of deps/ by age leaves such fingerprints: mtime is not use, an rlib
+    the gate links can be days old. Run it after every deps prune."""
+    n = 0
+    for prof in ("debug", "release"):
+        fp, deps = root / prof / ".fingerprint", root / prof / "deps"
+        if not fp.is_dir():
+            continue
+        have = {e.name for e in os.scandir(deps)} if deps.is_dir() else set()
+        for e in os.scandir(fp):
+            name, _, sha = e.name.rpartition("-")
+            if not e.is_dir() or not any(f.startswith("lib-") for f in os.listdir(e.path)):
+                continue
+            stem = name.replace("-", "_")
+            if not any(x.startswith((f"lib{stem}-{sha}.", f"{stem}-{sha}.")) for x in have):
+                shutil.rmtree(e.path, ignore_errors=True)
+                n += 1
+    return n
+
+
+def fix_cache(ctx, a) -> str:
+    """CACHE-BROKEN: drop the stale fingerprints in the train target so the next gate rebuilds those crates."""
+    n = 0 if ctx.dry else drop_stale_fingerprints(Path(ctx.h.TARGETS) / "land-0")
+    if not n:
+        raise Failed("no stale fingerprint in land-0: the missing rlib has another cause (read last-gate.txt)")
+    return f"dropped {n} stale fingerprints in land-0"
+
+
 def slots_in_use(h) -> set:
     used = {str(k) for k in h.load("claims.json", {})}
     used |= {str(q.get("slot")) for q in h.load("queue.json", [])}
@@ -207,6 +236,7 @@ HARNESS_FIX = Agent("harness-fix", cap_min=75, calls=80)
 TABLE = {
     "ORIGIN-BEHIND": Auto(push_origin, patience=3600),
     "DISK": Auto(free_disk, patience=6 * 3600, budget_s=480),
+    "CACHE-BROKEN": Auto(fix_cache, patience=1800, budget_s=300),
     "STALE-CLAIMS": Auto(release_stale, patience=3600),
     "BREVITY-NOTES": Auto(archive_briefs, patience=6 * 3600),
     "TRAIN-DOWN": Owned("fleet_beat.py (restarts the train detached)", patience=1800),

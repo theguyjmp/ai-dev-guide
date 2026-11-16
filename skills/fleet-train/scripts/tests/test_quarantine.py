@@ -89,6 +89,12 @@ class Heal(Fixture):
         Q.main_red(h, [RED])
         self.assertEqual(len(self.runs), n, "verdicts are cached per main sha")
 
+    def test_build_failure_is_not_cached(self):
+        self.main("b" * 40, {OTHER: h.BUILD_FAILED + "extern location for sha2 does not exist"})
+        self.assertIn(OTHER, Q.main_red(h, [OTHER]))
+        self.main("b" * 40, {})
+        self.assertEqual(Q.main_red(h, [OTHER]), {}, "a test build failure is rerun, never cached red")
+
     def test_green_on_main_bisects_as_before(self):
         self.batch([[OTHER]] * 3)
         self.assertNotIn(OTHER, h.known_red())

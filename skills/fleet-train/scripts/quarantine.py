@@ -60,11 +60,15 @@ def main_red(h, tests) -> dict:
     if todo:
         with h.at_main():
             red = h.run_alone(todo)
-        cache["red"].update({t: red[t][-TAIL:] for t in todo if t in red})
+        # a test build failure is no test verdict: never cached, so a broken target cache cannot pin main red
+        unbuilt = {t: red[t][-TAIL:] for t in todo if t in red and red[t].startswith(h.BUILD_FAILED)}
+        cache["red"].update({t: red[t][-TAIL:] for t in todo if t in red and t not in unbuilt})
         cache["green"] = sorted(set(cache["green"]) | {t for t in todo if t not in red})
         h.save(BASELINE, cache)
-        h.event("main_baseline", sha=sha, tests=todo[:10], red=sorted(t for t in todo if t in red)[:10])
-    return {t: cache["red"][t] for t in tests if t in cache["red"]}
+        h.event("main_baseline", sha=sha, tests=todo[:10], red=sorted(t for t in todo if t in red)[:10], unbuilt=len(unbuilt))
+    else:
+        unbuilt = {}
+    return {**{t: cache["red"][t] for t in tests if t in cache["red"]}, **unbuilt}
 
 
 def heal(h, merged: list, rows: dict, fails) -> bool:

@@ -568,12 +568,15 @@ def run_tests(tests, timeout=1800):
     return run_tests_cargo(tests, timeout) if P["accept"] == "cargo" else run_tests_cmd(tests, timeout)
 
 
+BUILD_FAILED = "test build failed: "  # run_alone's tail when a test exe did not build (quarantine never caches it)
+
+
 def run_alone(tests, timeout=1800) -> dict:
     """{test: failure tail} of the tests failing alone in the train tree."""
     env = run_env(TRAIN_ENV)
     if P["accept"] == "cargo":
         exes, r = build_test_exes(sorted({Path(t.split("::")[0]).stem for t in tests}), env, timeout)
-        build = "test build failed: " + r.stdout[-300:] + r.stderr[-1200:]
+        build = BUILD_FAILED + r.stdout[-300:] + r.stderr[-1200:]
         tails = {t: run_one_alone(exes, t, env) if Path(t.split("::")[0]).stem in exes else build for t in tests}
     else:
         tails = {}

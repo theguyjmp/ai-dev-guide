@@ -138,6 +138,12 @@ if [e for e in ev if e.get("event") == "train_error" and now - e["ts"] < 3600]:
 free = shutil.disk_usage(h.ST).free / 1e9
 if free < 60:
     alarms.append(f"DISK {round(free)} GB free: clear old target dirs and stale worktrees")
+try:  # a deps prune left fingerprints claiming deleted rlibs fresh: every test fails to link on a green main
+    if "extern location for" in lg.read_text(encoding="utf-8", errors="replace") and now - lg.stat().st_mtime < 3 * 3600:
+        alarms.append("CACHE-BROKEN the last gate could not link pruned rlibs (extern location ... does not exist): "
+                      "drop the stale fingerprints in the train target")
+except OSError:
+    pass
 if TIMEOUTS:
     alarms.append(f"BEAT-TIMEOUT {TIMEOUTS[:3]} timed out: the numbers above may be partial")
 try:
