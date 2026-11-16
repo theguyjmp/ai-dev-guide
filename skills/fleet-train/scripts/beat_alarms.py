@@ -28,6 +28,12 @@ def known_red(h) -> list:
             + ". The train releases each once it passes alone on main"]
 
 
+def open_requests(h, now: float, lane=lambda rel: "") -> list:
+    """One alarm per open request no live lane (`lane(rel)` -> its name) works on; the dispatcher also skips live agents."""
+    return [f"REQUEST notes/requests/{p.name}: open over 10 min with no agent on it: read it and fix it as it says"
+            for p in quarantine.open_requests(h, now) if not lane(f"notes/requests/{p.name}")]
+
+
 def repeat_test(h, ev: list) -> list:
     gates = [e for e in ev if e.get("event") == "gate_stage" and str(e.get("stage", "")).startswith("acceptance")]
     failed = [t for e in gates[-REPEAT_WINDOW:] for t in set(e.get("failed", []))]

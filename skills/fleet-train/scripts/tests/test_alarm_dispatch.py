@@ -345,6 +345,48 @@ def test_free_disk():
 
 
 
+def test_request_alarm():
+    import quarantine as Q
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        h, ln = fake_h(root), FakeLauncher()
+        req = root / "notes" / "requests"
+        req.mkdir(parents=True)
+        old = time.time() - 3600
+        for n in ("fix-test-r1.md", "fix-slow-r2.md", "split-a__b.rs.md", "README.md", "fix-test-fresh.md", "fix-test-r3.md.done"):
+            (req / n).write_text("request")
+            if n != "fix-test-fresh.md":
+                os.utime(req / n, (old, old))
+        names = [p.name for p in Q.open_requests(h, time.time())]
+        check("open_requests: old fix requests only (no split-*, README, fresh, .done)",
+              names == ["fix-slow-r2.md", "fix-test-r1.md"], names)
+        (root / "notes" / "briefs" / "fix-slow-1.md").write_text("working on notes/requests/fix-slow-r2.md")
+        check("request_lane: a fresh lane brief naming the request owns it",
+              H.request_lane(h, "notes/requests/fix-slow-r2.md") == "fix-slow-1"
+              and H.request_lane(h, "notes/requests/fix-test-r1.md") == "")
+        a = D.classify("REQUEST notes/requests/fix-test-r1.md: open over 10 min with no agent on it", H.TABLE, H.alarm_id)
+        check("REQUEST is a per-request slot agent", a.key == "REQUEST:notes/requests/fix-test-r1.md"
+              and H.TABLE["REQUEST"].slot and H.TABLE["REQUEST"].per_subject, a)
+        d = D.Dispatcher(h, H.TABLE, H.alarm_id, ln, briefs=HOME / "alarm_briefs", busy=H.manual_lane)
+        d.run([a.text, "REQUEST notes/requests/fix-slow-r2.md: open over 10 min with no agent on it"], now=T0)
+        brief = ln.started[0][0].read_text(encoding="utf-8")
+        check("one agent launched, the other request is held by its lane", len(ln.started) == 1, len(ln.started))
+        check("request brief: RULE ZERO, the path, archive step, slot, no placeholder",
+              brief.startswith("> RULE ZERO") and "notes/requests/fix-test-r1.md" in brief
+              and "notes/archive/requests/" in brief and "clean-submit" in brief and "--slot 300" in brief
+              and "{{" not in brief, re.findall(r"\{\{\w+\}\}", brief))
+        d.run([a.text], now=T0 + 60)
+        check("a running request agent is not dispatched twice", len(ln.started) == 1)
+        (req / "fix-test-r1.md").rename(req / "r1.moved")  # archived: the request leaves the open list
+        check("an archived request is no longer open", [p.name for p in Q.open_requests(h, time.time())] == ["fix-slow-r2.md"])
+        import beat_alarms
+        check("beat_alarms.open_requests: a request a lane works on raises nothing",
+              beat_alarms.open_requests(h, time.time(), lambda rel: H.request_lane(h, rel)) == [])
+        lines = beat_alarms.open_requests(h, time.time())
+        check("beat_alarms.open_requests: one alarm per open request otherwise", len(lines) == 1
+              and lines[0].startswith("REQUEST notes/requests/fix-slow-r2.md"), lines)
+
+
 def test_cli():
     with tempfile.TemporaryDirectory() as td:
         st = Path(td) / "state"

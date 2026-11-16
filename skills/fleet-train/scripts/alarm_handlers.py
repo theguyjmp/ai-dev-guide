@@ -194,6 +194,12 @@ def release_stale(ctx, a) -> str:
     return f"released {[r for _, r in stale][:6]}"
 
 
+def request_lane(h, rel: str) -> str:
+    """A live lane (open DISPATCH row or fresh brief with no hand-back) that names this request file."""
+    from types import SimpleNamespace
+    return manual_lane(h, SimpleNamespace(subject=rel), SimpleNamespace(hint=""))
+
+
 # ---------------------------------------------------------------- the table
 LANDS = 90  # cooldown minutes for a fix landing through the train
 RED = ("REPEAT-TEST", "KNOWN-RED", "MAIN-RED", "TRAIN-DOWN", "TRAIN-ERROR", "TRAIN-ENV")
@@ -214,11 +220,13 @@ TABLE = {
     "REPEAT-RED": Agent("train-red", covered_by=RED),
     "REJECTS": Agent("rejects", calls=80),
     "REWORK": Agent("ruling", calls=60, cap_min=60),
+    "REQUEST": Agent("request", slot=True, per_subject=True, cap_min=120, cooldown_min=LANDS),
     "TRAIN-ENV": Agent("train-env", calls=80),
     "BREVITY": Agent("trim", model="sonnet", calls=60, cap_min=60),
     "TRAIN-ERROR": HARNESS_FIX,
     "DISPATCH-ERROR": HARNESS_FIX,
     "BREVITY-ERROR": HARNESS_FIX,
+    "REQUEST-ERROR": HARNESS_FIX,
     "BEAT-TIMEOUT": HARNESS_FIX,
     "TRAIN-PID": Manager("stop this project's train once by its own pid; the next beat starts it with a pid file"),
     "TRAIN-KILLABLE": Manager("restart the train with the quoted full path between batches (never mid-land)"),

@@ -29,6 +29,21 @@ def request_path(h, test: str) -> Path:
     return h.HOME / "notes" / "requests" / f"fix-test-{stem(test)}.md"
 
 
+REQUEST_MIN_AGE = 600  # an open request is dispatched only after sitting this long (its writer may be starting it)
+REQUEST_OWNED = ("split-",)  # prefixes another alarm owns
+
+
+def open_requests(h, now: float, min_age: float = REQUEST_MIN_AGE) -> list:
+    """Requests in notes/requests/*.md nobody has picked up: older than min_age, not owned by another alarm, not a
+    README/underscore file. A done request is moved to notes/archive/requests/, so it leaves this list."""
+    out = []
+    for p in sorted((h.HOME / "notes" / "requests").glob("*.md")):
+        if p.name.startswith(REQUEST_OWNED + ("_", "README")) or now - p.stat().st_mtime < min_age:
+            continue
+        out.append(p)
+    return out
+
+
 def unowned(fails, rows: dict, ids) -> list:
     """Failing tests no batch row owns (a row's own tests are red on main until it lands)."""
     own = {t for i in ids for t in rows.get(i, {}).get("tests", [])}

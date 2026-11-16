@@ -100,6 +100,11 @@ if base:
     alarms.append(f"MAIN-RED {len(base)} unit tests red on main (unit-baseline.json): brief a fix agent (clean-start/clean-submit)")
 alarms += beat_alarms.known_red(h) + beat_alarms.repeat_test(h, ev)
 alarms += beat_alarms.origin_behind(lambda *a: run(["git", *a], cwd=str(h.REPO)).stdout)
+try:  # open fix requests nobody works on
+    import alarm_handlers
+    alarms += beat_alarms.open_requests(h, time.time(), lambda rel: alarm_handlers.request_lane(h, rel))
+except (OSError, ValueError, RuntimeError) as e:  # a broken check is an alarm
+    alarms.append(f"REQUEST-ERROR {type(e).__name__}: {str(e)[:120]}")
 rj = [e for e in ev if e.get("event") == "reject" and now - e["ts"] < 7200]
 if len(rj) >= 6 and len(rj) > 2 * landed2:
     alarms.append(f"REJECTS {len(rj)} rejects vs {landed2} landed in 2h: read the reasons, fix the shared cause")
