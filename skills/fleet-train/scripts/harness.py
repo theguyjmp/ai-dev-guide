@@ -1215,6 +1215,9 @@ def batch_review(merged, cwd=None, base="main") -> list:
     raise ReviewUnavailable(last)
 
 
+GREEN = {"head": ""}  # last gate-verified train head; a bisect's rejected right half stays in HEAD, so never land HEAD
+
+
 def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     """Land as much of batch as possible. Returns list of landed queue entries."""
     merged, conflicted = build_train(batch, rows)
@@ -1237,6 +1240,7 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     ok, fails, log = gate(ids, rows, quick)
     if ok:
         finish_spec(ids)
+        GREEN["head"] = git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip()
         return merged
     own = {i for i in ids for t in rows[i]["tests"] if t in fails}
     if fails not in (["clippy"], ["unit"], ["quality"]) and own and all(any(t in rows[i]["tests"] for i in own) for t in fails):
@@ -1312,9 +1316,11 @@ def probe_culprit(merged, rows, fails):
 
 
 def promote(landed):
-    """Fast-forward main to the train head."""
-    head = git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip()
+    """Fast-forward main to the last gate-verified train head (GREEN); a no-op when main already has it."""
+    head = GREEN["head"]
     before = git("rev-parse", "main").stdout.strip()
+    if not head or head == before:
+        return
     if git("status", "--porcelain", "--untracked-files=no").stdout.strip():
         git("update-ref", "refs/heads/main", head)  # main checkout dirty: move the ref only
     else:
@@ -1522,6 +1528,7 @@ def train_once():
                 rows[q["row"]] = {"id": q["row"], "tests": [], "status": "cleanup", "file_list": [], "deps": [], "module": "cleanup"}
         t0 = now()
         event("train_start", rows=[q["row"] for q in batch])
+        GREEN["head"] = ""
         try:
             landed = try_batch(batch, rows)
         except ReviewUnavailable as e:  # never land unreviewed: keep every row queued, retry the batch later
@@ -1532,7 +1539,7 @@ def train_once():
         except quarantine.MainBroken as e:  # rows stay queued
             print(f"{iso()} train: {e}", flush=True)
             return True
-        if landed and git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip() != git("rev-parse", "main").stdout.strip():
+        if landed:
             promote(landed)
         with lock("state"):
             queue = load("queue.json", [])
