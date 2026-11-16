@@ -79,7 +79,7 @@ def fix_cache(ctx, a) -> str:
 
 def slots_in_use(h) -> set:
     used = {str(k) for k in h.load("claims.json", {})}
-    used |= {str(q.get("slot")) for q in h.load("queue.json", [])}
+    # a queued row never builds in its slot (the train builds in its own target): its slot target is free to delete
     used |= {str(x.get("slot")) for e in h.load("dispatch.json", {}).values() for x in e.get("attempts", [])
              if not x.get("end")}
     for brief in open_lane_briefs(h):
