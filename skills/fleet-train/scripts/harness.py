@@ -30,6 +30,7 @@ ST = HOME / "state"
 WT = Path(os.environ.get("HARNESS_WT", str(REPO.parent / "vh")))  # per-slot worktrees, fixed paths -> warm incremental builds
 TARGETS = REPO / ".overhaul" / "target"
 SPEC = "spec/FUNCTIONS.md"
+SPEC_REF = os.environ.get("HARNESS_SPEC_REF", "main")  # spec ref (check a branch before it lands)
 CLAIM_TTL = 100 * 60
 ST.mkdir(parents=True, exist_ok=True)
 WT.mkdir(parents=True, exist_ok=True)
@@ -43,15 +44,18 @@ def iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no console windows for children
+
+
 def sh(cmd, cwd=REPO, check=True, env=None, timeout=None, stdin=None) -> subprocess.CompletedProcess:
     p = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
                          errors="replace", env=env, shell=isinstance(cmd, str),
-                         stdin=subprocess.PIPE if stdin is not None else None)
+                         stdin=subprocess.PIPE if stdin is not None else None, creationflags=NO_WINDOW)
     try:
         out, err = p.communicate(input=stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
         # kill the whole tree: a grandchild (app.exe under a test) keeps the pipes open and would hang us forever
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, creationflags=NO_WINDOW)
         try:
             out, err = p.communicate(timeout=60)
         except subprocess.TimeoutExpired:
@@ -131,7 +135,7 @@ def parse_spec(text: str) -> dict:
 
 
 def main_spec() -> dict:
-    return parse_spec(git("show", f"main:{SPEC}").stdout)
+    return parse_spec(git("show", f"{SPEC_REF}:{SPEC}").stdout)
 
 
 def old_state() -> dict:
@@ -210,6 +214,24 @@ def slot_wt(slot: int) -> Path:
     return WT / f"s{slot}"
 
 
+def copy_assets(dst: Path, src: Path = None, globs=None) -> int:
+    """Copy the profile's `copy_ignored` globs from the main checkout into a worktree (real files); returns the count."""
+    src = Path(src or REPO).resolve()
+    n = 0
+    for g in (P["copy_ignored"] if globs is None else globs):
+        for f in src.glob(g):
+            rel = f.relative_to(src)
+            if not f.is_file() or ".git" in rel.parts or "node_modules" in rel.parts:
+                continue
+            t = Path(dst) / rel
+            if t.exists() and t.stat().st_size == f.stat().st_size and t.stat().st_mtime >= f.stat().st_mtime:
+                continue
+            t.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, t)
+            n += 1
+    return n
+
+
 def ensure_wt(slot: int, branch: str, base: str):
     p = slot_wt(slot)
     if not (p / ".git").exists():
@@ -217,6 +239,7 @@ def ensure_wt(slot: int, branch: str, base: str):
     git("reset", "-q", "--hard", cwd=p, check=False)
     git("clean", "-qfd", "-e", "target", cwd=p, check=False)
     git("checkout", "-q", "-B", branch, base, cwd=p)
+    copy_assets(p)
     return p
 
 
@@ -236,6 +259,15 @@ def env_for(slot) -> dict:
 
 
 # ---------------------------------------------------------------- commands
+def reexec_argv() -> list:
+    """The argv a restarted train runs: the project's run_train.py wrapper when there is one, else this file."""
+    wrap = Path(__file__).with_name("run_train.py")
+    if wrap.exists():
+        pyw = Path(sys.executable).with_name("pythonw.exe")
+        return [str(pyw if pyw.exists() else sys.executable), "-u", str(wrap), "train", "--loop"]
+    return [sys.executable, "-u", __file__, "train", "--loop"]
+
+
 def cmd_frontier(a):
     rows = main_spec()
     claims, queue, attempts = load("claims.json", {}), load("queue.json", []), load("attempts.json", {})
@@ -277,7 +309,8 @@ def take_row(slot, rid, rows, claims, attempts) -> dict:
             "previous_branch": previous_branch(rid),
             "old_harness_reason": old_state().get(rid, {}).get("last_reason", "")[:600],
             "recent_rejects": load("rejects.json", {}).get(rid, [])[-3:],
-            "must_also_before_commit": QUALITY_BRIEF}
+            "must_also_before_commit": QUALITY_BRIEF,
+            "stack": {"label": P["stack_label"], "env_use": P["env_use"], "done": P["done_brief"], "tail": P["tail_brief"]}}
 
 
 def cmd_claim(a):
@@ -369,6 +402,13 @@ STACKS = {
                         "-D clippy::unwrap_used -D clippy::cognitive_complexity"),
         "lint_strict_brief": ("cargo clippy -q -p <each crate you touched> --all-targets -- -D warnings "
                               "-D clippy::too_many_lines -D clippy::unwrap_used -D clippy::cognitive_complexity"),
+        "copy_ignored": [],  # gitignored globs copied into slot and train trees
+        "stack_label": "Rust workspace",
+        "env_use": "<env_prefix> cargo ...",
+        "done_brief": ("`cargo test -q --test <stem> -- --exact <test_name>` for each test in \"tests\" (tests under "
+                       "tests/acceptance/s*.rs may be slow in debug: add --release for those if a debug run takes over "
+                       "3 min), then `cargo clippy -q -p <crate> --all-targets -- -D warnings` for each crate you touched"),
+        "tail_brief": "pipe cargo output through tail -30 or grep error",
         "qa": ["dup_blocks.py", "dup_literals.py", "shape_check.py", "check_cycles.py"],  # in QS, run over src_dirs
         "accept": "cargo",  # build the test binaries once, run each (run_tests_cargo)
         "check": "cargo check -q --workspace --tests",
@@ -407,7 +447,13 @@ STACKS = {
         "lint": "",
         "lint_strict": "",  # eslint on {files} when the project has eslint (load_profile)
         "lint_strict_brief": "",
-        "qa": [],  # dup_literals.py / check_cycles.py read JS: turn them on in harness.toml once main passes them
+        "copy_ignored": [],
+        "stack_label": "Node project",
+        "env_use": "<env_prefix> node ...",
+        "done_brief": ("`node --test --test-name-pattern=\"^<test_name>$\" <test file>` for each test in \"tests\" "
+                       "(`<file>::*` is the whole file), then `node --check` on each .js/.mjs file you changed"),
+        "tail_brief": "pipe test output through tail -30 or grep \"not ok\"",
+        "qa": [],  # {changed} in a command = the files the batch changed vs main. dup_literals.py / check_cycles.py read JS: turn them on in harness.toml once main passes them
         "accept": "node --test --test-reporter=tap {names} {file}",  # one run per test file
         "accept_name": "--test-name-pattern=^{name}$",  # `file::*` runs the whole file
         "accept_fail_re": r"^\s*not ok \d+ - (.+?)(?: # .*)?$",
@@ -432,6 +478,13 @@ STACKS = {
 }
 
 
+def derive_unit_one(unit: str, template: str) -> str:
+    """The one-test rerun for an overridden `unit`: a `node --test` unit gets the name filter appended, any other gets ""."""
+    if unit.startswith("node --test") and "--test-name-pattern=" in template:
+        return f"{unit} --test-name-pattern=" + template.split("--test-name-pattern=", 1)[1]
+    return ""
+
+
 def load_profile() -> tuple:
     cfg = {}
     if (HOME / "harness.toml").exists():
@@ -451,7 +504,10 @@ def load_profile() -> tuple:
         if "eslint" in dev:
             p["lint_strict"] = "npx --no-install eslint --max-warnings 0 {files}"
             p["lint_strict_brief"] = "npx eslint --max-warnings 0 <the files you changed>"
-    p.update(cfg.get("profile", {}))
+    over = cfg.get("profile", {})
+    p.update(over)
+    if name == "node" and "unit" in over and "unit_one" not in over:
+        p["unit_one"] = derive_unit_one(over["unit"], STACKS[name]["unit_one"])
     return name, p
 
 
@@ -467,7 +523,7 @@ def changed_files(cwd, base: str, dirs=None, exts=None) -> list:
 
 def expand(cmd: str, files: list) -> list:
     """The command(s) to run for a profile string: {QS} filled, {files} once over all, {file} once per file; [] = skip."""
-    cmd = cmd.replace("{QS}", QS)
+    cmd = cmd.replace("{QS}", QS).replace("{changed}", "{files}")
     if "{file}" in cmd:
         return [cmd.replace("{file}", f'"{f}"') for f in files]
     if "{files}" in cmd:
@@ -676,7 +732,7 @@ def fmt_tree(cwd):
     spec.loader.exec_module(fc)
     for ed, files in fc.roots(Path(cwd)).items():
         for i in range(0, len(files), 60):
-            subprocess.run(["rustfmt", "--edition", ed, *files[i:i + 60]], cwd=cwd, capture_output=True)
+            subprocess.run(["rustfmt", "--edition", ed, *files[i:i + 60]], cwd=cwd, capture_output=True, creationflags=NO_WINDOW)
     if git("status", "--porcelain", cwd=cwd, check=False).stdout.strip():
         git("commit", "-qam", "train: rustfmt", cwd=cwd, check=False)
 
@@ -838,8 +894,11 @@ def quality_problems(cwd, base: str = "main") -> str:
         out.append(f"rule ratchet (rules_gate.py; a file may not grow past its state/{rules_gate.DEBT} count): "
                    + chr(10) + chr(10).join(rules))
     env = run_env(TRAIN_ENV)
-    lint = expand(CLIPPY_STRICT, changed_files(cwd, base) if "{file" in CLIPPY_STRICT else [])
-    for c in QUALITY_CMDS + lint:
+    wants = "{file" in CLIPPY_STRICT or any("{changed}" in c for c in QUALITY_CMDS)
+    changed = changed_files(cwd, base) if wants else []
+    lint = expand(CLIPPY_STRICT, changed if "{file" in CLIPPY_STRICT else [])
+    qa = [x for c in QUALITY_CMDS for x in (expand(c, changed) if "{changed}" in c else [c])]
+    for c in qa + lint:
         r = sh(c, cwd=cwd, check=False, env=env, timeout=1800)
         if r.returncode != 0:
             out.append((r.stdout + r.stderr)[-4000:])
@@ -970,6 +1029,7 @@ def build_train(batch, rows):
     git("reset", "-q", "--hard", cwd=TRAIN, check=False)
     git("checkout", "-q", "--detach", "main", cwd=TRAIN)
     git("reset", "-q", "--hard", "main", cwd=TRAIN)
+    copy_assets(TRAIN)
     merged, conflicted = [], []
     for q in batch:
         r = git("merge", "-q", "--no-ff", "--no-edit", "-m", f"train: land {q['row']}", q["sha"], cwd=TRAIN, check=False)
@@ -1260,7 +1320,7 @@ def cmd_train(a):
         if a.loop and Path(__file__).stat().st_mtime != born and \
                 sh([sys.executable, "-c", f"compile(open(r'{__file__}',encoding='utf-8').read(),'harness','exec')"], check=False).returncode == 0:  # code changed and parses: restart between trains
             print(f"{iso()} train: harness.py changed, re-exec", flush=True)
-            os.execv(sys.executable, [sys.executable, "-u", __file__, "train", "--loop"])
+            os.execv(sys.executable, reexec_argv())
         try:
             did = train_once()
         except Exception as e:  # noqa: BLE001 - never let one bad train stop the loop
@@ -1368,7 +1428,7 @@ def train_once():
             if (HOME / gen).exists():
                 # run detached: a slow dashboard (15 min timeout) inside the train lock blocked every next batch
                 subprocess.Popen(["py", "-3", str(HOME / gen)], cwd=HOME, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                                 creationflags=NO_WINDOW)
         print(f"{iso()} train: landed {len(landed)}/{len(batch)} in {round(now() - t0)}s", flush=True)
         quarantine.release(sys.modules[__name__])
         return True

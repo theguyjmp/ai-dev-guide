@@ -1,5 +1,6 @@
 # fleet-train changelog
 
+- 2026-11-15: stack-profile fixes from a node migration: a project `unit` that is a `node --test` glob now reruns flaky tests inside that glob (any other `unit` reruns nothing, never default discovery); `HARNESS_SPEC_REF` lets `frontier` read a branch's spec; `fleet_beat` runs without cloud numbers (`beat_alarms.cloud_status`); builders.js takes the stack's done check, env command and output habit from the claim JSON `stack` (profile keys `stack_label`, `env_use`, `done_brief`, `tail_brief`); `{changed}` in a profile `qa` command expands to the batch's changed files; profile `copy_ignored` globs copy gitignored assets into slot and train trees; every child process and the train re-exec (via `run_train.py` when present) use CREATE_NO_WINDOW. Tests: scripts/tests/test_profile_fixes.py.
 - 2026-11-14: optional `regen` commands in harness.toml `[profile]`: run in the train tree after the formatter and committed as "train: regen", so generated files cannot drift on main; a failure fails the batch quality.
 - 2026-11-11: train conflict resolver (`resolve_conflict`, HARNESS_RESOLVE_MAX): 16 of 18 rows in one train of the pilot project were rejected on one hot file.
 - 2026-11-12: train start rule (HARNESS_BATCH_WAIT_BUSY): wait for a full batch while claims are in flight, start at once when none; a 1-row train had cost a full gate.

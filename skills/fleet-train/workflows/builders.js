@@ -13,18 +13,18 @@ const SCHEMA = { type: 'object', properties: {
   status: { type: 'string', enum: ['submitted', 'released', 'idle'] },
   row: { type: 'string' }, note: { type: 'string' } }, required: ['status'] }
 
-const brief = (slot) => `You are a builder for the rebuild (Rust workspace). One row, end to end, then return.
+const brief = (slot) => `You are a builder for the rebuild (the claim JSON's "stack" names the stack, its done check and its output habit). One row, end to end, then return.
 
 1. Claim: run \`cd ${H} && py -3 harness.py claim --slot ${slot} --wait 540\`. It prints JSON. If "row" is null, return {status:"idle"} at once.
-2. Work ONLY in the printed "worktree" (already on a fresh branch from main). Every Bash call: \`cd <worktree> && <env_prefix> cargo ...\` (the shell does not keep cwd). Never use another worktree or the main checkout.
+2. Work ONLY in the printed "worktree" (already on a fresh branch from main). Every Bash call: \`cd <worktree> && <env_prefix> <stack.env_use command>\` (the shell does not keep cwd). Never use another worktree or the main checkout.
 3. Read the row's line in spec/FUNCTIONS.md (grep for "| <row> |"), its acceptance test files, and only the source files you need (grep/sed ranges, not whole huge files). If "previous_branch" is set, first \`git merge --no-edit <branch>\` to salvage that earlier attempt (resolve conflicts) and continue from it. "old_harness_reason" and "recent_rejects" say why earlier attempts failed - fix exactly that.
-4. You OWN this row completely. There is no planner to send it back to: if a dependency capability is missing, a stub is in the way, the row is too big, or a file is not in the row's file list - implement what is needed yourself, in the module where it belongs. Keep it minimal and clean (no duplicated helpers - grep for an existing one first; clippy -D warnings clean).
-5. Done = the row's acceptance tests pass: \`cargo test -q --test <stem> -- --exact <test_name>\` for each test in "tests" (tests under tests/acceptance/s*.rs may be slow in debug: add --release for those if a debug run takes over 3 min). Then \`cargo clippy -q -p <crate> --all-targets -- -D warnings\` for each crate you touched. Do NOT run the whole workspace test suite - the land train does that once per batch.
+4. You OWN this row completely. There is no planner to send it back to: if a dependency capability is missing, a stub is in the way, the row is too big, or a file is not in the row's file list - implement what is needed yourself, in the module where it belongs. Keep it minimal and clean (no duplicated helpers - grep for an existing one first; strict lint clean).
+5. Done = the row's acceptance tests pass, run as the claim JSON's "stack".done says (each test in "tests", then the lint or syntax check on what you touched). Do NOT run the whole workspace test suite - the land train does that once per batch.
 6. Rules: never edit the status column of spec/FUNCTIONS.md; never edit or weaken acceptance tests of other rows; edit this row's own test only if it contradicts the row's spec text, and say why in the commit message. No new [[test]] entries for other rows. No sleeping or polling.
-6b. The claim JSON has "must_also_before_commit": follow it exactly. A second copy of anything an owner already has (core::math, core::param, core::refusal, spec/index/*) or any dup/shape/strict-clippy problem gets your branch rejected at land.
+6b. The claim JSON has "must_also_before_commit": follow it exactly. A second copy of anything an owner already has (core::math, core::param, core::refusal, spec/index/*) or any dup/shape/strict-lint problem gets your branch rejected at land.
 7. Commit (git add -A && git commit -m "<row>: <what>"), run \`cd ${H} && py -3 harness.py self-review --slot ${slot}\` and fix every duplicate it lists until it prints an empty list (the land train rejects anything it lists), then \`cd ${H} && py -3 harness.py submit --slot ${slot} --row <row>\` and return {status:"submitted", row}.
 8. Budget: about 90 tool calls. If you cannot get it green by then, or the same step fails twice the same way, commit whatever compiles, run \`cd ${H} && py -3 harness.py release --slot ${slot} --row <row> --reason "<precise blocker: file, error, what is needed>"\`, and return {status:"released", row, note}.
-Keep tool output small: pipe cargo output through tail -30 or grep error.`
+Keep tool output small: the claim JSON's "stack".tail says how.`
 
 async function worker(slot) {
   let idle = 0, n = 0

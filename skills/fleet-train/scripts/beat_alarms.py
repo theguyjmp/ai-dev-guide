@@ -1,9 +1,22 @@
 """fleet_beat alarms as testable functions; each returns its alarm lines."""
 from __future__ import annotations
 
+import json
+import sys
+
 import quarantine
 
 REPEAT_WINDOW = 6
+
+
+def cloud_status(run) -> dict:
+    """`cloud.py status` as a dict; {} when it is missing, crashes or prints anything else."""
+    try:
+        lines = run([sys.executable, "cloud.py", "status"]).stdout.strip().splitlines()
+        cs = json.loads(lines[-1])
+    except (IndexError, ValueError, OSError, AttributeError):
+        return {}
+    return cs if isinstance(cs, dict) else {}
 
 
 def known_red(h) -> list:

@@ -57,10 +57,7 @@ def start_train():
     return ps(f"([wmiclass]'Win32_Process').Create('{q(cmd)}', '{q(str(Path(h.__file__).resolve().parent))}').ProcessId")
 
 
-try:
-    cs = json.loads(run([sys.executable, "cloud.py", "status"]).stdout.strip().splitlines()[-1])
-except (IndexError, ValueError):
-    cs = {}
+cs = beat_alarms.cloud_status(run)
 ev = h.read_events()
 now = time.time()
 landed1 = sum(len(e.get("rows", [])) for e in ev if e.get("event") == "land" and now - e.get("ts", 0) < 3600)
