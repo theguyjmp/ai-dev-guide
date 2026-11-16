@@ -16,6 +16,7 @@ assert_cmd's `cargo_bin(`). Library entry `lib: <crate>::<path>::<fn>` (Rust onl
 suffix of it by whole `::` segments, and a call shorter than the full path needs a `use` of the crate in the file.
 """
 import ast
+import functools
 import re
 
 import rust_src  # beside this script
@@ -37,7 +38,13 @@ def tokens(entry):
 
 
 def grammar_regex(parts):
-    """A regex over a token stream (each argument followed by NUL) for the CLI grammar."""
+    """A regex over a token stream (each argument followed by NUL) for the CLI grammar. Compiled once per grammar:
+    cross_problems asks for the same few hundred entries once per row x entry (950k times on a 1,000-row plan)."""
+    return _grammar_regex(tuple(parts))
+
+
+@functools.lru_cache(maxsize=None)
+def _grammar_regex(parts):
     out = []
     for tok in parts:
         if tok == "[":

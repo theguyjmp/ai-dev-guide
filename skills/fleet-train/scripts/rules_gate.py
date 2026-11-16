@@ -16,7 +16,7 @@ A tree that changes spec/*.md must add no plan_validate problem line.
 """
 from __future__ import annotations
 
-import json, os, re, subprocess, sys
+import json, os, re, subprocess, sys, threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, fields
@@ -348,28 +348,64 @@ def plan_lines(repo) -> list | None:
     return sorted(LINE_NO.sub(r"\1", x) for x in lines[:-1] if x.strip())
 
 
-def base_plan_lines(cwd, base, st, scratch) -> list | None:
-    """plan_lines of `base`, cached per commit in <state>/plan-validate-base.json (last 8)."""
-    sha = git(cwd, "rev-parse", base).stdout.strip()
-    p = Path(st) / PLAN_CACHE
-    cache = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-    if sha in cache:
-        return cache[sha]
-    wt = Path(scratch) / f"pv-{sha[:12]}-{os.getpid()}"
-    if git(cwd, "worktree", "add", "-q", "--detach", str(wt), sha).returncode:
-        return None
+def tree_id(cwd) -> str | None:
+    """Content id of the tree at `cwd` as it stands (committed or not, ignored files left out): plan_validate's output is a
+    function of that content alone, so it is the cache key. None when git fails."""
+    import tempfile
+    fd, idx = tempfile.mkstemp(prefix="pv-idx-")
+    os.close(fd)
+    os.remove(idx)
     try:
-        lines = plan_lines(wt)
+        env = {**os.environ, "GIT_INDEX_FILE": idx}
+        run = lambda *a: subprocess.run(["git", *a], cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8")
+        if run("read-tree", "HEAD").returncode or run("add", "-A").returncode:
+            return None
+        r = run("write-tree")
+        return r.stdout.strip() if r.returncode == 0 else None
     finally:
-        git(cwd, "worktree", "remove", "--force", str(wt))
-    if lines is not None:
-        cache = dict(list(cache.items())[-7:])
-        cache[sha] = lines
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(cache), encoding="utf-8")
-        os.replace(tmp, p)
+        if os.path.exists(idx):
+            os.remove(idx)
+
+
+_CACHE_LOCK = threading.Lock()
+
+
+def cached_plan_lines(key: str | None, st, compute) -> list | None:
+    """plan_validate lines for the tree id `key`: from state/PLAN_CACHE when seen (a batch's own tree, a retry, the pre-push
+    check, and the next batch's base once that tree has landed all repeat a run that takes minutes), else `compute()`."""
+    p = Path(st) / PLAN_CACHE
+
+    def load():
+        try:
+            return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        except ValueError:
+            return {}
+    if key and key in (c := load()):
+        return c[key]
+    lines = compute()
+    if lines is not None and key:
+        with _CACHE_LOCK:
+            cache = {k: v for k, v in list(load().items())[-7:]}
+            cache[key] = lines
+            tmp = p.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(cache), encoding="utf-8")
+            os.replace(tmp, p)
     return lines
+
+
+def base_plan_lines(cwd, base, st, scratch: Path) -> list | None:
+    sha = git(cwd, "rev-parse", base).stdout.strip()
+    key = git(cwd, "rev-parse", f"{sha}^{{tree}}").stdout.strip() or None
+
+    def compute():
+        wt = Path(scratch) / f"pv-{sha[:12]}-{os.getpid()}"
+        if git(cwd, "worktree", "add", "-q", "--detach", str(wt), sha).returncode:
+            return None
+        try:
+            return plan_lines(wt)
+        finally:
+            git(cwd, "worktree", "remove", "--force", str(wt))
+    return cached_plan_lines(key, st, compute)
 
 
 def plan_problems(cwd, base, st, scratch, changed) -> list:
@@ -377,7 +413,7 @@ def plan_problems(cwd, base, st, scratch, changed) -> list:
         return []
     with ThreadPoolExecutor(2) as pool:  # each run takes minutes: side by side the gate waits for one
         was_f = pool.submit(base_plan_lines, cwd, base, st, scratch)
-        now, was = plan_lines(cwd), was_f.result()
+        now, was = cached_plan_lines(tree_id(cwd), st, lambda: plan_lines(cwd)), was_f.result()
     if now is None:
         return ["plan_validate crashed on this tree (run: plan_validate.py --repo . --no-lint)"] if was is not None else []
     new = list((Counter(now) - Counter(was or [])).elements())

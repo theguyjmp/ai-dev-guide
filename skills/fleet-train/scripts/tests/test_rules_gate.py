@@ -162,5 +162,22 @@ class Node(Base):
         self.assertTrue(out and "src/app.js: 1 x dropped error" in out[0], out)
 
 
+class PlanCache(Base):
+    def test_plan_validate_cached_by_tree_content(self):
+        r = self.repo({"spec/F.md": "a\n"})
+        calls = []
+        g.plan_lines = lambda repo: calls.append(1) or ["x"]
+        self.commit(r, {"spec/F.md": "b\n"})
+        key = g.tree_id(r)
+        self.assertEqual(g.cached_plan_lines(key, self.st, lambda: g.plan_lines(r)), ["x"])
+        self.assertEqual(g.cached_plan_lines(key, self.st, lambda: g.plan_lines(r)), ["x"])
+        self.assertEqual(len(calls), 1)
+        git(r, "checkout", "-q", "main"), git(r, "merge", "-q", "--ff-only", "row")  # landed: it is the next base
+        self.assertEqual(g.base_plan_lines(r, "main", self.st, self.tmp), ["x"])
+        self.assertEqual(len(calls), 1)
+        write(r, {"spec/F.md": "dirty\n"})  # an uncommitted edit is a different tree
+        self.assertNotEqual(g.tree_id(r), key)
+
+
 if __name__ == "__main__":
     unittest.main()
