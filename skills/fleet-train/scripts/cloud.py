@@ -33,7 +33,7 @@ BR = "harness-cloud"
 KIT = os.environ.get("HARNESS_CLOUD_KIT", "tools/cloud")  # the builder kit inside the repo
 BASE = "cloud-base"  # origin branch every session starts from (refreshed from local main by collect)
 CLOUD_TTL = int(os.environ.get("HARNESS_CLOUD_TTL", str(2 * 3600)))  # a session that claimed a row and pushed nothing for this long is released
-STATE = "cloud.json"
+STATE = h.CLOUD_STATE
 QA_DIR = "/tmp/harness-qa"  # claim.sh copies qa/ here
 SESSION_RULES_CHECK = (f"HARNESS_QS={QA_DIR} python3 {QA_DIR}/rules_gate.py check --dir . --base origin/{BASE} "
                        f"--state {QA_DIR} --lang {h.STACK}")

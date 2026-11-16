@@ -1430,6 +1430,50 @@ BATCH_WAIT = 600
 BATCH_CAP = int(os.environ.get("HARNESS_BATCH_CAP", "20"))
 
 
+FILL_WAIT = int(os.environ.get("HARNESS_FILL_WAIT", str(20 * 60)))
+FILLING = "filling: "
+CLOUD_STATE = "cloud.json"  # owned here, written by cloud.py
+
+
+def fill_hold(clean: int, out: int, fix_row: bool, since: float | None, t: float) -> bool:
+    """Hold the train: few clean picks, rows out for rebase, no CLEAN-* pick, hold under FILL_WAIT old."""
+    if fix_row or not out or clean >= MIN_BATCH:
+        return False
+    return since is None or t - since < FILL_WAIT
+
+
+def fill_since(events: list, t: float) -> float | None:
+    """Start of the fill hold running at t, else None; a train_start, other idle or FILL_WAIT gap ends it."""
+    since = last = None
+    for e in events:
+        kind = e.get("event")
+        if kind == "train_idle" and str(e.get("reason", "")).startswith(FILLING):
+            if since is None or e["ts"] - last > FILL_WAIT:
+                since = e["ts"]
+            last = e["ts"]
+        elif kind in ("train_start", "train_idle"):
+            since = last = None
+    return since if last is not None and t - last <= FILL_WAIT else None
+
+
+def rebase_out(queue: list, picks: list, sent: dict) -> int:
+    """Queued rows, not picked, whose current sha cloud.py sent to the rebasers."""
+    picked = {q["sha"] for q in picks}
+    return sum(1 for q in queue if q["sha"] not in picked and sent.get(q["row"]) == q["sha"])
+
+
+def fill_wait(queue: list, picks: list) -> bool:
+    """True, logging a train_idle, while fill_hold() holds the train."""
+    t, events = now(), read_events()
+    sent = {r: v.get("rebase_sent") for r, v in load(CLOUD_STATE, {"rows": {}}).get("rows", {}).items()}
+    out = rebase_out(queue, picks, sent)
+    fix_row = any(q["row"].startswith(quarantine.FIX_PREFIX) for q in picks)
+    if not fill_hold(len(picks), out, fix_row, fill_since(events, t), t):
+        return False
+    event("train_idle", queued=len(queue), reason=f"{FILLING}{len(picks)} clean, {out} out for rebase")
+    return True
+
+
 def disjoint(queue: list) -> list:
     """Oldest first, the rows that merge cleanly onto main plus every earlier pick (trial merges with git merge-tree,
     no worktree, ~0.2 s a row); the rest wait (oldest next batch).
@@ -1596,6 +1640,8 @@ def train_once():
             for q in queue:
                 reject(q, "merge conflict with main; merge main into your branch and resolve")
             event("train_idle", queued=len(load("queue.json", [])), reason="no row merges cleanly with main")
+            return False
+        if fill_wait(queue, batch):
             return False
         for q in batch:
             if q["row"] not in rows:
