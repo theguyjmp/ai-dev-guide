@@ -181,6 +181,46 @@ def test_pick_plan_stubs():
     check("plan: a pass cached by older pick checks is run again", len(seen) >= 1, seen)
 
 
+BUILD = ("import pathlib, sys\nif 'v2' in pathlib.Path('api.txt').read_text() and 'old' in pathlib.Path('caller.txt')"
+         ".read_text():\n    print('error[E0599]: caller.txt calls old, api.txt is v2')\n    sys.exit(1)\n")
+
+
+def test_pick_build():
+    """The pick check compiles main + row (P["pick_build"]) once per main: a row whose base went stale under a landed
+    row is rejected; a clean row passes; a main that fails the same compile rejects no row; acceptance = no verdict."""
+    git("checkout", "-q", "main")
+    for rel, text in {"build.py": BUILD, "api.txt": "v1\n", "caller.txt": "new\n"}.items():
+        (h.REPO / rel).write_text(text, encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "buildable main")
+    shas = {}
+    for r, rel, text in (("X", "api.txt", "v2\n"), ("Y", "y.txt", "y\n")):
+        git("checkout", "-q", "-B", r, "main")
+        (h.REPO / rel).write_text(text, encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", r)
+        shas[r] = {"row": r, "sha": git("rev-parse", "HEAD"), "ts": 40}
+        git("checkout", "-q", "main")
+    h.static_problems, h.batch_review = (lambda *a, **k: ""), (lambda *a, **k: [])
+    h.P.update({"pick_build": f'"{sys.executable}" build.py', "pick_env": {}, "pick_err_re": r"^error"})
+    h.save(h.PICK_CACHE, {})
+    h.save("queue.json", list(shas.values()))
+    check("build: both rows compile on the main they were built on", h.pick_screen(list(shas.values())) == set())
+    (h.REPO / "caller.txt").write_text("old\n", encoding="utf-8")
+    git("commit", "-q", "-am", "land a caller of the old api")
+    h.save(h.TRAIN_STAGE, {"stage": "acceptance", "pid": os.getpid()})
+    check("build: train in acceptance -> no compile, no verdict", h.pick_screen(list(shas.values())) == set())
+    h.save(h.TRAIN_STAGE, {})
+    bad = h.pick_screen(list(shas.values()))
+    rej = h.load("rejects.json", {}).get("X", [{}])[-1].get("reason", "")
+    check("build: main moved -> the stale row is compiled again and rejected with the compiler's error",
+          bad == {shas["X"]["sha"]} and rej.startswith(h.PICK_BUILD_RED) and "E0599" in rej, (bad, rej))
+    (h.REPO / "api.txt").write_text("v2\n", encoding="utf-8")
+    git("commit", "-q", "-am", "main red on the same compile")
+    h.save("queue.json", [shas["X"]])
+    check("build: a main failing the same compile rejects no row", h.pick_screen([shas["X"]]) == set())
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

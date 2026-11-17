@@ -414,6 +414,10 @@ STACKS = {
         "check": "cargo check -q --workspace --tests",
         "check_exts": [".rs"],
         "check_hint": "cargo check -q --workspace --tests 2>&1 | grep -E '^error' -A5 | head -40",
+        # the unit stage's compile, run by the pick check on main + one row (a warm target rechecks only what changed)
+        "pick_build": "cargo check -q --profile test --lib --bins --workspace",
+        "pick_env": {"CARGO_TARGET_DIR": "{targets}/pick"},
+        "pick_err_re": r"^error(\[E\d+\])?: (?!could not compile)",
         "fn_added_re": r"^\+\s*(pub(\([a-z]+\))?\s+)?fn\s+\w+",
         "fn_def_re": r"\bfn\s+{name}\b",
         "review_skip_re": r"/tests/",
@@ -460,6 +464,9 @@ STACKS = {
         "check": "node --check {file}",
         "check_exts": [".js", ".mjs", ".cjs"],
         "check_hint": "node --check <each conflicted .js/.mjs file>",
+        "pick_build": "",  # no compile step
+        "pick_env": {},
+        "pick_err_re": "",
         "fn_added_re": (r"^\+\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?\s+\w+|"
                         r"(?:const|let)\s+\w+\s*=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*=>)"),
         "fn_def_re": r"(?:\bfunction\*?\s+{name}\b|\b(?:const|let|var)\s+{name}\s*=)",
@@ -1394,6 +1401,15 @@ def tighten_rules_debt(before, head):
         event("rules_debt_tightened", changes=cut[:20], n=len(cut))
 
 
+TRAIN_CODE = ("harness.py", "desk.py", "quarantine.py", "rules_gate.py", "rules_langs.py")  # what the train imports
+
+
+def train_code() -> dict:
+    """{path: mtime} of the train's own modules: a change to any of them restarts it between trains."""
+    here = Path(__file__).resolve().parent
+    return {p: p.stat().st_mtime for p in (here / n for n in TRAIN_CODE) if p.exists()}
+
+
 def cmd_train(a):
     missing = [v for v in P["require_env"] if not os.environ.get(v)]
     if missing:  # measured: a train started from Git Bash (no ProgramFiles(x86)) found no MSVC toolchain, every native
@@ -1401,11 +1417,12 @@ def cmd_train(a):
         sys.exit(f"train: {', '.join(missing)} not set (started from Git Bash?): start the train from PowerShell or cmd")
     if a.loop:  # restart and kill scripts use this pid (and its tree), never a machine-wide command-line pattern
         (ST / "train.pid").write_text(str(os.getpid()), encoding="utf-8")
-    born = Path(__file__).stat().st_mtime
+    born = train_code()
     while True:
-        if a.loop and Path(__file__).stat().st_mtime != born and \
-                sh([sys.executable, "-c", f"compile(open(r'{__file__}',encoding='utf-8').read(),'harness','exec')"], check=False).returncode == 0:  # code changed and parses: restart between trains
-            print(f"{iso()} train: harness.py changed, re-exec", flush=True)
+        if a.loop and (now_code := train_code()) != born and all(
+                sh([sys.executable, "-c", f"compile(open(r'{p}',encoding='utf-8').read(),'m','exec')"], check=False).returncode == 0
+                for p in now_code):  # code changed and parses: restart between trains
+            print(f"{iso()} train: {', '.join(p.name for p in now_code if now_code[p] != born.get(p))} changed, re-exec", flush=True)
             os.execv(sys.executable, reexec_argv())
         try:
             did = train_once()
@@ -1523,9 +1540,15 @@ def _disjoint_files(queue: list) -> list:
 
 # ---------------------------------------------------------------- pick check: no-build checks before a row enters a batch
 PICK_WT = WT / "pick"
-PICK_CACHE = "pick-verdicts.json"  # {sha: {row, base, checks, reviewed}}: one pass per sha; what a later main brings is the gate's
+PICK_CACHE = "pick-verdicts.json"  # {sha: {row, base, checks, built, reviewed}}: static pass per sha, compile per main
 PICK_CHECKS = 2  # bump when the static pick checks change: older passes run again
 PICK_IDLE_SECS = 120
+PICK_BUILD_TIMEOUT = int(os.environ.get("HARNESS_PICK_BUILD_TIMEOUT", "600"))
+PICK_BUILD_RED = "pick check: gate red (['unit']): the unit stage's compile fails on main + this row: "
+
+
+class NoVerdict(Exception):
+    pass
 
 
 def pick_checkout(commit: str) -> None:
@@ -1551,6 +1574,56 @@ def main_static_clean(base: str, cache: dict) -> bool:
     return cache["_main"]["clean"]
 
 
+def pid_alive(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"], capture_output=True, text=True,
+                         creationflags=NO_WINDOW).stdout
+    return f'"{pid}"' in out
+
+
+def pick_compile(commit: str) -> tuple:
+    """(ok, error lines) of P["pick_build"] at `commit` in PICK_WT; NoVerdict in the train's acceptance stage or on a
+    timeout (the row goes on to the gate)."""
+    mark = load(TRAIN_STAGE, {})
+    if mark.get("stage") == "acceptance" and mark.get("pid") and pid_alive(mark["pid"]):
+        raise NoVerdict("the train is in its acceptance stage")
+    pick_checkout(commit)
+    try:
+        r = sh(P["pick_build"], cwd=PICK_WT, check=False, env=run_env(stack_env(P["pick_env"])), timeout=PICK_BUILD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise NoVerdict(f"pick build over {PICK_BUILD_TIMEOUT} s") from None
+    out, blocks, cur = r.stdout + r.stderr, [], None
+    for line in out.splitlines():
+        if P["pick_err_re"] and re.match(P["pick_err_re"], line):
+            cur = [line]
+            blocks.append(cur)
+        elif cur is not None and line.strip():
+            cur.append(line)
+        else:
+            cur = None
+    return r.returncode == 0, chr(10).join(chr(10).join(b) for b in blocks) or out[-1500:]
+
+
+def pick_build(base: str, merged: str, cache: dict) -> str:
+    """'' or the compile errors of `merged` (main + a row); a main that fails the same compile rejects no row."""
+    if not P["pick_build"]:
+        return ""
+    t0 = now()
+    ok, errs = pick_compile(merged)
+    event("pick_compile", ok=ok, secs=round(now() - t0, 1))
+    if ok:
+        return ""
+    main = cache.setdefault("_main", {})
+    if main.get("built_sha") != base:
+        main["built_sha"], main["built"] = base, pick_compile(base)[0]
+    return PICK_BUILD_RED + errs[-3000:] if main["built"] else ""
+
+
 def pick_verdict(q: dict, base: str, cache: dict) -> str:
     """'' or the reject reason of queued row q on commit `base` (a conflict is ''); raises ReviewUnavailable."""
     merged = merged_commit(base, q["sha"])
@@ -1564,6 +1637,12 @@ def pick_verdict(q: dict, base: str, cache: dict) -> str:
         if log:
             return "pick check: gate red (['quality']): " + log[-1500:]
         entry["base"], entry["checks"] = base, PICK_CHECKS
+    if entry.get("built") != base:  # main moving under a row is what breaks its compile: one verdict per main
+        why = pick_build(base, merged, cache)
+        if why:
+            return why
+        entry["built"] = base
+        pick_checkout(merged)
     if not entry.get("reviewed"):
         why = dup_reason(q, batch_review([q], cwd=PICK_WT, base=base))
         if why:
@@ -1577,7 +1656,7 @@ def pick_screen(picks: list, budget: float = float("inf")) -> set:
     cache, t0, bad = load(PICK_CACHE, {}), now(), []
     base = git("rev-parse", "main").stdout.strip()
     todo = [q for q in picks if not (cache.get(q["sha"], {}).get("checks") == PICK_CHECKS
-                                     and cache[q["sha"]].get("reviewed"))]
+                                     and cache[q["sha"]].get("built") == base and cache[q["sha"]].get("reviewed"))]
     if not todo or not main_static_clean(base, cache):
         return set()
     for q in todo:
