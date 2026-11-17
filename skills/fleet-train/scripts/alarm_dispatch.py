@@ -120,6 +120,7 @@ class Ctx:
     now: float
     dry: bool = False
     deadline: float = float("inf")
+    alive: Callable[[int, str], bool] | None = None  # the launcher's pid check; None = unknown, so assume alive
 
     def left(self, cap: float = 600) -> float:
         rest = self.deadline - time.time()
@@ -144,6 +145,11 @@ def hhmm(ts: float) -> str:
 
 def holding(at: dict) -> bool:
     return not at.get("end")
+
+
+def live_attempt(at: dict, now: float, alive: Callable[[int, str], bool] | None) -> bool:
+    """An unclosed attempt still runs: pid alive and deadline not past (reap closes it later, or never with dispatch off)."""
+    return holding(at) and now < at.get("deadline", float("inf")) and (alive is None or alive(at["pid"], at.get("start", "")))
 
 
 def failed(entry: dict) -> list:
@@ -282,7 +288,7 @@ class Dispatcher:
         if runs and now - runs[-1]["ts"] < AUTO_GAP:
             return
         t0 = time.time()
-        ctx = Ctx(self.h, now, self.dry, t0 + handler.budget_s)
+        ctx = Ctx(self.h, now, self.dry, t0 + handler.budget_s, self.launcher.alive)
         try:
             did, ok = handler.fix(ctx, a), True
         except Failed as x:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os, re, shutil, subprocess, sys, time
 from pathlib import Path
 
-from alarm_dispatch import Agent, Auto, Failed, Manager, Owned
+from alarm_dispatch import Agent, Auto, Failed, Manager, Owned, live_attempt
 
 FINISHED_AGE = 3 * 3600  # untouched this long = finished work
 EMERGENCY_GB = 50  # below this the train's debug incremental cache goes too
@@ -77,14 +77,17 @@ def fix_cache(ctx, a) -> str:
     return f"dropped {n} stale fingerprints in land-0"
 
 
-def slots_in_use(h) -> set:
+def slots_in_use(h, now: float, alive=None) -> set:
     used = {str(k) for k in h.load("claims.json", {})}
     # a queued row never builds in its slot (the train builds in its own target): its slot target is free to delete
     used |= {str(x.get("slot")) for e in h.load("dispatch.json", {}).values() for x in e.get("attempts", [])
-             if not x.get("end")}
+             if live_attempt(x, now, alive)}
     for brief in open_lane_briefs(h):
         used |= set(re.findall(r"--slot (\d+)", brief.read_text(encoding="utf-8", errors="replace")))
     return used
+
+
+LANE_CLOSED = ("done", "paused", "retired")  # DISPATCH.md status words whose brief no longer builds
 
 
 def open_lane_briefs(h) -> list:
@@ -92,7 +95,7 @@ def open_lane_briefs(h) -> list:
     out = []
     for line in disp.read_text(encoding="utf-8", errors="replace").splitlines() if disp.exists() else []:
         parts = [p.strip() for p in line.split("|")]
-        if len(parts) >= 4 and parts[3] not in ("done",) and (Path(h.HOME) / parts[2]).is_file():
+        if len(parts) >= 4 and not parts[3].lower().startswith(LANE_CLOSED) and (Path(h.HOME) / parts[2]).is_file():
             out.append(Path(h.HOME) / parts[2])
     return out
 
@@ -120,7 +123,7 @@ def rm_tree(p: Path, deadline: float) -> tuple[float, bool]:
 def free_disk(ctx, a) -> str:
     """Finished slot targets and qc-other; under EMERGENCY_GB the train's incremental cache (do_disk owns land-0 ageing)."""
     h, t = ctx.h, ctx.now
-    used = slots_in_use(h)
+    used = slots_in_use(h, t, ctx.alive)
     free = shutil.disk_usage(str(Path(h.TARGETS).anchor)).free / 1e9
     todo = [d for d in sorted(Path(h.TARGETS).glob("slot-*")) + [Path(h.TARGETS) / "qc-other"] if d.is_dir()
             and (d.name[5:] if d.name.startswith("slot-") else "") not in used and t - newest_mtime(d) >= FINISHED_AGE]

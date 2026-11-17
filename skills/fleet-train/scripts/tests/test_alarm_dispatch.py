@@ -345,6 +345,33 @@ def test_free_disk():
 
 
 
+def test_stale_slot_records():
+    """A slot is protected only by a live attempt (pid alive, deadline ahead) or an open lane brief."""
+    with tempfile.TemporaryDirectory() as td:
+        h = fake_h(Path(td))
+        att = lambda slot, pid, dl, end=None: {"slot": slot, "pid": pid, "start": "s", "deadline": dl, "tag": "t",
+                                               **({"end": end} if end else {})}
+        h.save("dispatch.json", {"a": {"attempts": [att(300, 1, T0 + 600), att(301, 2, T0 - 60), att(302, 2, T0 + 600),
+                                                    att(303, 2, T0 + 600, end=T0 - 5)]}})
+        alive = lambda pid, start: pid == 2
+        (h.HOME / "notes" / "briefs" / "paused.md").write_text("run --slot 305", encoding="utf-8")
+        (h.HOME / "notes" / "briefs" / "open.md").write_text("run --slot 306", encoding="utf-8")
+        (h.HOME / "notes" / "briefs" / "run.md").write_text("run --slot 307", encoding="utf-8")
+        rows = ["a | opus | notes/briefs/open.md | open | -",
+                "- 2026-11-16T15:05Z b | opus | notes/briefs/paused.md | paused (owner order) | -",
+                "c | opus | notes/briefs/run.md | running (manager-launched) | -",
+                "d | opus | notes/briefs/gone.md | retired | -"]
+        (h.HOME / "notes" / "DISPATCH.md").write_text(chr(10).join(rows) + chr(10), encoding="utf-8")
+        used = H.slots_in_use(h, T0, alive)
+        check("a dead attempt does not protect its slot", "300" not in used, used)
+        check("an attempt past its deadline does not protect its slot", "301" not in used, used)
+        check("a live attempt still protects its slot", "302" in used, used)
+        check("a closed attempt does not protect its slot", "303" not in used, used)
+        check("a paused lane brief does not protect its slot", "305" not in used, used)
+        check("open and running lane briefs still protect theirs", {"306", "307"} <= used, used)
+        check("an unknown pid check assumes alive", {"300", "302"} <= H.slots_in_use(h, T0))
+
+
 def test_request_alarm():
     import quarantine as Q
     with tempfile.TemporaryDirectory() as td:
