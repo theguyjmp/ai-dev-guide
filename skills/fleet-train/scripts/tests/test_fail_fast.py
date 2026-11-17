@@ -228,7 +228,8 @@ def test_pick_accept():
     row = "| {} | 1 | m | | e | tests/{}.rs::t | {} | {} |\n"
     (h.REPO / "spec").mkdir(exist_ok=True)
     (h.REPO / "spec/FUNCTIONS.md").write_text(row.format("P1", "p1", "proven", "src/a.rs")
-                                              + row.format("P2", "p2", "proven", "src/b.rs"), encoding="utf-8")
+                                              + row.format("P2", "p2", "proven", "src/b.rs")
+                                              + row.format("X", "x", "planned", "src/a.rs"), encoding="utf-8")
     (h.REPO / "src").mkdir(exist_ok=True)
     for f in ("a", "b"):
         (h.REPO / f"src/{f}.rs").write_text(f"// {f}\n", encoding="utf-8")
@@ -246,9 +247,12 @@ def test_pick_accept():
         ran.append(tests)
         return {"fails": [t for t in tests if "p1" in t], "log": "p1 failed", "send_secs": 1}
     v = h.pick_accept_check(x, main, run=run)
-    check("accept: the owner tier is the changed file's owner only", ran == [["tests/p1.rs::t"]], ran)
+    check("accept: the owner tier is the changed file's proven owner only (never a planned row's test)",
+          ran == [["tests/p1.rs::t"]], ran)
     check("accept: red on the desk", v and not v["ok"] and v["fails"] == ["tests/p1.rs::t"], v)
     h.save(h.PICK_ACCEPT, {x["sha"]: v})
+    check("accept: with the switch off no verdict rejects", h.pick_accept_red(x["sha"], main) == "")
+    (h.ST / h.PICK_ACCEPT_ON).write_text("", encoding="utf-8")
     h.save(h.PICK_CACHE, {})
     h.save("queue.json", [x])
     h.static_problems = lambda cwd, base="main", plan=True: ""

@@ -134,11 +134,11 @@ def parse_spec(text: str) -> dict:
     return rows
 
 
-def owner_tests(rows: dict, changed, own=()) -> list:
-    """Tests of `own`, proven owners of `changed` files, changed test files: the pick acceptance tier."""
+def owner_tests(rows: dict, changed) -> list:
+    """Proven `rows`' tests on `changed` files (a planned row's are red by design)."""
     changed = set(changed)
-    return sorted({t for i, r in rows.items() if i in own or (r["status"] == "proven" and changed & set(r["file_list"]))
-                   for t in r["tests"]} | {t for r in rows.values() for t in r["tests"] if t.split("::")[0] in changed})
+    return sorted(t for r in rows.values() if r["status"] == "proven" for t in r["tests"]
+                  if changed & set(r["file_list"]) or t.split("::")[0] in changed)
 
 
 def main_spec() -> dict:
@@ -1685,7 +1685,7 @@ def code_same(a: str, b: str) -> bool:
 
 
 def pick_accept_red(sha: str, base: str) -> str:
-    v = load(PICK_ACCEPT, {}).get(sha)
+    v = load(PICK_ACCEPT, {}).get(sha) if (ST / PICK_ACCEPT_ON).exists() else None
     if not v or v["ok"] or not code_same(v["base"], base):
         return ""
     return (f"pick check: gate red ({v['fails'][:5]}) in acceptance on main + this row (desk, main {v['base'][:12]}, "
@@ -1707,8 +1707,7 @@ def pick_accept_check(q: dict, base: str, run=None) -> dict | None:
     if merged is None or git("merge-base", "--is-ancestor", q["sha"], base, check=False).returncode == 0:
         return None
     files = git("diff", "--name-only", "--no-renames", base, merged).stdout.split()
-    tests = [t for t in owner_tests(parse_spec(git("show", f"{merged}:{SPEC}").stdout), files, (q["row"],))
-             if t not in known_red()]
+    tests = [t for t in owner_tests(parse_spec(git("show", f"{base}:{SPEC}").stdout), files) if t not in known_red()]
     v, t0 = {"row": q["row"], "base": base, "ok": True, "fails": [], "tests": tests, "log": "", "secs": 0,
              "send_secs": 0}, now()
     if tests:

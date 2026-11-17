@@ -148,3 +148,5 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
   any core edit) on the desk, merged onto the batch head while a batch gates, else main; never in acceptance, and the
   gate's Desk.setup kills a running pass. pick_screen rejects a red verdict (read before the cached-pass skip) while
   main's code equals its base. Measured: the tier held every row-attributable acceptance breaker, ~5 tests a row.
+- 2026-11-17: pick acceptance runs only tests of rows proven on main (main's spec): a planned row's tests, the row's
+  own included, are red by design and never run; verdicts count only while state/pick-accept-on exists.
