@@ -22,7 +22,7 @@ from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
-import quarantine, rules_gate, rules_langs
+import desk, quarantine, rules_gate, rules_langs
 
 REPO = Path(os.environ.get("HARNESS_REPO", "."))
 HOME = Path(os.environ.get("HARNESS_HOME", str(Path(__file__).parent)))
@@ -563,9 +563,14 @@ def tests_cmd(tests):
     return stems, names
 
 
-def run_tests(tests, timeout=1800):
+def run_tests(tests, timeout=1800, solo=None):
     """Run acceptance tests 'file::name' on the train tree. Returns the failed ones (empty = pass)."""
-    return run_tests_cargo(tests, timeout) if P["accept"] == "cargo" else run_tests_cmd(tests, timeout)
+    return run_tests_cargo(tests, timeout, solo) if P["accept"] == "cargo" else run_tests_cmd(tests, timeout)
+
+
+def acceptance_tests(tests):
+    with train_stage("acceptance"):
+        return desk.run(sys.modules[__name__], tests) if desk.on(ST) else run_tests(tests)
 
 
 BUILD_FAILED = "test build failed: "  # run_alone's tail when a test exe did not build (quarantine never caches it)
@@ -672,6 +677,7 @@ def run_one_alone(exes, t, env) -> str:
 
 
 ACCEPT_TIMES = "accept-times.json"  # {stem: seconds its binary last took in the parallel phase}: start order
+ALONE_TIMES = "alone-times.json"  # {test: last alone seconds}
 SOLO_DAYS = 2  # a test with a perf-budget miss this recent runs alone only (see solo_tests)
 
 
@@ -699,15 +705,15 @@ def longest_first(stems, known: dict) -> list:
     return sorted(stems, key=lambda s: (-known.get(s, float("inf")), s))
 
 
-def run_tests_cargo(tests, timeout=1800):
-    """Build the needed test binaries once (release, incremental), run them in parallel, longest first; tests that
-    recently missed a perf budget under load run alone (solo_tests). Returns list of failed 'file::name' (empty = pass).
+def run_tests_cargo(tests, timeout=1800, solo=None):
+    """Build the needed test binaries once (release, incremental), run them in parallel, longest first; `solo` tests
+    (default solo_tests) run alone. Returns list of failed 'file::name' (empty = pass).
     Logs accept_split (build / parallel / serial seconds, slowest binaries and alone runs) and keeps per-binary times."""
     if not tests:
         return []
     from concurrent.futures import ThreadPoolExecutor
     t0 = now()
-    solo = solo_tests(tests)
+    solo = solo_tests(tests) if solo is None else set(solo) & set(tests)
     by_stem = {}
     for t in tests:
         if t not in solo:
@@ -749,16 +755,18 @@ def run_tests_cargo(tests, timeout=1800):
     for t in retry:
         s0 = now()
         tail = run_one_alone(exes, t, env)
-        alone[t.split("/")[-1]] = round(now() - s0)
+        alone[t] = round(now() - s0)
         if tail:
             fails.append(t)
             logs.append(f"== {Path(t.split('::')[0]).stem}::{t.split('::')[1]} (serial): {tail}")
     if logs:
         (ST / "last-gate.txt").write_text(chr(10).join(logs)[-20000:], encoding="utf-8")
     save(ACCEPT_TIMES, {**load(ACCEPT_TIMES, {}), **took})
+    save(ALONE_TIMES, {**load(ALONE_TIMES, {}), **alone})
     event("accept_split", build=round(t_build - t0), parallel=round(t_par - t_build), serial=round(now() - t_par),
           tests=len(set(tests)), solo=len(solo), retried=len(retry) - len(solo),
-          slowest=sorted(took.items(), key=lambda kv: -kv[1])[:10], alone=sorted(alone.items(), key=lambda kv: -kv[1])[:10])
+          slowest=sorted(took.items(), key=lambda kv: -kv[1])[:10],
+          alone=sorted(((t.split("/")[-1], v) for t, v in alone.items()), key=lambda kv: -kv[1])[:10])
     want = set(tests)
     return [f for f in fails if f in want] or fails
 
@@ -1043,8 +1051,7 @@ def gate(new_rows, rows, quick=False):
         if q:
             return False, ["quality"], q
         t0 = now()
-        with train_stage("acceptance"):
-            fails = run_tests(gate_tests(new_rows, rows))
+        fails = acceptance_tests(gate_tests(new_rows, rows))
         event("gate_stage", stage="acceptance-quick", secs=round(now() - t0), fails=len(fails), failed=sorted(fails)[:20])
         log = (ST / "last-gate.txt").read_text(encoding="utf-8", errors="replace")[-20000:] if fails else ""
         return (not fails), fails, log
@@ -1082,8 +1089,7 @@ def gate(new_rows, rows, quick=False):
             return False, ["quality"], q
     tests = gate_tests(new_rows, rows)
     t0 = now()
-    with train_stage("acceptance"):
-        fails = run_tests(tests)
+    fails = acceptance_tests(tests)
     event("gate_stage", stage="acceptance", secs=round(now() - t0), n=len(tests), fails=len(fails), failed=sorted(fails)[:20])
     # 2026-11-13: an empty log here sent every unowned acceptance failure to bisect (~18 min a level, 6 h with 0 landed)
     log = (ST / "last-gate.txt").read_text(encoding="utf-8", errors="replace")[-20000:] if fails else ""

@@ -1,0 +1,362 @@
+"""Acceptance split with a second Windows machine, the desk (ssh HARNESS_REMOTE_HOST, cmd shell). This machine runs
+the parallel unit; the desk runs the run-alone (solo) units one at a time, longest first, and this machine takes any
+it has not started. A desk unit with no verdict runs here and drops the desk for the gate. Cargo runner only.
+On while <state>/desk-on exists; HARNESS_DESK=0/1 overrides.
+
+  py -3 desk.py accept --rid R   # desk side (run.cmd): run_tests on runs/R.json, write runs/R.result.json
+"""
+from __future__ import annotations
+
+import argparse, hashlib, json, os, re, subprocess, sys, time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+HOST = os.environ.get("HARNESS_REMOTE_HOST", "remote-host")
+ROOT = os.environ.get("HARNESS_REMOTE_ROOT", "D:\\fleet")  # remote dir holding repo.git and vh\
+# cmd.exe env prefix on the remote host, e.g. "set CARGO_HOME=D:\\dev\\cargo&& set CARGO_BUILD_JOBS=3"
+ENV = os.environ.get("HARNESS_REMOTE_ENV", "set CARGO_BUILD_JOBS=3")
+KIT = ROOT + "\\desk-kit"
+RREPO = ROOT + "\\repo.git"
+ON = "desk-on"
+UNITS = int(os.environ.get("HARNESS_DESK_UNITS", "8"))  # the parallel unit + up to 7 solo units
+MIN_TESTS = 60  # fewer (probe, bisect): setup costs more than it saves
+POOL = 10  # run_tests_cargo's parallel binaries
+LINK_SECS = 6.0
+SOLO_SECS = 120.0  # a solo test with no recorded alone run
+LATE = (3.0, 1500.0)  # no result after 3 x the unit's cost + 25 min (a cold build): no verdict
+POLL_SECS = 20
+KIT_SIG = "desk-kit.json"
+
+
+def on(st: Path) -> bool:
+    env = os.environ.get("HARNESS_DESK", "")
+    return env == "1" if env in ("0", "1") else (st / ON).exists()
+
+
+def ssh(h, cmd: str, timeout=180) -> subprocess.CompletedProcess:
+    try:
+        return h.sh(["ssh", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30", "-o", "BatchMode=yes", HOST, cmd],
+                    check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        return subprocess.CompletedProcess(cmd, 124, "", f"timeout {e}")
+
+
+def scp(h, src, dst: str, timeout=600) -> bool:
+    try:
+        return h.sh(["scp", "-q", "-o", "ConnectTimeout=20", "-o", "BatchMode=yes", str(src), f"{HOST}:{dst}"],
+                    check=False, timeout=timeout).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def send(h, sha: str) -> str:
+    """main and sha into the desk's bare repo as a git bundle (refs/desk/base: the main it has). "" or why not."""
+    work = h.ST / "desk"
+    work.mkdir(exist_ok=True)
+    h.git("update-ref", "refs/desk/gate", sha)
+    base = h.git("rev-parse", "-q", "--verify", "refs/desk/base", check=False).stdout.strip()
+    main = h.git("rev-parse", "main").stdout.strip()
+    neg = [f"^{base}"] if base else []
+    refs = [ref for ref, tip in (("refs/heads/main", main), ("refs/desk/gate", sha))
+            if h.git("rev-list", "--count", tip, *neg, check=False).stdout.strip() != "0"]
+    cmds, err = [], ""
+    if refs:
+        bundle = work / "send.bundle"
+        bundle.unlink(missing_ok=True)
+        r = h.git("bundle", "create", str(bundle), *refs, *neg, check=False)
+        if r.returncode != 0 or not scp(h, bundle, f"{ROOT}\\desk.bundle"):
+            return "bundle to desk failed: " + r.stderr[-200:]
+        cmds.append(f"git -C {RREPO} fetch -q {ROOT}\\desk.bundle +refs/*:refs/desk-in/*")
+    cmds += [f"git -C {RREPO} update-ref refs/heads/main {main}", f"git -C {RREPO} update-ref refs/desk/gate {sha}",
+             f"git -C {RREPO} rev-parse refs/desk/gate"]
+    r = ssh(h, " && ".join(cmds), timeout=600)
+    if r.stdout.strip() != sha:
+        h.git("update-ref", "-d", "refs/desk/base", check=False)  # the next gate sends everything
+        err = "desk repo update failed: " + (r.stdout + r.stderr)[-200:]
+    else:
+        h.git("update-ref", "refs/desk/base", "main")
+    return err
+
+
+def kit_files(h) -> list:
+    """Every module beside the harness and the stack profile: the desk runs this same code."""
+    toml = h.HOME / "harness.toml"
+    return sorted(Path(h.__file__).resolve().parent.glob("*.py")) + ([toml] if toml.exists() else [])
+
+
+def runner_scripts(h) -> dict:
+    keep = {k: v for k, v in os.environ.items() if k.startswith("HARNESS_") and k not in ("HARNESS_HOME", "HARNESS_REPO",
+                                                                                           "HARNESS_WT", "HARNESS_DESK")}
+    env = "".join(f"set {k}={v}\r\n" for k, v in sorted({**keep, "HARNESS_HOME": KIT, "HARNESS_REPO": RREPO,
+                                                           "HARNESS_WT": ROOT + "\\vh"}.items()))
+    return {
+        "run.cmd": f"@echo off\r\n{ENV}\r\n{env}cd /d {KIT}\r\npy -3 -u desk.py accept --rid %1 > runs\\%1.out 2>&1\r\n",
+        "start.ps1": "param($rid)\r\n" f"$k = '{KIT}'\r\n"
+                     "Remove-Item \"$k\\runs\\$rid.result.json\" -ErrorAction SilentlyContinue\r\n"
+                     "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments "
+                     "@{CommandLine=\"cmd /c `\"$k\\run.cmd`\" $rid\"; CurrentDirectory=$k}\r\n"
+                     "Set-Content \"$k\\runs\\$rid.pid\" $r.ProcessId\r\n\"pid $($r.ProcessId) rc $($r.ReturnValue)\"\r\n",
+        "stop.cmd": f"@echo off\r\nif exist {KIT}\\runs\\%1.pid for /f %%p in ({KIT}\\runs\\%1.pid) do taskkill /T /F /PID %%p\r\n",
+    }
+
+
+def kit(h) -> str:
+    """The kit into <ROOT>\\desk-kit when it changed. "" or why not."""
+    local = h.ST / "desk" / "kit"
+    local.mkdir(parents=True, exist_ok=True)
+    for name, text in runner_scripts(h).items():
+        (local / name).write_text(text, encoding="utf-8", newline="")
+    files = kit_files(h) + sorted(local.iterdir())
+    sig = hashlib.sha1(b"".join(p.name.encode() + p.read_bytes() for p in files)).hexdigest()
+    if h.load(KIT_SIG, {}).get("sig") == sig:
+        return ""
+    ssh(h, f"mkdir {KIT}\\runs {KIT}\\state 2>nul & echo ok")
+    bad = [p.name for p in files if not scp(h, p, f"{KIT}\\{p.name}")]
+    if bad:
+        return "kit scp failed: " + " ".join(bad)
+    h.save(KIT_SIG, {"sig": sig})
+    return ""
+
+
+def start(h, rid: str, spec: dict) -> str:
+    p = h.ST / "desk" / f"{rid}.json"
+    p.write_text(json.dumps(spec), encoding="utf-8")
+    if not scp(h, p, f"{KIT}\\runs\\{rid}.json"):
+        return "scp failed"
+    r = ssh(h, f"powershell -NoProfile -ExecutionPolicy Bypass -File {KIT}\\start.ps1 {rid}")
+    return "" if "rc 0" in r.stdout else (r.stdout + r.stderr)[-300:] or f"exit {r.returncode}"
+
+
+def poll(h, rid: str):
+    r = ssh(h, f"type {KIT}\\runs\\{rid}.result.json")
+    if r.returncode == 0 and r.stdout.strip().startswith("{"):
+        try:
+            return json.loads(r.stdout)
+        except ValueError:
+            pass
+    return None
+
+
+def absorb(h, res: dict, head: str) -> str:
+    """Merge a desk result's perf debt and events here. "" or why it is no verdict."""
+    with open(h.ST / "perf-debt.jsonl", "a", encoding="utf-8") as fh:
+        for line in res.get("perf_debt", []):
+            fh.write(line.rstrip() + "\n")
+    for e in res.get("events", []):
+        try:
+            d = json.loads(e)
+        except ValueError:
+            continue
+        h.event("desk_" + d.pop("event", "?"), **{k: v for k, v in d.items() if k not in ("t", "ts")})
+    why = res.get("error") or ("" if res.get("head") == head else f"desk head {res.get('head')} != {head}")
+    pat = h.P.get("env_fail_re")
+    if not why and pat and re.search(pat, res.get("log") or ""):
+        why = "desk toolchain env fault"
+    return why
+
+
+def accept(h, rid: str) -> dict:
+    """Desk side: check out the spec's sha in TRAIN, run_tests its unit, write runs/<rid>.result.json."""
+    runs = h.HOME / "runs"
+    spec = json.loads((runs / f"{rid}.json").read_text(encoding="utf-8"))
+
+    def lines(f):
+        return (h.ST / f).read_text(encoding="utf-8").splitlines() if (h.ST / f).exists() else []
+    ev0, pd0, t0, res = len(lines("events.jsonl")), len(lines("perf-debt.jsonl")), time.time(), {"rid": rid}
+    lg = h.ST / "last-gate.txt"
+    try:
+        if not (h.TRAIN / ".git").exists():
+            h.git("worktree", "add", "-f", "--detach", str(h.TRAIN), spec["sha"])
+        h.git("checkout", "-q", "--detach", "-f", spec["sha"], cwd=h.TRAIN)
+        h.git("clean", "-qfd", cwd=h.TRAIN, check=False)
+        lg.unlink(missing_ok=True)
+        fails = h.run_tests(spec["tests"], solo=spec["solo"])
+        stems = {Path(t.split("::")[0]).stem for t in spec["tests"]}
+        res.update(fails=fails, tests=spec["tests"],
+                   log=lg.read_text(encoding="utf-8", errors="replace")[-20000:] if fails and lg.exists() else "",
+                   times={s: v for s, v in h.load(h.ACCEPT_TIMES, {}).items() if s in stems},
+                   alone={t: v for t, v in h.load(h.ALONE_TIMES, {}).items() if t in set(spec["solo"]) | set(fails)})
+    except Exception as e:  # noqa: BLE001
+        res["error"] = str(e)[-2000:]
+    res["head"] = h.git("rev-parse", "HEAD", cwd=h.TRAIN, check=False).stdout.strip()
+    res["secs"] = round(time.time() - t0)
+    res["events"], res["perf_debt"] = lines("events.jsonl")[ev0:], lines("perf-debt.jsonl")[pd0:]
+    tmp = runs / f"{rid}.result.tmp"
+    tmp.write_text(json.dumps(res), encoding="utf-8")
+    os.replace(tmp, runs / f"{rid}.result.json")
+    return res
+
+
+def balance(groups: dict, cost: dict, n: int) -> list:
+    """Longest-first greedy split of {key: [tests]} into at most n bins: [(cost, sorted tests)]. Deterministic."""
+    bins = [[0.0, []] for _ in range(max(1, min(n, len(groups))))]
+    for g in sorted(groups, key=lambda g: (-cost[g], g)):
+        b = min(bins, key=lambda b: b[0])
+        b[0] += cost[g]
+        b[1] += groups[g]
+    return [(c, sorted(ts)) for c, ts in bins if ts]
+
+
+def units(tests, solo: set, times: dict, alone: dict, n: int) -> list:
+    """[{"cost", "tests", "solo"}], each test in one: the parallel unit first, then up to n - 1 solo units by alone
+    seconds, longest first (pick()'s priority order)."""
+    par = sorted(t for t in set(tests) if t not in solo)
+    sol = {t: [t] for t in sorted(set(tests) & set(solo))}
+    pc = sum((times.get(s, 5.0) + LINK_SECS) / POOL for s in {Path(t.split("::")[0]).stem for t in par})
+    out = [{"cost": pc, "tests": par, "solo": []}] if par else []
+    if not sol:
+        return out
+    sc = {t: float(alone.get(t, SOLO_SECS)) for t in sol}
+    return out + sorted(({"cost": c, "tests": ts, "solo": ts} for c, ts in balance(sol, sc, max(1, n - 1))),
+                        key=lambda u: (-u["cost"], u["tests"]))
+
+
+def pick(us: list, todo: list, machine: str, desk_up: bool = True) -> list:
+    """Unit indices `machine` ("here" | "desk") runs next as one run_tests call. The desk takes one solo unit; here
+    takes the lowest index; with the desk out, here takes every unit left."""
+    left = sorted(todo) if machine == "here" else [k for k in sorted(todo) if us[k]["solo"]]
+    return left if machine == "here" and not desk_up else left[:1]
+
+
+class Desk:
+    """The desk for one gate, one unit at a time. why != "": not usable."""
+
+    def __init__(self, h, gid: str, sha: str):
+        self.h, self.gid, self.sha, self.k, self.t0 = h, gid, sha, None, 0.0
+        self.why = self.setup()
+
+    def setup(self) -> str:
+        if ssh(self.h, "echo ok", timeout=60).stdout.strip() != "ok":
+            return f"{HOST} unreachable"
+        return send(self.h, self.sha) or kit(self.h)
+
+    def rid(self, k: int) -> str:
+        return f"{self.gid}-{k}"
+
+    def start(self, k: int, unit: dict) -> bool:
+        why = start(self.h, self.rid(k), {"rid": self.rid(k), "sha": self.sha, "tests": unit["tests"],
+                                          "solo": unit["solo"]})
+        self.why = f"unit {k} did not start: {why}" if why else ""
+        if not why:
+            self.k, self.t0 = k, time.time()
+        return not why
+
+    def poll(self, unit: dict):
+        """None while the unit runs, else (k, result); result None = no verdict (self.why says why)."""
+        k, res = self.k, poll(self.h, self.rid(self.k))
+        if res is None:
+            if time.time() - self.t0 < LATE[0] * unit["cost"] + LATE[1]:
+                return None
+            ssh(self.h, f"{KIT}\\stop.cmd {self.rid(k)}", timeout=120)
+            self.why = f"unit {k} late ({round(time.time() - self.t0)}s)"
+        else:
+            why = absorb(self.h, res, self.sha)
+            if not why and sorted(res.get("tests") or []) != unit["tests"]:
+                why = "desk ran other tests than its unit"
+            self.why = f"unit {k}: {why[-300:]}" if why else ""
+        self.k = None
+        return k, (None if self.why else res)
+
+
+def run(h, tests, timeout=1800):
+    """Same contract as h.run_tests(tests)."""
+    if h.P["accept"] != "cargo" or len(set(tests)) < MIN_TESTS:
+        return h.run_tests(tests, timeout=timeout)
+    return run_desk(h, tests, timeout)
+
+
+def run_desk(h, tests, timeout=1800, desk_cls=Desk):
+    t0 = time.time()
+    us = units(tests, h.solo_tests(tests), h.load(h.ACCEPT_TIMES, {}), h.load(h.ALONE_TIMES, {}), UNITS)
+    sha = h.git("rev-parse", "HEAD", cwd=h.TRAIN).stdout.strip()
+    gid = f"{sha[:12]}-{int(t0) % 1000000}"
+    fails, logs, where, todo = {}, {}, {}, list(range(len(us)))
+    busy, dtimes, dalone = {"here": 0.0, "desk": 0.0}, {}, {}
+    lg = h.ST / "last-gate.txt"
+
+    def local(ks):
+        s0 = time.time()
+        lg.unlink(missing_ok=True)
+        f = h.run_tests(sorted(t for k in ks for t in us[k]["tests"]), timeout=timeout,
+                        solo=sorted(t for k in ks for t in us[k]["solo"]))
+        return ks, f, (lg.read_text(encoding="utf-8", errors="replace") if f and lg.exists() else ""), time.time() - s0
+
+    def take(k, f, log, machine, secs):  # a unit's first verdict wins
+        if k not in fails:
+            fails[k], where[k] = f, machine
+            busy[machine] += secs
+            if log:
+                logs[k] = log
+
+    def give(machine, desk_up):
+        ks = pick(us, todo, machine, desk_up)
+        todo[:] = [k for k in todo if k not in ks]
+        return ks
+
+    with ThreadPoolExecutor(1) as pool:
+        fut = pool.submit(local, give("here", True)) if us else None  # desk setup runs beside it
+        desk, skipped = None, "no solo units"
+        if any(u["solo"] for u in us):
+            desk = desk_cls(h, gid, sha)
+            skipped = desk.why
+        if skipped:
+            h.event("desk_skip", gate=gid, reason=skipped[-300:])
+            desk = None
+        while len(fails) < len(us):
+            if fut is not None and fut.done():
+                ks, f, log, secs = fut.result()
+                mine = [{t for t in f if t in set(us[k]["tests"])} for k in ks]
+                mine[0] |= set(f) - set().union(*mine)  # a name of no unit ("build") counts too
+                for i, k in enumerate(ks):
+                    take(k, sorted(mine[i]), log if i == 0 else "", "here", secs if i == 0 else 0.0)
+                fut = None
+            if desk is not None and desk.k is not None:
+                got = desk.poll(us[desk.k])
+                if got is not None and got[1] is None:
+                    h.event("desk_error", gate=gid, reason=desk.why)
+                    desk = None
+                    todo.append(got[0])
+                elif got is not None:
+                    take(got[0], got[1]["fails"], got[1].get("log", ""), "desk", got[1].get("secs", 0))
+                    dtimes.update(got[1].get("times", {}))
+                    dalone.update(got[1].get("alone", {}))
+            todo[:] = [k for k in todo if k not in fails]
+            if fut is None:
+                ks = give("here", desk is not None)
+                fut = pool.submit(local, ks) if ks else None
+            if desk is not None and desk.k is None:
+                ks = give("desk", True)
+                if ks and not desk.start(ks[0], us[ks[0]]):
+                    h.event("desk_error", gate=gid, reason=desk.why)
+                    desk = None
+                    todo.append(ks[0])
+            if len(fails) < len(us) and (fut is None or not fut.done()):
+                time.sleep(POLL_SECS)
+    # desk seconds fill only what this machine never measured
+    h.save(h.ACCEPT_TIMES, {**dtimes, **h.load(h.ACCEPT_TIMES, {})})
+    h.save(h.ALONE_TIMES, {**dalone, **h.load(h.ALONE_TIMES, {})})
+    out = sorted({t for f in fails.values() for t in f})
+    if out:
+        lg.write_text("\n".join(logs[k] for k in sorted(logs))[-20000:], encoding="utf-8")
+    h.event("gate_stage", stage="acceptance-desk", gate=gid, units=len(us),
+            desk=sum(1 for v in where.values() if v == "desk"), desk_skip=skipped[-200:],
+            solo_units=sum(1 for u in us if u["solo"]),
+            solo_here=sum(1 for k, v in where.items() if v == "here" and us[k]["solo"]),
+            here_secs=round(busy["here"]), desk_secs=round(busy["desk"]), secs=round(time.time() - t0),
+            n=len(set(tests)), fails=len(out))
+    want = set(tests)
+    return [f for f in out if f in want] or out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    sp = ap.add_subparsers(dest="cmd", required=True)
+    sp.add_parser("accept").add_argument("--rid", required=True)
+    a = ap.parse_args()
+    import harness
+    res = accept(harness, a.rid)
+    print(json.dumps({k: res.get(k) for k in ("fails", "error", "secs")})[:2000], flush=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

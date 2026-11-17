@@ -6,12 +6,9 @@ from pathlib import Path
 
 H = Path(__file__).parent
 import os
+from desk import ENV, HOST, ROOT  # the second machine's config has one owner
 REPO = os.environ.get("HARNESS_REPO", ".")
-HOST = os.environ.get("HARNESS_REMOTE_HOST", "remote-host")
-ROOT = os.environ.get("HARNESS_REMOTE_ROOT", "D:\\fleet")  # remote dir holding repo.git and vh\
 LOCAL_WT = os.environ.get("HARNESS_WT", str(Path(REPO).parent / "vh"))
-# cmd.exe env prefix on the remote host, e.g. "set CARGO_HOME=D:\\dev\\cargo&& set CARGO_BUILD_JOBS=3"
-ENV = os.environ.get("HARNESS_REMOTE_ENV", "set CARGO_BUILD_JOBS=3")
 
 
 def run(cmd, **kw):
