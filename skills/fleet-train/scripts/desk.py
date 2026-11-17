@@ -221,6 +221,59 @@ def pick(us: list, todo: list, machine: str, desk_up: bool = True) -> list:
     return left if machine == "here" and not desk_up else left[:1]
 
 
+PICK = "desk-pick.json"  # {"pid", "rid"} of harness.pick_accept_queue's desk run
+
+
+def pick_stop(h) -> None:
+    """The gate takes the desk: kill the pick acceptance pass, then its desk run."""
+    cur = h.load(PICK, None)
+    if not cur:
+        return
+    (h.ST / PICK).unlink(missing_ok=True)
+    if os.name == "nt":
+        h.sh(["taskkill", "/T", "/F", "/PID", str(cur["pid"])], check=False)
+    else:
+        try:
+            os.kill(cur["pid"], 15)
+        except OSError:
+            pass
+    ssh(h, f"{KIT}\\stop.cmd {cur['rid']}", timeout=120)
+    h.event("pick_accept_preempted", rid=cur["rid"])
+
+
+def pick_run(h, commit: str, tests: list, run_secs: float = 1200, poll_secs: float = 15) -> dict:
+    """run_tests(tests) at `commit` on the desk, plus send_secs; h.NoVerdict when not run to the end."""
+    rid = f"pick-{commit[:12]}-{int(time.time()) % 1000000}"
+    h.save(PICK, {"pid": os.getpid(), "rid": rid})
+
+    def mine() -> bool:  # pick_stop removes the record
+        return (h.load(PICK, None) or {}).get("rid") == rid
+    try:
+        if h.in_acceptance():
+            raise h.NoVerdict("the train's acceptance holds the desk")
+        t0 = time.time()
+        if ssh(h, "echo ok", timeout=60).stdout.strip() != "ok":
+            raise h.NoVerdict(f"{HOST} unreachable")
+        why = send(h, commit) or kit(h)
+        why = why or (start(h, rid, {"rid": rid, "sha": commit, "tests": tests, "solo": sorted(h.solo_tests(tests))})
+                      if mine() else "preempted")
+        if why:
+            raise h.NoVerdict(f"desk run did not start: {why[-200:]}")
+        sent = time.time()
+        while (res := poll(h, rid)) is None:
+            if not mine() or h.in_acceptance() or time.time() - sent > run_secs:
+                ssh(h, f"{KIT}\\stop.cmd {rid}", timeout=120)
+                raise h.NoVerdict("preempted or late")
+            time.sleep(poll_secs)
+        why = absorb(h, res, commit)
+        if why:
+            raise h.NoVerdict(why)
+        return {**res, "send_secs": round(sent - t0)}
+    finally:
+        if mine():
+            (h.ST / PICK).unlink(missing_ok=True)
+
+
 class Desk:
     """The desk for one gate, one unit at a time. why != "": not usable."""
 
@@ -229,6 +282,7 @@ class Desk:
         self.why = self.setup()
 
     def setup(self) -> str:
+        pick_stop(self.h)
         if ssh(self.h, "echo ok", timeout=60).stdout.strip() != "ok":
             return f"{HOST} unreachable"
         return send(self.h, self.sha) or kit(self.h)

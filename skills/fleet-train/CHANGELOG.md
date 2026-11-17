@@ -143,3 +143,8 @@ Replaces drive.py/supervise.py for the build phase. Measured on the rebuild on 2
 - 2026-11-16: pick holds a stacked row (its branch carries another unproven row's commits, read from commit subjects)
   until that row is picked earlier in the batch or proven; landing it alone failed the plan check and cost a full gate.
   `STACK-ORPHAN` alarms when the carried row is neither queued nor claimed.
+- 2026-11-17: pick acceptance: `harness.py pick-accept` runs each queued row's owner tests (the tests of proven rows
+  whose file list holds a changed file, its own and changed test files; a full impact selection was a whole run for
+  any core edit) on the desk, merged onto the batch head while a batch gates, else main; never in acceptance, and the
+  gate's Desk.setup kills a running pass. pick_screen rejects a red verdict (read before the cached-pass skip) while
+  main's code equals its base. Measured: the tier held every row-attributable acceptance breaker, ~5 tests a row.

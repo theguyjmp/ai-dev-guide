@@ -134,6 +134,13 @@ def parse_spec(text: str) -> dict:
     return rows
 
 
+def owner_tests(rows: dict, changed, own=()) -> list:
+    """Tests of `own`, proven owners of `changed` files, changed test files: the pick acceptance tier."""
+    changed = set(changed)
+    return sorted({t for i, r in rows.items() if i in own or (r["status"] == "proven" and changed & set(r["file_list"]))
+                   for t in r["tests"]} | {t for r in rows.values() for t in r["tests"] if t.split("::")[0] in changed})
+
+
 def main_spec() -> dict:
     return parse_spec(git("show", f"{SPEC_REF}:{SPEC}").stdout)
 
@@ -1586,11 +1593,15 @@ def pid_alive(pid: int) -> bool:
     return f'"{pid}"' in out
 
 
+def in_acceptance() -> bool:
+    mark = load(TRAIN_STAGE, {})
+    return mark.get("stage") == "acceptance" and bool(mark.get("pid")) and pid_alive(mark["pid"])
+
+
 def pick_compile(commit: str) -> tuple:
     """(ok, error lines) of P["pick_build"] at `commit` in PICK_WT; NoVerdict in the train's acceptance stage or on a
     timeout (the row goes on to the gate)."""
-    mark = load(TRAIN_STAGE, {})
-    if mark.get("stage") == "acceptance" and mark.get("pid") and pid_alive(mark["pid"]):
+    if in_acceptance():
         raise NoVerdict("the train is in its acceptance stage")
     pick_checkout(commit)
     try:
@@ -1651,14 +1662,97 @@ def pick_verdict(q: dict, base: str, cache: dict) -> str:
     return ""
 
 
+# Pick acceptance: `harness.py pick-accept` (schedule it every few minutes; on while <state>/pick-accept-on exists) runs
+# each queued row's owner_tests on the desk, merged onto the code the next pick sees (the batch head while a batch
+# gates, else main). Never in acceptance; the gate's Desk.setup kills it (desk.pick_stop). pick_screen rejects a red
+# verdict while main's code equals its base (only the spec differs); no verdict leaves the row to the gate.
+PICK_ACCEPT_ON = "pick-accept-on"
+PICK_ACCEPT = "pick-accept.json"  # {sha: {row, base, ok, fails, tests, log, secs, send_secs}}
+PICK_ACCEPT_PID = "pick-accept.pid"
+
+
+def code_same(a: str, b: str) -> bool:
+    r = git("diff", "--name-only", a, b, check=False)
+    return r.returncode == 0 and all(f == SPEC for f in r.stdout.split())
+
+
+def pick_accept_red(sha: str, base: str) -> str:
+    v = load(PICK_ACCEPT, {}).get(sha)
+    if not v or v["ok"] or not code_same(v["base"], base):
+        return ""
+    return (f"pick check: gate red ({v['fails'][:5]}) in acceptance on main + this row (desk, main {v['base'][:12]}, "
+            f"{len(v['tests'])} tests of rows sharing your files): " + v["log"][-1200:])
+
+
+def pick_accept_base() -> str:
+    for e in reversed(read_events()[-3000:]):
+        if e.get("event") == "train_end":
+            break
+        if e.get("event") == "train_start" and (TRAIN / ".git").exists():
+            return git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip()
+    return git("rev-parse", "main").stdout.strip()
+
+
+def pick_accept_check(q: dict, base: str, run=None) -> dict | None:
+    """Row q's verdict on `base`; None on a conflict, a row already in base, or no verdict."""
+    merged = merged_commit(base, q["sha"])
+    if merged is None or git("merge-base", "--is-ancestor", q["sha"], base, check=False).returncode == 0:
+        return None
+    files = git("diff", "--name-only", "--no-renames", base, merged).stdout.split()
+    tests = [t for t in owner_tests(parse_spec(git("show", f"{merged}:{SPEC}").stdout), files, (q["row"],))
+             if t not in known_red()]
+    v, t0 = {"row": q["row"], "base": base, "ok": True, "fails": [], "tests": tests, "log": "", "secs": 0,
+             "send_secs": 0}, now()
+    if tests:
+        try:
+            res = (run or (lambda c, ts: desk.pick_run(sys.modules[__name__], c, ts)))(merged, tests)
+        except NoVerdict as e:
+            event("pick_accept", row=q["row"], ok=None, why=str(e)[-200:], tests=len(tests))
+            return None
+        fails = sorted(set(res.get("fails") or []) - set(known_red()))
+        v.update(ok=not fails, fails=fails, log=res.get("log", "") if fails else "", send_secs=res["send_secs"],
+                 secs=round(now() - t0))
+    event("pick_accept", row=q["row"], ok=v["ok"], tests=len(tests), fails=v["fails"][:5], secs=v["secs"],
+          send_secs=v["send_secs"])
+    return v
+
+
+def pick_accept_queue(max_rows: int = 6, check=pick_accept_check) -> int:
+    """Queued rows with no verdict on pick_accept_base(), oldest first, one desk run at a time; rows checked."""
+    lock_f = ST / PICK_ACCEPT_PID
+    held = lock_f.read_text().strip() if lock_f.exists() else ""
+    if not (ST / PICK_ACCEPT_ON).exists() or (held.isdigit() and pid_alive(int(held))):
+        return 0
+    lock_f.write_text(str(os.getpid()))
+    try:
+        n = 0
+        for q in sorted(load("queue.json", []), key=lambda x: x["ts"]):
+            if n >= max_rows or in_acceptance():
+                break
+            base, have = pick_accept_base(), load(PICK_ACCEPT, {}).get(q["sha"])
+            if q.get("proof") or (have and code_same(have["base"], base)):
+                continue
+            got = check(q, base)
+            live = {x["sha"] for x in load("queue.json", [])}
+            v = {k: x for k, x in load(PICK_ACCEPT, {}).items() if k in live}
+            if got is not None:
+                v[q["sha"]], n = got, n + 1
+            save(PICK_ACCEPT, v)
+        return n
+    finally:
+        lock_f.unlink(missing_ok=True)
+
+
 def pick_screen(picks: list, budget: float = float("inf")) -> set:
     """Reject and dequeue the `picks` failing the pick check; their shas. A row with no verdict goes on to the gate."""
     cache, t0, bad = load(PICK_CACHE, {}), now(), []
     base = git("rev-parse", "main").stdout.strip()
+    bad = [(q, why) for q in picks if (why := pick_accept_red(q["sha"], base))]  # before the cached-pass skip
+    picks = [q for q in picks if q not in [b[0] for b in bad]]
     todo = [q for q in picks if not (cache.get(q["sha"], {}).get("checks") == PICK_CHECKS
                                      and cache[q["sha"]].get("built") == base and cache[q["sha"]].get("reviewed"))]
-    if not todo or not main_static_clean(base, cache):
-        return set()
+    if todo and not main_static_clean(base, cache):
+        todo = []
     for q in todo:
         if now() - t0 > budget:
             break
@@ -1820,9 +1914,10 @@ def main():
     p = sp.add_parser("self-review"); p.add_argument("--slot", type=int, required=True)
     p = sp.add_parser("clean-submit"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
     sp.add_parser("note", help="append one line to the dated log").add_argument("text")
+    sp.add_parser("pick-accept", help="desk acceptance of queued rows (on: state/pick-accept-on)")
     a = ap.parse_args()
     {"frontier": cmd_frontier, "claim": cmd_claim, "submit": cmd_submit, "release": cmd_release,
-     "train": cmd_train, "status": cmd_status, "note": cmd_note,
+     "train": cmd_train, "status": cmd_status, "note": cmd_note, "pick-accept": lambda a: print(pick_accept_queue()),
      "clean-start": cmd_clean_start, "self-review": cmd_self_review, "quality-check": cmd_quality_check, "clean-submit": cmd_clean_submit}[a.cmd](a)
 
 

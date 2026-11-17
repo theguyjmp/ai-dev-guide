@@ -221,6 +221,48 @@ def test_pick_build():
     check("build: a main failing the same compile rejects no row", h.pick_screen([shas["X"]]) == set())
 
 
+def test_pick_accept():
+    """A row breaking a proven row's test (owner of a file it changes) is red on the desk and rejected at pick while
+    main's code is unchanged (a spec-only commit keeps it); a code change on main drops the verdict."""
+    git("checkout", "-q", "-f", "main")
+    row = "| {} | 1 | m | | e | tests/{}.rs::t | {} | {} |\n"
+    (h.REPO / "spec").mkdir(exist_ok=True)
+    (h.REPO / "spec/FUNCTIONS.md").write_text(row.format("P1", "p1", "proven", "src/a.rs")
+                                              + row.format("P2", "p2", "proven", "src/b.rs"), encoding="utf-8")
+    (h.REPO / "src").mkdir(exist_ok=True)
+    for f in ("a", "b"):
+        (h.REPO / f"src/{f}.rs").write_text(f"// {f}\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "accept main")
+    git("checkout", "-q", "-B", "X", "main")
+    (h.REPO / "src/a.rs").write_text("// a changed\n", encoding="utf-8")
+    git("commit", "-q", "-am", "X")
+    x = {"row": "X", "sha": git("rev-parse", "HEAD"), "ts": 0}
+    git("checkout", "-q", "main")
+    main = git("rev-parse", "main")
+    ran = []
+
+    def run(commit, tests):
+        ran.append(tests)
+        return {"fails": [t for t in tests if "p1" in t], "log": "p1 failed", "send_secs": 1}
+    v = h.pick_accept_check(x, main, run=run)
+    check("accept: the owner tier is the changed file's owner only", ran == [["tests/p1.rs::t"]], ran)
+    check("accept: red on the desk", v and not v["ok"] and v["fails"] == ["tests/p1.rs::t"], v)
+    h.save(h.PICK_ACCEPT, {x["sha"]: v})
+    h.save(h.PICK_CACHE, {})
+    h.save("queue.json", [x])
+    h.static_problems = lambda cwd, base="main", plan=True: ""
+    h.batch_review = lambda merged, cwd=None, base="main": []
+    check("accept: rejected at pick", h.pick_screen([x]) == {x["sha"]}
+          and "p1.rs" in h.load("rejects.json", {})["X"][-1]["reason"], h.load("rejects.json", {}).get("X"))
+    (h.REPO / "spec/FUNCTIONS.md").write_text("spec only\n", encoding="utf-8")
+    git("commit", "-q", "-am", "spec only")
+    check("accept: a spec-only main keeps the verdict", h.pick_accept_red(x["sha"], git("rev-parse", "main")) != "")
+    (h.REPO / "src/b.rs").write_text("// b changed\n", encoding="utf-8")
+    git("commit", "-q", "-am", "code")
+    check("accept: other code on main drops it", h.pick_accept_red(x["sha"], git("rev-parse", "main")) == "")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

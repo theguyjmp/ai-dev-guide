@@ -83,7 +83,9 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
   caps, new plan_validate problems (the gate: every batch; the pick check: check_stubs on the rows a row's diff
   reaches, so a row spending another planned row's stub is rejected before a batch). The pick check also runs the profile's `pick_build`
   (rust: the unit stage's `cargo check --profile test`, own warm target) on main + the row, once per main: a row whose base
-  went stale under a landed row is rejected before it turns a gate red. Ratchet: no file may pass its count in state/rules-debt.json, which
+  went stale under a landed row is rejected before it turns a gate red. Pick acceptance (`harness.py pick-accept`,
+  scheduled; on with state/pick-accept-on): the desk runs each queued row's owner tests (proven rows owning a changed
+  file) on the code the next pick sees, outside acceptance (the gate kills it); a red verdict is rejected at pick. Ratchet: no file may pass its count in state/rules-debt.json, which
   only shrinks (`tighten` after each land). New project: `py -3 rules_gate.py init` on main once. Languages: rules_langs.py.
 - `scripts/brevity_check.py` (fleet_beat BREVITY alarm): word caps on STATE.md, briefs, hand-backs, rulings, notes/,
   code comments; override in `<HARNESS_HOME>/brevity_budget.json`, never raise.
