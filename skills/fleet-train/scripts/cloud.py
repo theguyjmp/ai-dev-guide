@@ -198,6 +198,32 @@ def export_conflicts(hd, st):
     return sent
 
 
+REBASE_CLAIM_TTL = 60 * 60  # a rebaser claim with no rebased-<row> answer for this long is abandoned
+
+
+def expire_rebase_claims(hd, st, gone) -> list:
+    """Delete a cloud/rebase-claim-<row> that has had no cloud/rebased-<row> answer for REBASE_CLAIM_TTL and forget the
+    sent sha, so export_conflicts publishes the row for rebase again. rows[row].rebase_expired counts the expiries."""
+    queued, t, out = {q["row"] for q in h.load("queue.json", [])}, h.now(), []
+    claims = {n.removeprefix("rebase-claim-") for n in hd if n.startswith("rebase-claim-")}
+    for row, r in st["rows"].items():
+        if row not in claims:
+            r.pop("rebase_claim_seen", None)
+    for row in sorted(claims):
+        if f"rebased-{row}" in hd or row not in queued:
+            continue
+        r = st["rows"].setdefault(row, {})
+        if t - r.setdefault("rebase_claim_seen", t) < REBASE_CLAIM_TTL:
+            continue
+        gone.append(f"rebase-claim-{row}")
+        r.pop("rebase_claim_seen", None)
+        r.pop("rebase_sent", None)
+        r["rebase_expired"] = r.get("rebase_expired", 0) + 1
+        h.event("cloud_rebase_claim_expired", row=row, n=r["rebase_expired"])
+        out.append(row)
+    return out
+
+
 def take_rebased(row, sha, st):
     """Swap a queued row's sha for its cloud rebase, if the row still waits (not in the batch) on the sha we sent.
     The swap happens under the state lock and leaves claims untouched."""
@@ -288,6 +314,7 @@ def collect():
                 p.unlink()
         queued = {q["row"] for q in h.load("queue.json", [])}
         gone += [n for n in hd if n.startswith(("rebase-", "rebase-claim-")) and n.split("-")[-1] not in queued]
+        expire_rebase_claims(hd, st, gone)
         exported = export_conflicts(hd, st)
         if exported:
             h.event("cloud_rebase_export", n=exported)
