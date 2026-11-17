@@ -160,8 +160,11 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
    `"<python>" -u "<full path>\harness.py" train --loop >> state/train.log 2>&1`, through Win32_Process Create.
 4. Workflow tool: run workflows/builders.js with args {"slots": 16, "max": 40, "idle": 8, "home": "<HARNESS_HOME>"}.
 5. Optional: `py -3 -u remote.py --slot 100` (one per desktop slot), or the cloud fleet instead of steps 4-5. Desk
-   acceptance: a Windows second machine with ssh (cmd shell), Python, git, the toolchain and `<HARNESS_REMOTE_ROOT>epo.git`
-   (bare); set HARNESS_REMOTE_HOST, HARNESS_REMOTE_ROOT, HARNESS_REMOTE_ENV (its toolchain env), then create state/desk-on.
+   acceptance: a Windows second machine with ssh (cmd shell), Python, git, the toolchain and `<HARNESS_REMOTE_ROOT>
+epo.git`
+   (bare); set HARNESS_REMOTE_HOST, HARNESS_REMOTE_ROOT, HARNESS_REMOTE_ENV (its toolchain env, for builders and desk
+   runs alike), then create state/desk-on. Keep the desk otherwise idle while desk-on exists: its units are the
+   perf-sensitive tests.
 6. Watch only `train_end`, `train_error` and disk with one Monitor; measure with `harness.py status`
    (landed counts unique rows). The bar is functions proven on main per wall-clock hour, never rows per train-second
    or agents busy.

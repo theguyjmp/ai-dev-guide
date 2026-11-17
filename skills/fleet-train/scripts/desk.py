@@ -26,6 +26,8 @@ SOLO_SECS = 120.0  # a solo test with no recorded alone run
 LATE = (3.0, 1500.0)  # no result after 3 x the unit's cost + 25 min (a cold build): no verdict
 POLL_SECS = 20
 KIT_SIG = "desk-kit.json"
+LOCAL_ONLY = ("HARNESS_HOME", "HARNESS_REPO", "HARNESS_WT", "HARNESS_DESK", "HARNESS_LOG_DIR", "HARNESS_QS",
+              "HARNESS_REMOTE_", "HARNESS_CLOUD_")  # paths or switches of this machine: never forwarded
 
 
 def on(st: Path) -> bool:
@@ -85,9 +87,8 @@ def kit_files(h) -> list:
 
 
 def runner_scripts(h) -> dict:
-    keep = {k: v for k, v in os.environ.items() if k.startswith("HARNESS_") and k not in ("HARNESS_HOME", "HARNESS_REPO",
-                                                                                           "HARNESS_WT", "HARNESS_DESK")}
-    env = "".join(f"set {k}={v}\r\n" for k, v in sorted({**keep, "HARNESS_HOME": KIT, "HARNESS_REPO": RREPO,
+    keep = {k: v for k, v in os.environ.items() if k.startswith("HARNESS_") and not k.startswith(LOCAL_ONLY)}
+    env = "".join(f'set "{k}={v}"\r\n' for k, v in sorted({**keep, "HARNESS_HOME": KIT, "HARNESS_REPO": RREPO,
                                                            "HARNESS_WT": ROOT + "\\vh"}.items()))
     return {
         "run.cmd": f"@echo off\r\n{ENV}\r\n{env}cd /d {KIT}\r\npy -3 -u desk.py accept --rid %1 > runs\\%1.out 2>&1\r\n",
@@ -107,7 +108,7 @@ def kit(h) -> str:
     for name, text in runner_scripts(h).items():
         (local / name).write_text(text, encoding="utf-8", newline="")
     files = kit_files(h) + sorted(local.iterdir())
-    sig = hashlib.sha1(b"".join(p.name.encode() + p.read_bytes() for p in files)).hexdigest()
+    sig = hashlib.sha1(b"".join(p.name.encode() + p.read_bytes() for p in files) + f"{HOST}|{KIT}".encode()).hexdigest()
     if h.load(KIT_SIG, {}).get("sig") == sig:
         return ""
     ssh(h, f"mkdir {KIT}\\runs {KIT}\\state 2>nul & echo ok")
@@ -121,10 +122,12 @@ def kit(h) -> str:
 def start(h, rid: str, spec: dict) -> str:
     p = h.ST / "desk" / f"{rid}.json"
     p.write_text(json.dumps(spec), encoding="utf-8")
-    if not scp(h, p, f"{KIT}\\runs\\{rid}.json"):
-        return "scp failed"
-    r = ssh(h, f"powershell -NoProfile -ExecutionPolicy Bypass -File {KIT}\\start.ps1 {rid}")
-    return "" if "rc 0" in r.stdout else (r.stdout + r.stderr)[-300:] or f"exit {r.returncode}"
+    r = ssh(h, f"powershell -NoProfile -ExecutionPolicy Bypass -File {KIT}\\start.ps1 {rid}") \
+        if scp(h, p, f"{KIT}\\runs\\{rid}.json") else subprocess.CompletedProcess("", 1, "", "scp failed")
+    if "rc 0" in r.stdout:
+        return ""
+    h.save(KIT_SIG, {})  # the desk may have lost its kit: resend it next gate
+    return (r.stdout + r.stderr)[-300:] or f"exit {r.returncode}"
 
 
 def poll(h, rid: str):

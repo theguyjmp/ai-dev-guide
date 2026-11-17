@@ -207,9 +207,36 @@ def test_desk_side_and_kit():
              if (HERE / (a.name + ".py")).exists()}
     check("kit holds the harness and every local module it imports", {"harness.py", "desk.py"} | local <= names,
           local - names)
-    scripts = desk.runner_scripts(h)
-    check("runner env points the desk harness at the kit", f"set HARNESS_HOME={desk.KIT}" in scripts["run.cmd"]
-          and "desk.py accept --rid %1" in scripts["run.cmd"])
+    os.environ.update(HARNESS_REMOTE_ENV="set A=1&& set B=2", HARNESS_CRATE="app&x")
+    run_cmd = desk.runner_scripts(h)["run.cmd"]
+    check("runner env: quoted sets, kit paths, no local-only vars", f'set "HARNESS_HOME={desk.KIT}"' in run_cmd
+          and 'set "HARNESS_CRATE=app&x"' in run_cmd and "HARNESS_REMOTE_" not in run_cmd
+          and str(TMP) not in run_cmd and "desk.py accept --rid %1" in run_cmd, run_cmd)
+    os.environ.pop("HARNESS_CRATE")
+    import remote
+    check("remote.py takes the second machine's config from desk.py", remote.HOST is desk.HOST and remote.ROOT is desk.ROOT)
+
+
+def test_kit_resend():
+    sent, ok = [], [True]
+    real = desk.ssh, desk.scp
+    desk.ssh = lambda h_, cmd, timeout=180: SimpleNamespace(stdout="", stderr="", returncode=1)
+    desk.scp = lambda h_, src, dst, timeout=600: sent.append(Path(src).name) or ok[0]
+    h.save(desk.KIT_SIG, {})
+    ok[0] = False
+    check("failed kit scp: an error, no signature saved", desk.kit(h).startswith("kit scp failed")
+          and not h.load(desk.KIT_SIG, {}).get("sig"))
+    ok[0] = True
+    sent.clear()
+    first = desk.kit(h), set(sent)
+    sent.clear()
+    check("kit sent whole, then not again while unchanged", first[0] == "" and {"harness.py", "run.cmd"} <= first[1]
+          and desk.kit(h) == "" and sent == [], first)
+    check("a unit that does not start clears the signature", desk.start(h, "g-2", {}) != ""
+          and not h.load(desk.KIT_SIG, {}).get("sig"))
+    sent.clear()
+    check("so the next gate resends the kit", desk.kit(h) == "" and "harness.py" in sent)
+    desk.ssh, desk.scp = real
 
 
 def main():
@@ -218,6 +245,7 @@ def main():
     test_desk_poll()
     test_switch_and_routing()
     test_desk_side_and_kit()
+    test_kit_resend()
     print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}")
     return 1 if FAILS else 0
 
