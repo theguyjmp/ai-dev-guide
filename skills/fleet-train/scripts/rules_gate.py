@@ -7,7 +7,7 @@ another module's ARCHITECTURE `Forbidden types:` stem; `Overlaps: <path>::<Name>
 CLAUDE.md over the overhaul.toml [text] caps, which may only be tightened). A file fails above its count in
 <state>/rules-debt.json (absent = 0; a new project runs `init` on main once); `tighten` after each land, never growth.
 Debt is per file and never moves: code moved into a new file must be clean (fix its findings in the same change).
-A tree that changes spec/*.md must add no plan_validate problem line.
+Plan check (PLAN_MODES): a tree adds no plan_validate problem line; the pick check runs its row-local part.
 
     py -3 rules_gate.py check   [--dir D] [--base main] [--state S] [--lang L]   exit 1 on any problem
     py -3 rules_gate.py count   [--dir D] [--files] [--lang L]
@@ -19,6 +19,7 @@ from __future__ import annotations
 import json, os, re, subprocess, sys, threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,8 @@ TEXT_FILE = re.compile(r"^(?:spec/(?:packets/)?[^/]+\.md|CLAUDE\.md)$")
 TEXT_GENERATED = {"spec/INDEX.md"}
 DECISION_LINE = re.compile(r"^D\d+[a-z]?:")
 LINE_NO = re.compile(r"(\.(?:md|rs|toml|py|[mc]?[jt]sx?)):\d+(?::\d+)?")
+STUB_LINE = re.compile(r"^\S+ (\S+): no stub in ")
+PLAN_MODES = ("off", "spec", "always")  # the gate: always
 
 
 @dataclass(frozen=True)
@@ -393,43 +396,110 @@ def cached_plan_lines(key: str | None, st, compute) -> list | None:
     return lines
 
 
+@contextmanager
+def tree_at(cwd, sha, scratch: Path):
+    wt = Path(scratch) / f"pv-{sha[:12]}-{os.getpid()}-{threading.get_ident()}"
+    if git(cwd, "worktree", "add", "-q", "--detach", str(wt), sha).returncode:
+        yield None
+        return
+    try:
+        yield wt
+    finally:
+        git(cwd, "worktree", "remove", "--force", str(wt))
+
+
 def base_plan_lines(cwd, base, st, scratch: Path) -> list | None:
     sha = git(cwd, "rev-parse", base).stdout.strip()
     key = git(cwd, "rev-parse", f"{sha}^{{tree}}").stdout.strip() or None
 
     def compute():
-        wt = Path(scratch) / f"pv-{sha[:12]}-{os.getpid()}"
-        if git(cwd, "worktree", "add", "-q", "--detach", str(wt), sha).returncode:
-            return None
-        try:
-            return plan_lines(wt)
-        finally:
-            git(cwd, "worktree", "remove", "--force", str(wt))
+        with tree_at(cwd, sha, scratch) as wt:
+            return None if wt is None else plan_lines(wt)
     return cached_plan_lines(key, st, compute)
 
 
-def plan_problems(cwd, base, st, scratch, changed) -> list:
-    if not any(re.fullmatch(r"spec/[^/]+\.md", f) for f in changed):
+def new_plan_lines(now, was, landing=()) -> list:
+    """Lines of `now` that `was` lacks, less each `landing` row's own spent stub (it lands proven)."""
+    new = list((Counter(now) - Counter(was or [])).elements())
+    return [x for x in new if not ((m := STUB_LINE.search(x)) and m.group(1) in set(landing))]
+
+
+def plan_message(base, new) -> list:
+    return [f"plan_validate problems {base} does not have (fix the spec edit, or leave other planned rows' stubs): "
+            + "".join(f"\n  {x[:400]}" for x in new[:15])] if new else []
+
+
+def plan_problems(cwd, base, st, scratch, changed, landing=(), always=False) -> list:
+    """New plan_validate lines of `cwd` over `base`, on a spec/*.md change or `always`."""
+    if not always and not any(re.fullmatch(r"spec/[^/]+\.md", f) for f in changed):
         return []
     with ThreadPoolExecutor(2) as pool:  # each run takes minutes: side by side the gate waits for one
         was_f = pool.submit(base_plan_lines, cwd, base, st, scratch)
         now, was = cached_plan_lines(tree_id(cwd), st, lambda: plan_lines(cwd)), was_f.result()
     if now is None:
         return ["plan_validate crashed on this tree (run: plan_validate.py --repo . --no-lint)"] if was is not None else []
-    new = list((Counter(now) - Counter(was or [])).elements())
-    return [f"plan_validate problems {base} does not have (fix the spec edit): "
-            + "".join(f"\n  {x[:400]}" for x in new[:15])] if new else []
+    return plan_message(base, new_plan_lines(now, was, landing))
 
 
-def problems(cwd, base="main", st=None, scratch=None, lang=None, plan=True) -> list:
+# ------------------------------------------------------------------ per-row plan check
+# check_stubs is row-local; the other validate() checks stay with the gate (a test fails on an unlisted one).
+ROW_PLAN_CHECKS = ("check_stubs",)
+ROW_PLAN_LEFT = ("check_architecture", "check_stems", "check_new_owners", "check_roadmap", "check_rows",
+                 "check_cargo_targets", "check_phase_size", "check_project_rules", "entry_problems", "check_needs",
+                 "check_control_chars", "cross_problems", "check_property", "check_packets", "check_ui_verb",
+                 "check_depth", "check_policies", "check_float_roundtrip", "check_traces", "check_ruff", "check_clippy",
+                 "check_lint_green")
+
+
+def planned_rows(text) -> list:
+    pv = rl.qs_import("plan_validate")
+    return [r for r in pv.parse_functions(text, [], FUNCTIONS) if pv.bare(r["status"]) != pv.DEFERRED]
+
+
+def stub_lines(rows, repo) -> list:
+    out = []
+    rl.qs_import("plan_validate").check_stubs(rows, Path(repo), out, FUNCTIONS)
+    return sorted(LINE_NO.sub(r"\1", x) for x in out)
+
+
+def row_plan_problems(cwd, base, scratch, landing=()) -> list:
+    """New check_stubs lines of `cwd` over commit `base` on the rows its diff reaches; RuntimeError = no verdict."""
+    pv = rl.qs_import("plan_validate")
+    r = git(cwd, "diff", "--name-only", "--no-renames", base)  # deletions too
+    if r.returncode:
+        raise RuntimeError(f"git diff against {base} failed in {cwd}: {r.stderr[-300:]}")
+    changed = set(r.stdout.split())
+    cells = lambda row: {k: v for k, v in row.items() if k != "line"}  # noqa: E731
+    was_rows = {pv.bare(x["id"]): cells(x) for x in planned_rows(git(cwd, "show", f"{base}:{FUNCTIONS}").stdout)} \
+        if FUNCTIONS in changed else {}
+    p = Path(cwd) / FUNCTIONS
+    rows = [x for x in planned_rows(p.read_text(encoding="utf-8", errors="replace") if p.is_file() else "")
+            if changed & set(pv.row_files(x)) or (FUNCTIONS in changed and was_rows.get(pv.bare(x["id"])) != cells(x))]
+    now = stub_lines(rows, cwd)
+    if not new_plan_lines(now, [], landing):
+        return []
+    ids, sha = {pv.bare(x["id"]) for x in rows}, git(cwd, "rev-parse", base).stdout.strip()
+    with tree_at(cwd, sha, scratch) as wt:
+        if wt is None:
+            raise RuntimeError(f"cannot add a worktree of {base} ({sha[:12]}) from {cwd}")
+        f = wt / FUNCTIONS
+        was = stub_lines([x for x in planned_rows(f.read_text(encoding="utf-8", errors="replace") if f.is_file() else "")
+                          if pv.bare(x["id"]) in ids], wt)
+    return plan_message(base[:12] if re.fullmatch(r"[0-9a-f]{40}", base) else base, new_plan_lines(now, was, landing))
+
+
+def problems(cwd, base="main", st=None, scratch=None, lang=None, plan="spec", landing=()) -> list:
     """Every rule problem of the tree at `cwd` that `base` does not carry (empty = clean)."""
+    if plan not in PLAN_MODES:
+        raise ValueError(f"plan={plan!r}; want one of {PLAN_MODES}")
     st = Path(st or default_state())
     lg = rl.LANGS[lang or rl.detect(cwd)]
     changed = changed_files(cwd, base)
     if changed is None:
         return [f"rules gate: git diff against {base} failed in {cwd}"]
-    return count_problems(lg, cwd, base, st, changed) + (plan_problems(cwd, base, st, Path(scratch or st), changed)
-                                                         if plan else [])
+    return count_problems(lg, cwd, base, st, changed) + (
+        plan_problems(cwd, base, st, Path(scratch or st), changed, landing, always=plan == "always")
+        if plan != "off" else [])
 
 
 def main(argv=None) -> int:

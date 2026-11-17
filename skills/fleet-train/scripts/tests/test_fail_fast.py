@@ -144,6 +144,43 @@ def test_pick_screen():
     check("a main red on the static checks rejects no row", h.pick_screen([q4]) == set())
 
 
+def test_pick_plan_stubs():
+    """The pick check runs the row-local plan check with the picked row as landing; older cached passes run again."""
+    head = "| id | phase | module | deps | entry | acceptance | status | files | needs |\n" + "|---" * 9 + "|\n"
+    fn_row = lambda rid: f"| {rid} | 1 | a | - | cli: x {rid} | tests/acceptance/{rid}.rs::t | planned | {rid}.rs | stub |\n"  # noqa: E731
+    body = lambda b: f"pub fn f() -> u32 {{\n    {b}\n}}\n"  # noqa: E731
+    git("checkout", "-q", "main")
+    for rel, text in {"spec/FUNCTIONS.md": head + fn_row("S1") + fn_row("S2"), "S1.rs": body("todo!()"),
+                      "S2.rs": body("todo!()")}.items():
+        (h.REPO / rel).parent.mkdir(parents=True, exist_ok=True)
+        (h.REPO / rel).write_text(text, encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "plan S1 S2")
+    rows = {}
+    for r, files in (("S1", {"S1.rs": body("1")}), ("S2", {"S1.rs": body("1"), "S2.rs": body("2")})):
+        git("checkout", "-q", "-B", r, "main")
+        for rel, text in files.items():
+            (h.REPO / rel).write_text(text, encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", r)
+        rows[r] = {"row": r, "sha": git("rev-parse", "HEAD"), "ts": 30}
+        git("checkout", "-q", "main")
+    h.static_problems, h.batch_review = (lambda cwd, base="main", plan="spec", landing=(): ""), (lambda *a, **k: [])
+    h.save("queue.json", list(rows.values()))
+    h.save(h.PICK_CACHE, {})
+    check("plan: a row that spends only its own stub passes the pick check", h.pick_screen([rows["S1"]]) == set())
+    bad = h.pick_screen([rows["S2"]])
+    rej = h.load("rejects.json", {}).get("S2", [{}])[-1].get("reason", "")
+    check("plan: a row that spends another planned row's stub is rejected",
+          bad == {rows["S2"]["sha"]} and "S1: no stub in S1.rs" in rej and "S2:" not in rej, rej)
+    h.save("queue.json", [rows["S1"]])
+    h.save(h.PICK_CACHE, {rows["S1"]["sha"]: {"row": "S1", "base": "x", "reviewed": True}})  # a pass from older checks
+    seen = []
+    h.static_problems = lambda cwd, base="main", plan="spec", landing=(): seen.append(1) or ""
+    h.pick_screen([rows["S1"]])
+    check("plan: a pass cached by older pick checks is run again", len(seen) >= 1, seen)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

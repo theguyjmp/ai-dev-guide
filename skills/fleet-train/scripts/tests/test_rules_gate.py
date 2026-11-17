@@ -179,5 +179,77 @@ class PlanCache(Base):
         self.assertNotEqual(g.tree_id(r), key)
 
 
+FN_HEAD = "| id | phase | module | deps | entry | acceptance | status | files | needs |\n" + "|---" * 9 + "|\n"
+STUB, DONE = "pub fn f() -> u32 {\n    todo!()\n}\n", "pub fn f() -> u32 {\n    1\n}\n"
+
+
+def fn_row(rid, status, files):
+    return f"| {rid} | 1 | a | - | cli: x {rid} | tests/acceptance/{rid}.rs::t | {status} | {files} | stub |\n"
+
+
+FNS = FN_HEAD + fn_row("R1", "planned", "crates/a/src/one.rs") + fn_row("R2", "planned", "crates/a/src/two.rs") \
+    + fn_row("R3", "planned", "crates/a/src/three.rs") + fn_row("R5", "proven", "crates/a/src/two.rs")
+PLAN_BASE = {"spec/FUNCTIONS.md": FNS, "crates/a/src/one.rs": STUB, "crates/a/src/two.rs": STUB,
+             "crates/a/src/three.rs": DONE, "crates/b/src/lib.rs": "//! b\n"}
+
+
+class RowPlan(Base):
+    """row_plan_problems: plan_validate's real check_stubs on the planned rows one row's diff reaches."""
+
+    def row_plan(self, files, landing=("R1",), delete=()):
+        self.tmp = Path(tempfile.mkdtemp(dir=self.tmp))  # a fresh repo per call
+        r = self.repo(PLAN_BASE)
+        for rel in delete:
+            (r / rel).unlink()
+        self.commit(r, files)
+        return g.row_plan_problems(r, "main", self.tmp, landing)
+
+    def test_own_stub_passes_only_when_landing(self):
+        self.assertEqual(self.row_plan({"crates/a/src/one.rs": DONE}), [])
+        p = self.row_plan({"crates/a/src/one.rs": DONE}, landing=())
+        self.assertTrue(len(p) == 1 and "R1: no stub in crates/a/src/one.rs" in p[0], p)
+
+    def test_another_rows_stub_spent_or_deleted_fails(self):
+        p = self.row_plan({"crates/a/src/one.rs": DONE, "crates/a/src/two.rs": DONE})
+        self.assertTrue(len(p) == 1 and "R2: no stub in crates/a/src/two.rs" in p[0] and "R1:" not in p[0], p)
+        p = self.row_plan({"crates/b/src/lib.rs": "//! b2\n"}, delete=("crates/a/src/two.rs",))
+        self.assertTrue(len(p) == 1 and "R2: stub file missing" in p[0], p)
+
+    def test_only_new_problems_and_reached_rows(self):
+        self.assertEqual(self.row_plan({"crates/a/src/three.rs": DONE + "\n"}), [])  # main already lacks it
+        self.assertEqual(self.row_plan({"crates/b/src/lib.rs": "//! b2\n"}), [])
+
+    def test_spec_edit_rows(self):
+        p = self.row_plan({"spec/FUNCTIONS.md": FNS + fn_row("R6", "planned", "crates/a/src/six.rs")})
+        self.assertTrue(len(p) == 1 and "R6: stub file missing" in p[0], p)
+        p = self.row_plan({"spec/FUNCTIONS.md": FNS.replace("crates/a/src/two.rs |", "crates/a/src/three.rs |", 1)})
+        self.assertTrue(len(p) == 1 and "R2: no stub in" in p[0], p)
+
+    def test_every_validate_check_is_classified(self):
+        import inspect
+        import re
+        pv = rl.qs_import("plan_validate")
+        called = {c.split(".")[-1] for c in re.findall(r"\b((?:check_\w+|entry_match\.\w+_problems))\(",
+                                                       inspect.getsource(pv.validate))}
+        self.assertTrue(called)
+        self.assertFalse(called - set(g.ROW_PLAN_CHECKS) - set(g.ROW_PLAN_LEFT))
+        self.assertFalse(set(g.ROW_PLAN_CHECKS) & set(g.ROW_PLAN_LEFT))
+
+
+class PlanModes(Base):
+    def test_always_runs_on_a_code_only_tree(self):
+        lib = "crates/a/src/lib.rs"
+        g.plan_lines = lambda repo: [] if "todo!()" in (Path(repo) / lib).read_text(encoding="utf-8") \
+            else ["spec/FUNCTIONS.md R7: no stub in crates/a/src/lib.rs: no body calls todo!()"]
+        r = self.repo({lib: STUB})
+        self.commit(r, {lib: DONE})
+        self.assertEqual(g.problems(r, "main", self.st, self.tmp, "rust"), [])  # plan="spec": no spec edit, no run
+        p = g.problems(r, "main", self.st, self.tmp, "rust", plan="always")
+        self.assertTrue(len(p) == 1 and "R7: no stub" in p[0], p)
+        self.assertEqual(g.problems(r, "main", self.st, self.tmp, "rust", plan="always", landing=["R7"]), [])
+        with self.assertRaises(ValueError):
+            g.problems(r, "main", self.st, self.tmp, "rust", plan=True)
+
+
 if __name__ == "__main__":
     unittest.main()

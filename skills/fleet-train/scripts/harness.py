@@ -926,9 +926,9 @@ def oversized_files(cwd, base: str) -> list:
     return out
 
 
-def quality_problems(cwd, base: str = "main") -> str:
+def quality_problems(cwd, base: str = "main", landing=(), plan: str = "spec") -> str:
     """Output of every quality check that fails (empty = clean). `base` is what the size gate measures growth from."""
-    static = static_problems(cwd, base)
+    static = static_problems(cwd, base, plan, landing)
     out = [static] if static else []
     env = run_env(TRAIN_ENV)
     for c in expand(CLIPPY_STRICT, changed_files(cwd, base) if "{file" in CLIPPY_STRICT else []):
@@ -938,8 +938,8 @@ def quality_problems(cwd, base: str = "main") -> str:
     return chr(10).join(out)
 
 
-def static_problems(cwd, base: str = "main", plan: bool = True) -> str:
-    """quality_problems without the lint (no build); plan=False also skips the plan check (minutes)."""
+def static_problems(cwd, base: str = "main", plan: str = "spec", landing=()) -> str:
+    """quality_problems without the lint (no build); plan="off" skips the plan check (minutes)."""
     out = []
     allow = set((ST / "owner-allowlist.txt").read_text(encoding="utf-8").split()) if (ST / "owner-allowlist.txt").exists() else set()
     new_copies = sorted(owner_copies(cwd) - allow)
@@ -950,7 +950,7 @@ def static_problems(cwd, base: str = "main", plan: bool = True) -> str:
     if big:
         out.append("file over the S8 size cap (new or newly over; existing big files are grandfathered until split): "
                    + chr(10) + chr(10).join(big))
-    rules = rules_gate.problems(cwd, base, ST, WT, STACK, plan=plan)
+    rules = rules_gate.problems(cwd, base, ST, WT, STACK, plan=plan, landing=landing)
     if rules:
         out.append(f"rule ratchet (rules_gate.py; a file may not grow past its state/{rules_gate.DEBT} count): "
                    + chr(10) + chr(10).join(rules))
@@ -1044,7 +1044,7 @@ def gate(new_rows, rows, quick=False):
             base = main_unit_baseline()
             if not (failing and (failing <= base or unit_flaky(failing - base, run_env(TRAIN_ENV)))):
                 return False, ["unit"], o[-6000:]
-        q = quality_problems(TRAIN)
+        q = quality_problems(TRAIN, landing=new_rows, plan="always")
         if q:
             return False, ["quality"], q
         t0 = now()
@@ -1081,7 +1081,7 @@ def gate(new_rows, rows, quick=False):
         return False, ["unit"], f"failing crates: {dirs}" + chr(10) + out[-6000:]
     if quality_on():
         t0 = now()
-        q = quality_problems(TRAIN)
+        q = quality_problems(TRAIN, landing=new_rows, plan="always")
         event("gate_stage", stage="quality", secs=round(now() - t0), rc=1 if q else 0)
         if q:
             return False, ["quality"], q
@@ -1528,7 +1528,8 @@ def _disjoint_files(queue: list) -> list:
 
 # ---------------------------------------------------------------- pick check: no-build checks before a row enters a batch
 PICK_WT = WT / "pick"
-PICK_CACHE = "pick-verdicts.json"  # {sha: {row, base, reviewed}}: one pass per sha; what a later main brings is the gate's
+PICK_CACHE = "pick-verdicts.json"  # {sha: {row, base, checks, reviewed}}: one pass per sha; what a later main brings is the gate's
+PICK_CHECKS = 2  # bump when the static pick checks change: older passes run again
 PICK_IDLE_SECS = 120
 
 
@@ -1551,7 +1552,7 @@ def main_static_clean(base: str, cache: dict) -> bool:
     """A main that fails the static checks itself rejects no row (its problems are not the row's)."""
     if cache.get("_main", {}).get("sha") != base:
         pick_checkout(base)
-        cache["_main"] = {"sha": base, "clean": not static_problems(PICK_WT, base, plan=False)}
+        cache["_main"] = {"sha": base, "clean": not static_problems(PICK_WT, base, plan="off")}
     return cache["_main"]["clean"]
 
 
@@ -1562,11 +1563,12 @@ def pick_verdict(q: dict, base: str, cache: dict) -> str:
         return ""
     entry = cache.setdefault(q["sha"], {"row": q["row"]})
     pick_checkout(merged)
-    if not entry.get("base"):
-        log = static_problems(PICK_WT, base, plan=False)
+    if entry.get("checks") != PICK_CHECKS:
+        log = chr(10).join(x for x in (static_problems(PICK_WT, base, plan="off"),
+                                       *rules_gate.row_plan_problems(PICK_WT, base, WT, (q["row"],))) if x)
         if log:
             return "pick check: gate red (['quality']): " + log[-1500:]
-        entry["base"] = base
+        entry["base"], entry["checks"] = base, PICK_CHECKS
     if not entry.get("reviewed"):
         why = dup_reason(q, batch_review([q], cwd=PICK_WT, base=base))
         if why:
@@ -1579,7 +1581,8 @@ def pick_screen(picks: list, budget: float = float("inf")) -> set:
     """Reject and dequeue the `picks` failing the pick check; their shas. A row with no verdict goes on to the gate."""
     cache, t0, bad = load(PICK_CACHE, {}), now(), []
     base = git("rev-parse", "main").stdout.strip()
-    todo = [q for q in picks if not (cache.get(q["sha"], {}).get("base") and cache[q["sha"]].get("reviewed"))]
+    todo = [q for q in picks if not (cache.get(q["sha"], {}).get("checks") == PICK_CHECKS
+                                     and cache[q["sha"]].get("reviewed"))]
     if not todo or not main_static_clean(base, cache):
         return set()
     for q in todo:

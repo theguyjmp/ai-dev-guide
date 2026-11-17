@@ -79,7 +79,8 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
 ## Clean code and brevity
 - `scripts/rules_gate.py` runs in the quality stage, pre-push and cloud sessions: swallowed errors, expect/panic,
   silenced lints, a type named like another module's `Forbidden types:` stem, spec text over overhaul.toml `[text]`
-  caps, new plan_validate problems on spec edits. Ratchet: no file may pass its count in state/rules-debt.json, which
+  caps, new plan_validate problems (the gate: every batch; the pick check: check_stubs on the rows a row's diff
+  reaches, so a row spending another planned row's stub is rejected before a batch). Ratchet: no file may pass its count in state/rules-debt.json, which
   only shrinks (`tighten` after each land). New project: `py -3 rules_gate.py init` on main once. Languages: rules_langs.py.
 - `scripts/brevity_check.py` (fleet_beat BREVITY alarm): word caps on STATE.md, briefs, hand-backs, rulings, notes/,
   code comments; override in `<HARNESS_HOME>/brevity_budget.json`, never raise.
