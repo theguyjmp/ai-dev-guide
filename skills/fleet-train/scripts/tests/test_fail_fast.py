@@ -261,6 +261,21 @@ def test_pick_accept():
     (h.REPO / "src/b.rs").write_text("// b changed\n", encoding="utf-8")
     git("commit", "-q", "-am", "code")
     check("accept: other code on main drops it", h.pick_accept_red(x["sha"], git("rev-parse", "main")) == "")
+    import desk, time  # noqa: E401
+    desk.ssh = lambda h_, cmd, timeout=180: subprocess.CompletedProcess(cmd, 0, "", "")
+    for name, start_of, want in (("accept: the pass that wrote the record is killed", h.proc_start, True),
+                                 ("accept: a reused pid is never killed", lambda pid: "other", False)):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        time.sleep(0.5)
+        h.save(desk.PICK, {"pid": child.pid, "start": start_of(child.pid), "rid": "pick-x"})
+        desk.pick_stop(h)
+        try:
+            child.wait(timeout=10)
+            killed = True
+        except subprocess.TimeoutExpired:
+            killed = False
+            child.kill()
+        check(name, killed == want and not (h.ST / desk.PICK).exists(), killed)
 
 
 if __name__ == "__main__":

@@ -221,16 +221,18 @@ def pick(us: list, todo: list, machine: str, desk_up: bool = True) -> list:
     return left if machine == "here" and not desk_up else left[:1]
 
 
-PICK = "desk-pick.json"  # {"pid", "rid"} of harness.pick_accept_queue's desk run
+PICK = "desk-pick.json"  # {"pid", "start", "rid"} of harness.pick_accept_queue's desk run
 
 
 def pick_stop(h) -> None:
-    """The gate takes the desk: kill the pick acceptance pass, then its desk run."""
+    """The gate takes the desk: kill the pick acceptance pass (same pid + start only), then its desk run."""
     cur = h.load(PICK, None)
     if not cur:
         return
     (h.ST / PICK).unlink(missing_ok=True)
-    if os.name == "nt":
+    if not cur.get("start") or h.proc_start(cur["pid"]) != cur["start"]:
+        pass  # a reused pid or no identity: kill nothing here
+    elif os.name == "nt":
         h.sh(["taskkill", "/T", "/F", "/PID", str(cur["pid"])], check=False)
     else:
         try:
@@ -244,7 +246,7 @@ def pick_stop(h) -> None:
 def pick_run(h, commit: str, tests: list, run_secs: float = 1200, poll_secs: float = 15) -> dict:
     """run_tests(tests) at `commit` on the desk, plus send_secs; h.NoVerdict when not run to the end."""
     rid = f"pick-{commit[:12]}-{int(time.time()) % 1000000}"
-    h.save(PICK, {"pid": os.getpid(), "rid": rid})
+    h.save(PICK, {"pid": os.getpid(), "start": h.proc_start(os.getpid()), "rid": rid})
 
     def mine() -> bool:  # pick_stop removes the record
         return (h.load(PICK, None) or {}).get("rid") == rid

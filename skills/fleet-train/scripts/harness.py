@@ -1581,6 +1581,14 @@ def main_static_clean(base: str, cache: dict) -> bool:
     return cache["_main"]["clean"]
 
 
+def proc_start(pid: int) -> str:
+    """pid's start time ('' if gone), from overhaul-build's drivelock."""
+    if QS not in sys.path:
+        sys.path.insert(0, QS)
+    import drivelock
+    return drivelock.proc_start(pid) or ""
+
+
 def pid_alive(pid: int) -> bool:
     if os.name != "nt":
         try:
