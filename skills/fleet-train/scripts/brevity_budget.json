@@ -1,7 +1,7 @@
 {
  "code_ratchet": {
   "cloud.py": {"share": 0.315, "dated": 1},
-  "fleet_beat.py": {"share": 0.246, "dated": 1},
-  "harness.py": {"share": 0.256, "dated": 9}
+  "fleet_beat.py": {"share": 0.239, "dated": 1},
+  "harness.py": {"share": 0.25, "dated": 7}
  }
 }

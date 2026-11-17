@@ -6,7 +6,7 @@ Run by harness.quality_problems (train, pre-push) and by cloud sessions (`check 
 another module's ARCHITECTURE `Forbidden types:` stem; `Overlaps: <path>::<Name>` exempts one), text (spec and
 CLAUDE.md over the overhaul.toml [text] caps, which may only be tightened). A file fails above its count in
 <state>/rules-debt.json (absent = 0; a new project runs `init` on main once); `tighten` after each land, never growth.
-Debt is per file and never moves: code moved into a new file must be clean (fix its findings in the same change).
+Debt is per file and never moves: code moved to a new file must be clean.
 Plan check (PLAN_MODES): a tree adds no plan_validate problem line; the pick check runs its row-local part.
 
     py -3 rules_gate.py check   [--dir D] [--base main] [--state S] [--lang L]   exit 1 on any problem
@@ -352,8 +352,7 @@ def plan_lines(repo) -> list | None:
 
 
 def tree_id(cwd) -> str | None:
-    """Content id of the tree at `cwd` as it stands (committed or not, ignored files left out): plan_validate's output is a
-    function of that content alone, so it is the cache key. None when git fails."""
+    """Content id of the tree at `cwd`, uncommitted included, ignored out: the plan cache key. None when git fails."""
     import tempfile
     fd, idx = tempfile.mkstemp(prefix="pv-idx-")
     os.close(fd)
@@ -374,8 +373,7 @@ _CACHE_LOCK = threading.Lock()
 
 
 def cached_plan_lines(key: str | None, st, compute) -> list | None:
-    """plan_validate lines for the tree id `key`: from state/PLAN_CACHE when seen (a batch's own tree, a retry, the pre-push
-    check, and the next batch's base once that tree has landed all repeat a run that takes minutes), else `compute()`."""
+    """plan_validate lines for tree id `key` from state/PLAN_CACHE (retries and pre-push repeat trees), else `compute()`."""
     p = Path(st) / PLAN_CACHE
 
     def load():

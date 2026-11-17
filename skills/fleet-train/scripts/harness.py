@@ -676,10 +676,8 @@ SOLO_DAYS = 2  # a test with a perf-budget miss this recent runs alone only (see
 
 
 def solo_tests(tests) -> set:
-    """The tests among `tests` with a perf-budget miss in state/perf-debt.jsonl in the last SOLO_DAYS days. They fail
-    under parallel load every batch and are then re-run alone anyway (pilot: the same 6-9 tests, 500-1700 s of serial
-    tail per gate, after their parallel attempt loaded every other test), so they skip the parallel phase and get the
-    same alone run directly: same asserts, same verdict, one run instead of two."""
+    """Tests with a perf-budget miss in state/perf-debt.jsonl in the last SOLO_DAYS days: they fail under parallel
+    load and are re-run alone anyway, so they run alone only."""
     p = ST / "perf-debt.jsonl"
     if not p.exists():
         return set()
@@ -766,9 +764,8 @@ def run_tests_cargo(tests, timeout=1800):
 
 
 def fmt_tree(cwd):
-    """rustfmt every workspace target root in batches and commit. `cargo fmt --all` hits Windows' 32k command-line
-    limit on this workspace (hundreds of [[test]] roots) and failed silently, so main drifted unformatted (2026-11-12:
-    49 files). Other stacks: the profile's `fmt` over the files the train changed against main (never the whole repo)."""
+    """rustfmt every workspace target root in batches and commit (`cargo fmt --all` overflows the Windows command
+    line on large workspaces). Other stacks: the profile's `fmt` over the files changed against main."""
     if P["fmt"] != "rustfmt":
         for c in expand(P["fmt"], changed_files(cwd, "main")):
             sh(c, cwd=cwd, check=False, timeout=600)
@@ -904,9 +901,8 @@ def file_line_cap(rel: str) -> int:
 
 
 def oversized_files(cwd, base: str) -> list:
-    """S8 module-size gate: each source file (profile src_exts under size_dirs) that the tree at `cwd` adds, or grows past its
-    cap, relative to `base`. A file already over the cap at `base` is grandfathered until it is split under it; from
-    then on it is gated like any other. Renames count as adds (--no-renames), so moving a big file needs a split."""
+    """Size gate: source files (profile src_exts under size_dirs) the tree at `cwd` adds or grows past the cap against
+    `base`. A file already over at `base` is grandfathered until split; renames count as adds."""
     r = git("diff", "--name-only", "--no-renames", "--diff-filter=AM", base, "--", *P["size_dirs"],
             cwd=cwd, check=False)
     if r.returncode != 0:
@@ -1234,10 +1230,8 @@ class ReviewUnavailable(Exception):
 
 
 def batch_review(merged, cwd=None, base="main") -> list:
-    """Headless reviewer over the functions this batch adds. Fail-CLOSED: an empty or unparseable answer is retried once,
-    then ReviewUnavailable is raised and the caller defers the batch (measured: 3 of 432 train and 23 of 668 prescreen
-    reviews returned empty stdout and were landed unreviewed while this was fail-open).
-    Also run by builders before submit (`self-review --slot N`), so a duplicate is caught before a 20-min train."""
+    """Headless reviewer over the functions this batch adds, fail-CLOSED: an empty or unparseable answer is retried
+    once, then ReviewUnavailable defers the batch. Builders run it before submit (`self-review --slot N`)."""
     cwd = cwd or TRAIN
     diff = git("diff", "-U0", base, "HEAD", "--", *P["src_dirs"], cwd=cwd, check=False).stdout
     added, cur = [], ""
@@ -1350,9 +1344,8 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
 
 
 def probe_culprit(merged, rows, fails):
-    """The one row that alone reproduces the failing acceptance tests, found by bisecting with ONLY those tests (a few
-    minutes a step). None when no single half reproduces them (an interaction): the caller falls back to the full bisect.
-    Measured: a 14-row batch bisected with full gates (~30 min a step) for 4 h; the probe found the row in 17 min."""
+    """The one row that alone reproduces the failing tests, bisecting with only those tests; None for an interaction
+    (the caller runs the full bisect)."""
     cand, t0 = list(merged), now()
     while len(cand) > 1:
         mid = len(cand) // 2
@@ -1477,13 +1470,9 @@ def fill_wait(queue: list, picks: list) -> bool:
 
 
 def disjoint(queue: list) -> list:
-    """Oldest first, the rows that merge cleanly onto main plus every earlier pick (trial merges with git merge-tree,
-    no worktree, ~0.2 s a row); the rest wait (oldest next batch).
-    Measured: every conflict the train resolved was row-vs-row inside one batch (0 of 58 queued rows conflicted with
-    main), ~2 min each and serial ahead of a 15 min gate. 2026-11-13: file-disjoint picks took 23 of 106 queued rows
-    (40 rows touched one hot file in different hunks); trial merges take 39, still with no resolves. Falls back to
-    file-disjoint if merge-tree is unavailable (git < 2.38). A row whose branch carries another unproven row's commits
-    (a stacked build) waits until that row is picked earlier in the batch or proven (state/pick-held.json)."""
+    """Oldest first, the rows that merge cleanly onto main plus every earlier pick (git merge-tree trial merges;
+    file-disjoint before git 2.38); the rest wait. A row carrying another unproven row's commits waits until that row
+    is picked earlier or proven (state/pick-held.json)."""
     acc, out, held = git("rev-parse", "main").stdout.strip(), [], {}
     spec = main_spec()
     proven = {i for i, r in spec.items() if r["status"] == "proven"}
