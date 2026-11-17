@@ -359,6 +359,9 @@ def queue_sha(slot, row, sha, since) -> int:
 
 
 def cmd_submit(a):
+    why = submit_dup(slot_wt(a.slot))  # minutes, so before the state lock; the claim is still ours, fix and submit again
+    if why:
+        sys.exit(why)
     with lock("state"):
         c = load("claims.json", {}).get(str(a.slot))
         if not c or c["row"] != a.row:
@@ -1212,10 +1215,26 @@ def reject(q, reason, locked=False):
     event("reject", row=q["row"], reason=reason[:300])
 
 
-def dup_reason(q, dups) -> str:
-    why = "; ".join(f"{d['file']}::{d['fn']} duplicates {d['existing']} ({d.get('why', '')[:120]})"
-                    for d in dups if adds_fn(q, d))
+def dup_text(dups) -> str:
+    """The one refusal text for duplicates: pick time, submit time and cloud collect all say it the same way."""
+    why = "; ".join(f"{d['file']}::{d['fn']} duplicates {d['existing']} ({d.get('why', '')[:120]})" for d in dups)
     return ("duplicate capability (STANDARDS S1/S6): reuse or extend the owner, delete your copy: " + why) if why else ""
+
+
+def dup_reason(q, dups) -> str:
+    return dup_text([d for d in dups if adds_fn(q, d)])
+
+
+def submit_dup(cwd) -> str:
+    """Refusal text when the branch checked out in cwd adds a duplicate capability (the pick-time batch_review, same
+    function), else "". Every reported duplicate is the row's own: the diff is merge-base..HEAD of one row. The reviewer
+    being unavailable is not a verdict: say so on stderr and let the row queue, the pick-time review still guards it."""
+    base = git("merge-base", "main", "HEAD", cwd=cwd).stdout.strip() or "main"
+    try:
+        return dup_text(batch_review([], cwd=cwd, base=base))
+    except ReviewUnavailable as e:
+        print(f"submit: duplicate reviewer unavailable twice ({e}); queued, the pick-time review decides", file=sys.stderr)
+        return ""
 
 
 def adds_fn(q, d) -> bool:

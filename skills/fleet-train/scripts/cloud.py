@@ -169,6 +169,17 @@ def cmd_assign(a):
         print(json.dumps({"assigned": [i["row"] for _, i in took]}))
 
 
+def review_dup(sha) -> str:
+    """Duplicate-capability refusal for a cloud row's tip (h.submit_dup, the local submit's check), else "". The tip is
+    checked out detached in a scratch worktree: the reviewer reads the tree."""
+    wt = h.WT / "cloud-review"
+    if (wt / ".git").exists():
+        h.git("checkout", "-q", "-f", "--detach", sha, cwd=wt)
+    else:
+        h.git("worktree", "add", "-q", "-f", "--detach", str(wt), sha)
+    return h.submit_dup(wt)
+
+
 def release(slot, row, reason):
     h.cmd_release(argparse.Namespace(slot=slot, row=row, reason=reason))
 
@@ -251,7 +262,7 @@ def collect():
         if hd:
             fetch_cloud()
         owned = cloud_claims()
-        gone, done = [], []  # refs to delete, assignment files to drop
+        gone, done, readd = [], [], []  # refs to delete, assignment files to drop, (slot, row) offered again
 
         for name, sha in hd.items():
             if name.startswith("claim-"):
@@ -282,6 +293,13 @@ def collect():
                 if h.git("rev-list", "--count", f"main..{sha}", check=False).stdout.strip() in ("", "0"):
                     continue  # nothing on top of main yet
                 slot, c = owned[row]
+                why = review_dup(sha)
+                if why:  # the same refusal a local submit gets; the next builder reads it in the row's rejects
+                    release(slot, row, "cloud: " + why)
+                    st["rows"].setdefault(row, {}).pop("claim_seen", None)
+                    readd.append((slot, row))
+                    gone += [row, f"claim-{row}", f"prev-{row}"]
+                    continue
                 with h.lock("state"):
                     h.queue_sha(slot, row, sha, c["ts"])
                 st["rows"].setdefault(row, {}).update(queued_sha=sha, queued=h.iso())
@@ -290,7 +308,6 @@ def collect():
 
         # sessions that claimed a row and pushed nothing for CLOUD_TTL: release, free the claim ref, offer the row again
         owned = cloud_claims()
-        readd = []
         for row, (slot, c) in owned.items():
             seen = st["rows"].get(row, {}).get("claim_seen")
             if seen and h.now() - seen > CLOUD_TTL and row not in hd:
