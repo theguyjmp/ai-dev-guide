@@ -1,4 +1,4 @@
-"""Batch fill: under MIN_BATCH clean picks with queued rows out for cloud rebase, the train idles ("filling: ...") for
+"""Batch fill: under FILL_MIN clean picks with queued rows out for cloud rebase, the train idles ("filling: ...") for
 at most FILL_WAIT, then gates what is clean; a CLEAN-* pick never waits. fill_hold's rule, fill_since's timer,
 rebase_out's count, and fill_wait end to end on temp state with a fake clock.
 
@@ -35,7 +35,10 @@ def test_fill_hold_rule():
     hold = h.fill_hold
     check("1 clean, 5 out, no hold yet: hold", hold(1, 5, False, None, T0))
     check("still holding just before the timeout", hold(1, 5, False, T0, T0 + WAIT - 1))
-    check(f"release on fill ({h.MIN_BATCH} clean)", not hold(h.MIN_BATCH, 5, False, T0, T0 + 60))
+    check(f"release on fill ({h.FILL_MIN} clean)", not hold(h.FILL_MIN, 5, False, T0, T0 + 60))
+    check("fill threshold is its own, not MIN_BATCH", h.FILL_MIN == 5 and h.MIN_BATCH == 8, h.FILL_MIN, h.MIN_BATCH)
+    check("one under FILL_MIN still holds", hold(h.FILL_MIN - 1, 5, False, T0, T0 + 60))
+    check("default wait is 10 min", WAIT == 600, WAIT)
     check("release on timeout", not hold(1, 5, False, T0, T0 + WAIT))
     check("a CLEAN-* fix row is never held", not hold(1, 5, True, None, T0))
     check("nothing out for rebase: start at once", not hold(1, 0, False, None, T0))

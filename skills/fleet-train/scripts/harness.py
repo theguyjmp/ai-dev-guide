@@ -784,9 +784,8 @@ def fmt_tree(cwd):
 
 
 def regen_tree(cwd) -> str:
-    """Run the profile's optional `regen` commands (generated files: an index, a catalogue) in the train tree and commit
-    what changed as "train: regen", so the land commit holds files regenerated from the merged batch, not from each
-    row's own base. Returns "" when all is well, else the failure text (the caller fails the batch's quality with it)."""
+    """Run the profile's `regen` commands (generated files) in the train tree and commit them as "train: regen", so
+    they come from the merged batch. "" or the failure text (the batch fails quality with it)."""
     for c in P.get("regen") or []:
         try:
             r = sh(c, cwd=cwd, check=False, timeout=600)
@@ -1423,7 +1422,8 @@ BATCH_WAIT = 600
 BATCH_CAP = int(os.environ.get("HARNESS_BATCH_CAP", "20"))
 
 
-FILL_WAIT = int(os.environ.get("HARNESS_FILL_WAIT", str(20 * 60)))  # 0 = off
+FILL_MIN = int(os.environ.get("HARNESS_FILL_MIN", "5"))  # 5 / 10 min fit a ~25-min gate cycle; ~45 min: 8 / 20
+FILL_WAIT = int(os.environ.get("HARNESS_FILL_WAIT", str(10 * 60)))  # 0 = off
 FILL_GAP_MIN = 300  # a short FILL_WAIT must not restart a hold
 FILLING = "filling: "
 CLOUD_STATE = "cloud.json"  # owned here, written by cloud.py
@@ -1431,7 +1431,7 @@ CLOUD_STATE = "cloud.json"  # owned here, written by cloud.py
 
 def fill_hold(clean: int, out: int, fix_row: bool, since: float | None, t: float) -> bool:
     """Hold the train: few clean picks, rows out for rebase, no CLEAN-* pick, hold under FILL_WAIT old."""
-    if FILL_WAIT <= 0 or fix_row or not out or clean >= MIN_BATCH:
+    if FILL_WAIT <= 0 or fix_row or not out or clean >= FILL_MIN:
         return False
     return since is None or t - since < FILL_WAIT
 
