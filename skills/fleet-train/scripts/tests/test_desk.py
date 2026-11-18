@@ -8,7 +8,7 @@ desk is up and still runs everything when the desk is down or errs; state/desk-o
 """
 from __future__ import annotations
 
-import ast, json, os, sys, tempfile, time
+import ast, json, os, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -170,6 +170,13 @@ def test_run_desk(us):
     out = desk.run_desk(h, T, desk_cls=FakeDesk)
     check("idle: today's split, here only the parallel unit, the desk every solo unit",
           out == [] and calls == [(PAR, [])] and FakeDesk.last.tests == SOLO, out, len(calls))
+    desk.cpu_load = lambda secs=0: 51.0  # a regression: a moderately loaded machine, a healthy desk, desk 0 units
+    calls = fake_h(par_secs=0.3)
+    out = desk.run_desk(h, T, desk_cls=FakeDesk)
+    ev = h.read_events()[-1]
+    check("under BUSY_LOAD (51): today's split, the gate event shows the desk ran every solo unit",
+          out == [] and calls == [(PAR, [])] and ev.get("local_ok") is True and ev.get("solo_here") == 0
+          and ev.get("desk") == len(us) - 1, ev)
     desk.cpu_load = lambda secs=0: 95.0
     calls = fake_h()
     FakeDesk.why0 = "remote-host unreachable"
@@ -247,6 +254,16 @@ def test_desk_side_and_kit():
              if (HERE / (a.name + ".py")).exists()}
     check("kit holds the harness and every local module it imports", {"harness.py", "desk.py"} | local <= names,
           local - names)
+    kit_dir = TMP / "kit-alone"  # the kit loads on its own, as on the desk (a module it lacks crashes every unit)
+    kit_dir.mkdir(exist_ok=True)
+    for p in desk.kit_files(h):
+        shutil.copyfile(p, kit_dir / p.name)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "HARNESS_"))}
+    env.update(HARNESS_HOME=str(kit_dir), HARNESS_REPO=str(TMP / "repo"), HARNESS_WT=str(TMP / "wt"))
+    r = subprocess.run([sys.executable, "-E", "-s", "desk.py", "--help"], cwd=kit_dir, env=env, capture_output=True,
+                       text=True, timeout=120)
+    check("kit loads on its own: desk.py runs from a copy of the kit alone", r.returncode == 0,
+          (r.stdout + r.stderr)[-400:])
     os.environ.update(HARNESS_REMOTE_ENV="set A=1&& set B=2", HARNESS_CRATE="app&x")
     run_cmd = desk.runner_scripts(h)["run.cmd"]
     check("runner env: quoted sets, kit paths, no local-only vars", f'set "HARNESS_HOME={desk.KIT}"' in run_cmd
