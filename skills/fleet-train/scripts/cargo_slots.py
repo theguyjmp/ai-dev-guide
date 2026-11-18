@@ -11,6 +11,7 @@ from typing import Callable
 DEFAULT_PATH = Path.home() / ".claude" / "fleet-cargo-slots.json"
 DEFAULT_CAP = 3
 LOCK_STALE = 120
+REPLACE_WAIT = 5
 
 
 class Full(Exception):
@@ -50,7 +51,16 @@ class CargoSlots:
     def _write(self, holders: list[dict]) -> None:
         tmp = self.path.with_name(self.path.name + f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(holders, indent=1), encoding="utf-8")
-        os.replace(tmp, self.path)
+        t0 = time.time()
+        while True:  # Windows: a reader holds the file open
+            try:
+                os.replace(tmp, self.path)
+                return
+            except PermissionError:
+                if time.time() - t0 > REPLACE_WAIT:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                time.sleep(0.1)
 
     @contextmanager
     def _locked(self, wait: float = 30):

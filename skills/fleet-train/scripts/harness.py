@@ -71,6 +71,26 @@ def git(*a, cwd=REPO, check=True):
     return sh(["git", *a], cwd=cwd, check=check)
 
 
+def lock_holder(name: str) -> str:
+    try:
+        return (ST / f"{name}.lock").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def release_lock(name: str) -> None:
+    """Drop name's lock only if this process holds it; retry WinError 5, then leave it to lock()'s stale rule."""
+    p = ST / f"{name}.lock"
+    for _ in range(40):
+        try:
+            if lock_holder(name) == str(os.getpid()):
+                p.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            time.sleep(0.25)
+    event("lock_release_failed", lock=name)
+
+
 @contextmanager
 def lock(name: str, wait: float = 600):
     p = ST / f"{name}.lock"
@@ -81,17 +101,22 @@ def lock(name: str, wait: float = 600):
             os.write(fd, str(os.getpid()).encode())
             os.close(fd)
             break
-        except FileExistsError:
-            if now() - p.stat().st_mtime > (120 if name == "state" else 3600):  # stale (state sections are short)
-                p.unlink(missing_ok=True)
+        except (FileExistsError, PermissionError):  # Windows: the holder's unlink is pending
+            try:
+                if now() - p.stat().st_mtime > (120 if name == "state" else 3600):  # stale (state sections are short)
+                    p.unlink(missing_ok=True)
+                    continue
+            except FileNotFoundError:
                 continue
+            except PermissionError:
+                pass
             if now() - t0 > wait:
-                raise TimeoutError(name)
+                raise TimeoutError(f"{name} lock held by pid {lock_holder(name) or '?'} for over {wait:.0f}s")
             time.sleep(0.5)
     try:
         yield
     finally:
-        p.unlink(missing_ok=True)
+        release_lock(name)
 
 
 def load(name, default):
@@ -832,6 +857,16 @@ def unit_failures(out: str, first_only=False) -> set:
     return set().union(*(re.findall(p, out, re.M) for p in pats))
 
 
+def unit_red_log(out: str) -> str:
+    """Output tail plus each failing test's own lines, last: a reject reason (the last 1500 chars) names what failed."""
+    hits = sorted((m.start(), m.group(1)) for p in P["unit_fail_re"] for m in re.finditer(p, out, re.M))
+    if not hits:
+        return out[-6000:]
+    per = max(200, 1400 // len(hits[:4]))
+    lines = "".join(chr(10) + out[i:i + per].rstrip() for i, _ in hits[:4])
+    return out[-6000:] + chr(10) + f"unit failures ({len(hits)}): " + "; ".join(n for _, n in hits[:8]) + lines
+
+
 def unit_flaky(failing: set, env) -> bool:
     """True when every failing unit test passes when rerun alone (single thread): load flakiness, not the batch.
     2026-11-12: a store snapshot timing test failed the whole gate under train load twice; it passes alone."""
@@ -1070,7 +1105,7 @@ def gate(new_rows, rows, quick=False):
             failing = unit_failures(o, first_only=True)
             base = main_unit_baseline()
             if not (failing and (failing <= base or unit_flaky(failing - base, run_env(TRAIN_ENV)))):
-                return False, ["unit"], o[-6000:]
+                return False, ["unit"], unit_red_log(o)
         q = quality_problems(TRAIN, landing=new_rows, plan="always")
         if q:
             return False, ["quality"], q
@@ -1098,13 +1133,13 @@ def gate(new_rows, rows, quick=False):
         elif failing and unit_flaky(failing - base, env):
             r = None
     if r is not None and r.returncode != 0 and not P["crate_blame"]:
-        return False, ["unit"], out[-6000:]
+        return False, ["unit"], unit_red_log(out)
     if r is not None and r.returncode != 0:
         crates = sorted(set(re.findall(r"-p (" + re.escape(CRATE) + r"-[\w-]+)", out)))
         dirs = " ".join("crates/" + c[len(CRATE) + 1:] + "/" for c in crates if c != CRATE)
         if f"-p {CRATE} " in out or f"`-p {CRATE}`" in out:
             dirs += " src/"
-        return False, ["unit"], f"failing crates: {dirs}" + chr(10) + out[-6000:]
+        return False, ["unit"], f"failing crates: {dirs}" + chr(10) + unit_red_log(out)
     if quality_on():
         t0 = now()
         q = quality_problems(TRAIN, landing=new_rows, plan="always")
@@ -1463,7 +1498,7 @@ def cmd_train(a):
             event("train_error", error=str(e)[-800:])
             print(f"{iso()} train error: {str(e)[-400:]}", flush=True)
             for n in ("train", "state"):
-                (ST / f"{n}.lock").unlink(missing_ok=True)
+                release_lock(n)
             did = False
         if not a.loop:
             return
