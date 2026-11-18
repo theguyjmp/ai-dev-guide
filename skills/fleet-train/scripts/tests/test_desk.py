@@ -2,7 +2,8 @@
 and this machine takes the solo units the desk has not started; a desk fail reaches the verdict and last-gate.txt; a
 desk unit with no verdict (error, other tests, other head, late, env fault) runs here and is never a pass; the desk
 down sends everything here; this machine busy at gate start (cpu_load() above BUSY_LOAD) keeps no unit while the
-desk is up and still runs everything when the desk is down or errs; state/desk-on turns it on, HARNESS_DESK=0/1 overrides; the desk side writes its result.
+desk is up and still runs everything when the desk is down or errs; a unit the desk could not build runs there once
+more after its incremental clean, then here; state/desk-on turns it on, HARNESS_DESK=0/1 overrides; the desk side writes its result.
 
   py -3 tests/test_desk.py
 """
@@ -195,7 +196,7 @@ def test_run_desk(us):
 
 def test_desk_poll():
     d = desk.Desk.__new__(desk.Desk)
-    d.h, d.gid, d.sha, d.k, d.t0, d.why = h, "g", "abc", 0, time.time(), ""
+    d.h, d.gid, d.sha, d.k, d.t0, d.why, d.env = h, "g", "abc", 0, time.time(), "", set()
     u = {"cost": 10.0, "tests": T[:5], "solo": []}
     real_poll, real_ssh = desk.poll, desk.ssh
 
@@ -296,10 +297,71 @@ def test_kit_resend():
     desk.ssh, desk.scp = real
 
 
+LINK_FAIL = ("app.0x1.rcgu.o : error LNK2001: unresolved external symbol _RINvNtCs0_4core3ptr9drop_glue\r\n"
+             "D:\\fleet\\target\\release\\deps\\app.exe : fatal error LNK1120: 2 unresolved externals\r\n"
+             '{"reason":"build-finished","success":false}\n'
+             'error: could not compile `app` (bin "app") due to 1 previous error\n')
+RED_ALONE = ("== s1::test_s1_1 (serial): running 1 test\ntest test_s1_1 ... FAILED\n\nfailures:\n\n"
+             "failures:\n    test_s1_1\n\ntest result: FAILED. 0 passed; 1 failed\n")
+TGT = "D:/fleet/repo.git/.overhaul/target/land-0"
+
+
+def test_desk_unit_env():
+    """A desk unit whose test build failed (a stale incremental link: LNK1120) once counted every test of the unit as
+    a fail and ejected innocent rows by file blame. It is no verdict: desk_unit_env, the unbuilt targets' incremental
+    objects cleaned in the desk's own target dir, one desk re-run under a new rid, then here; a real red counts."""
+    ts = sorted(T[3:6])
+    u = {"cost": 10.0, "tests": ts, "solo": ts}
+    built = {"fails": ts, "tests": ts, "head": SHA, "events": [], "perf_debt": [], "log": LINK_FAIL, "target": TGT}
+    cmds, starts, h.P["accept"] = [], [], "cargo"
+    real = desk.poll, desk.ssh, desk.start
+    desk.ssh = lambda h_, cmd, timeout=180: cmds.append(cmd) or SimpleNamespace(stdout="", returncode=0)
+    desk.start = lambda h_, rid, spec: starts.append(rid) and ""
+
+    def at(answers):
+        desk.poll = lambda h_, rid: answers.get(rid)
+        d = desk.Desk.__new__(desk.Desk)
+        d.h, d.gid, d.sha, d.k, d.t0, d.why, d.env = h, "g", SHA, 0, time.time(), "", set()
+        return d
+    d = at({"g-0": built, "g-0-env": {**built, "fails": [], "log": ""}})
+    check("build failure: no fail, one desk re-run under a new rid", d.poll(u) is None and starts == ["g-0-env"], starts)
+    check("build failure: the clean is the desk's target dir, the unbuilt target only",
+          cmds == [r'cd /d "D:\fleet\repo.git\.overhaul\target\land-0\release\incremental" && '
+                   r'for /d %d in (app-*) do rd /s /q "%d"'], cmds)
+    k, res = d.poll(u)
+    check("build failure: the clean re-run's verdict counts", res is not None and res["fails"] == [], d.why)
+    d = at({"g-0": built, "g-0-env": built})
+    d.poll(u)
+    k, res = d.poll(u)
+    check("did not build twice: no verdict (the unit runs here)", res is None and desk.ENV_UNIT in d.why, d.why)
+    nc = len(cmds)
+    k, res = at({"g-0": {**built, "log": RED_ALONE, "fails": [ts[0]]}}).poll(u)
+    check("a real desk red counts as before, nothing cleaned", res is not None and res["fails"] == [ts[0]]
+          and len(cmds) == nc, d.why)
+    check("a job result without tests is never classified", desk.unit_env(h, {"fails": ["x"], "log": LINK_FAIL}) == "")
+    h.P["accept"] = "other"
+    check("a non-cargo runner is never classified", desk.unit_env(h, built) == "")
+    h.P["accept"] = "cargo"
+
+    class EnvDesk(desk.Desk):  # end to end: every desk run fails to build; only this machine's verdict counts
+        def setup(self):
+            return ""
+    specs = {}
+    desk.start = lambda h_, rid, spec: specs.update({rid: spec}) or ""
+    desk.poll = lambda h_, rid: {**built, "tests": specs[rid]["tests"], "fails": specs[rid]["tests"]} if rid in specs else None
+    calls = fake_h(red_local=[T[40]], par_secs=0.05)
+    out = desk.run_desk(h, T, desk_cls=EnvDesk)
+    here = sorted(t for c in calls for t in c[0])
+    check("e2e: desk build failures never fail; every unit ran here; only this machine's red counts",
+          out == [T[40]] and here == sorted(set(T)) and len(specs) == 2, out, sorted(specs))
+    desk.poll, desk.ssh, desk.start = real
+
+
 def main():
     us = test_units_and_pick()
     test_run_desk(us)
     test_desk_poll()
+    test_desk_unit_env()
     test_switch_and_routing()
     test_desk_side_and_kit()
     test_kit_resend()

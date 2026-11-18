@@ -16,6 +16,7 @@ TARGET = re.compile(r"to rerun pass `(-p [\w-]+(?: --(?:lib|bins?|tests?|example
 CRASH = re.compile(r"to rerun pass `([^`]+)`\s*\n\s*Caused by:\s*\n\s*process didn't exit successfully: `[^`]*` "
                    r"\((exit code: (?!101\))[^)]*|signal: [^)]*)\)")
 PASSED = re.compile(r"^test result: \w+\. (\d+) passed", re.M)
+UNBUILT = re.compile(r"^error: could not compile `([\w-]+)`(?: \((?:\w+ )*?(?:lib|\w+ \"([\w-]+)\"))?", re.M)
 SELECTOR = "-p "
 
 
@@ -25,10 +26,16 @@ class CargoFailures:
     targets: tuple = ()  # every failed target's selector ("-p crate --lib"), in cargo's order
     unnamed: tuple = ()  # failed targets no printed name accounts for
     crashes: dict = field(default_factory=dict)  # {selector: "exit code: ..."}
+    unbuilt: tuple = ()  # targets cargo could not compile or link, by crate name (incremental/<name>-*)
 
     @property
     def found(self) -> bool:
         return bool(self.tests or self.unnamed)
+
+    @property
+    def build_failed(self) -> bool:
+        """A target did not build and no test ran to a failure: the output is a build or link error, not a red."""
+        return bool(self.unbuilt) and not self.found
 
     def keys(self) -> list:
         """Plain strings for JSON (a name never starts with "-")."""
@@ -37,7 +44,7 @@ class CargoFailures:
     def without(self, known: CargoFailures) -> CargoFailures:
         unnamed = tuple(t for t in self.unnamed if t not in known.unnamed)
         return CargoFailures(tuple(t for t in self.tests if t not in known.tests), self.targets, unnamed,
-                             {t: c for t, c in self.crashes.items() if t in unnamed})
+                             {t: c for t, c in self.crashes.items() if t in unnamed}, self.unbuilt)
 
     def describe(self, cap: int = 5) -> str:
         if not self.found:
@@ -59,7 +66,8 @@ def parse(out: str) -> CargoFailures:
     # an unaccounted target cannot be pinned: keep them all
     short = len(targets) - len(crashes) > len(RESULT_FAILED.findall(out))
     unnamed = tuple(t for t in targets if short or t in crashes)
-    return CargoFailures(tuple(sorted(names)), targets, unnamed, crashes)
+    unbuilt = tuple(dict.fromkeys((t or c).replace("-", "_") for c, t in UNBUILT.findall(out)))
+    return CargoFailures(tuple(sorted(names)), targets, unnamed, crashes, unbuilt)
 
 
 def from_keys(keys) -> CargoFailures:

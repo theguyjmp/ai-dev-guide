@@ -115,5 +115,16 @@ check("reject reason names the crashed target", "unit failures (1): -p acme-doc 
 red = h.unit_red_log(fx("probe_fail"))
 check("reject reason names the failing tests", PROBE in red[-1500:] and EVAL in red[-1500:], red[-300:])
 
+# a build or link error is no red (CargoFailures.build_failed, unbuilt by crate name: the desk's incremental clean)
+link = cf.parse("app.exe : fatal error LNK1120: 2 unresolved externals\r\n"
+                'error: could not compile `app` (bin "app") due to 1 previous error\n')
+check("build: a bin link failure is a build failure of target app", link.build_failed and link.unbuilt == ("app",), link)
+both = cf.parse('error: could not compile `app-doc` (lib) due to 3 previous errors\n'
+                'error: could not compile `app` (test "s01_one") due to 1 previous error\n')
+check("build: a lib by its crate ('-' as '_'), a test target by its name", both.unbuilt == ("app_doc", "s01_one"), both)
+check("build: test names found beat a compile line (a red)",
+      not cf.parse(fx("probe_fail") + '\nerror: could not compile `app` (bin "app")\n').build_failed)
+check("build: nothing failed is no build failure", not cf.parse("").build_failed)
+
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}")
 sys.exit(1 if FAILS else 0)

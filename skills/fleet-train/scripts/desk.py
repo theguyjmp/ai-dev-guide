@@ -1,5 +1,6 @@
 """The desk: a second Windows machine (ssh, cmd shell) running tests from a git bundle. Cargo: acceptance split (solo
-units there, the rest here; busy here: all there; no verdict runs here). Other runners: every test run there (`job`); no verdict raises
+units there, the rest here; busy here: all there; no verdict runs here; a unit that did not build runs there once
+more after its incremental clean, then here). Other runners: every test run there (`job`); no verdict raises
 Unavailable. On with <state>/desk-on or [desk] host; HARNESS_DESK=0/1 overrides.
 
   py -3 desk.py accept --rid R   # desk side (run.cmd)
@@ -188,7 +189,24 @@ def absorb(h, res: dict, head: str) -> str:
     pat = h.P.get("env_fail_re")
     if not why and pat and re.search(pat, res.get("log") or ""):
         why = "desk toolchain env fault"
-    return why
+    return why or unit_env(h, res)
+
+
+ENV_UNIT = "desk unit did not build: "
+
+
+def unit_env(h, res: dict) -> str:
+    """A cargo unit that did not build (cargo_failures build_failed) is an env fault, never its tests' fails: event,
+    clean those targets' incremental objects in the desk's own target dir, ENV_UNIT + why. "" otherwise."""
+    ok = h.P.get("accept") == "cargo" and "tests" in res and res.get("fails") and res.get("target")
+    f = h.cf.parse(res.get("log") or "") if ok else h.cf.CargoFailures()
+    if not f.build_failed:
+        return ""
+    inc = res["target"].replace("/", "\\") + "\\release\\incremental"
+    r = ssh(h, f'cd /d "{inc}" && for /d %d in ({" ".join(n + "-*" for n in f.unbuilt)}) do rd /s /q "%d"', timeout=600)
+    h.event("desk_unit_env", rid=res.get("rid"), unbuilt=list(f.unbuilt), tests=len(res["tests"]),
+            cleaned=r.returncode == 0)
+    return ENV_UNIT + ", ".join(f.unbuilt) + (" (incremental cleaned)" if r.returncode == 0 else " (clean failed)")
 
 
 def run_op(h, spec: dict) -> dict:
@@ -204,7 +222,7 @@ def run_op(h, spec: dict) -> dict:
     lg = h.ST / "last-gate.txt"
     fails = h.run_tests(spec["tests"], solo=spec["solo"])
     stems = {Path(t.split("::")[0]).stem for t in spec["tests"]}
-    return dict(fails=fails, tests=spec["tests"],
+    return dict(fails=fails, tests=spec["tests"], target=h.TRAIN_ENV.get("CARGO_TARGET_DIR", ""),
                 log=lg.read_text(encoding="utf-8", errors="replace")[-20000:] if fails and lg.exists() else "",
                 times={s: v for s, v in h.load(h.ACCEPT_TIMES, {}).items() if s in stems},
                 alone={t: v for t, v in h.load(h.ALONE_TIMES, {}).items() if t in set(spec["solo"]) | set(fails)})
@@ -394,7 +412,7 @@ class Desk:
     """The desk for one gate, one unit at a time. why != "": not usable."""
 
     def __init__(self, h, gid: str, sha: str):
-        self.h, self.gid, self.sha, self.k, self.t0 = h, gid, sha, None, 0.0
+        self.h, self.gid, self.sha, self.k, self.t0, self.env = h, gid, sha, None, 0.0, set()
         self.why = self.setup()
 
     def setup(self) -> str:
@@ -404,7 +422,7 @@ class Desk:
         return send(self.h, self.sha) or kit(self.h)
 
     def rid(self, k: int) -> str:
-        return f"{self.gid}-{k}"
+        return f"{self.gid}-{k}" + ("-env" if k in self.env else "")
 
     def start(self, k: int, unit: dict) -> bool:
         why = start(self.h, self.rid(k), {"rid": self.rid(k), "sha": self.sha, "tests": unit["tests"],
@@ -424,6 +442,11 @@ class Desk:
             self.why = f"unit {k} late ({round(time.time() - self.t0)}s)"
         else:
             why = absorb(self.h, res, self.sha)
+            if why.startswith(ENV_UNIT) and k not in self.env:
+                self.env.add(k)
+                if self.start(k, unit):
+                    return None
+                why = self.why
             if not why and sorted(res.get("tests") or []) != unit["tests"]:
                 why = "desk ran other tests than its unit"
             self.why = f"unit {k}: {why[-300:]}" if why else ""
