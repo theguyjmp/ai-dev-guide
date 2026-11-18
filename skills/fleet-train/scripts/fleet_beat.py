@@ -135,6 +135,9 @@ if _orph:
                   f"carries {_orph[r0]}): rebase each onto main without them, or requeue the carried row")
 if [e for e in ev if e.get("event") == "train_error" and now - e["ts"] < 3600]:
     alarms.append("TRAIN-ERROR in the last hour (events.jsonl train_error, train.err)")
+_desk = [e for e in ev if e.get("event") in ("desk_deferred", "desk_job")]
+if _desk and _desk[-1]["event"] == "desk_deferred" and now - _desk[-1]["ts"] < 3600:
+    alarms.append("DESK-DOWN the train defers every batch: no desk verdict (events.jsonl desk_deferred, desk_error)")
 free = shutil.disk_usage(h.ST).free / 1e9
 if free < 60:
     alarms.append(f"DISK {round(free)} GB free: clear old target dirs and stale worktrees")
