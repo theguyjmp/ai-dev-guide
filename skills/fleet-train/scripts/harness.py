@@ -606,8 +606,29 @@ def tests_cmd(tests):
 
 
 def run_tests(tests, timeout=1800, solo=None):
-    """Run acceptance tests 'file::name' on the train tree. Returns the failed ones (empty = pass)."""
+    """Run acceptance tests 'file::name' on the train tree (or the desk). Returns the failed ones (empty = pass)."""
+    if desk.offload(sys.modules[__name__]):
+        res = desk.job(sys.modules[__name__], "tests", timeout, tests=sorted(set(tests)), solo=sorted(solo or []))
+        lg = ST / "last-gate.txt"
+        lg.unlink(missing_ok=True)
+        if res["fails"] and res.get("log"):
+            lg.write_text(res["log"], encoding="utf-8")
+        return res["fails"]
     return run_tests_cargo(tests, timeout, solo) if P["accept"] == "cargo" else run_tests_cmd(tests, timeout)
+
+
+def unit_runs(cmds, timeout=1800, first_fail=False) -> list:
+    """[CompletedProcess] of each unit command in the train tree (or the desk), in order."""
+    if desk.offload(sys.modules[__name__]):
+        res = desk.job(sys.modules[__name__], "cmd", timeout * len(cmds), cmds=list(cmds), timeout=timeout,
+                       first_fail=first_fail)
+        return [subprocess.CompletedProcess(c, r["rc"], r["out"], "") for c, r in zip(cmds, res["runs"])]
+    out = []
+    for c in cmds:
+        out.append(sh(c, cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=timeout))
+        if first_fail and out[-1].returncode != 0:
+            break
+    return out
 
 
 def acceptance_tests(tests):
@@ -619,7 +640,9 @@ BUILD_FAILED = "test build failed: "  # run_alone's tail when a test exe did not
 
 
 def run_alone(tests, timeout=1800) -> dict:
-    """{test: failure tail} of the tests failing alone in the train tree."""
+    """{test: failure tail} of the tests failing alone in the train tree (or the desk)."""
+    if desk.offload(sys.modules[__name__]):
+        return desk.job(sys.modules[__name__], "alone", timeout + 900 * len(tests), tests=sorted(tests))["red"]
     env = run_env(TRAIN_ENV)
     if P["accept"] == "cargo":
         exes, r = build_test_exes(sorted({Path(t.split("::")[0]).stem for t in tests}), env, timeout)
@@ -867,16 +890,15 @@ def unit_red_log(out: str) -> str:
     return out[-6000:] + chr(10) + f"unit failures ({len(hits)}): " + "; ".join(n for _, n in hits[:8]) + lines
 
 
-def unit_flaky(failing: set, env) -> bool:
+def unit_flaky(failing: set) -> bool:
     """True when every failing unit test passes when rerun alone (single thread): load flakiness, not the batch.
     2026-11-12: a store snapshot timing test failed the whole gate under train load twice; it passes alone."""
     if not failing or len(failing) > 5 or not P["unit_one"]:
         return False
-    for name in sorted(failing):
-        n = re.escape(name).replace('"', ".") if P["name_escape"] else name
-        rr = sh(P["unit_one"].replace("{name}", n), cwd=TRAIN, check=False, env=env, timeout=900)
-        if rr.returncode != 0:
-            return False
+    cmds = [P["unit_one"].replace("{name}", re.escape(n).replace('"', ".") if P["name_escape"] else n)
+            for n in sorted(failing)]
+    if any(r.returncode != 0 for r in unit_runs(cmds, timeout=900, first_fail=True)):
+        return False
     event("gate_stage", stage="unit-flaky-passed-alone", failing=sorted(failing))
     return True
 
@@ -899,7 +921,7 @@ def main_unit_baseline() -> set:
     cache = load("unit-baseline.json", {})
     if cache.get("sha") != sha:
         with at_main():
-            rr = sh(P["unit"], cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=1800)
+            rr = unit_runs([P["unit"]])[0]
         fails = unit_failures(rr.stdout + rr.stderr)
         cache = {"sha": sha, "fails": sorted(fails)}
         save("unit-baseline.json", cache)
@@ -1099,12 +1121,12 @@ def gate(new_rows, rows, quick=False):
         return False, ["quality"], bad
     if quick:  # retry after ejecting rows whose own tests failed: lint passed with them in; unit is re-run (cheap, and
         # removing a branch can break another that used it)
-        r = sh(P["unit"], cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=1800)
+        r = unit_runs([P["unit"]])[0]
         if r.returncode != 0:
             o = r.stdout + r.stderr
             failing = unit_failures(o, first_only=True)
             base = main_unit_baseline()
-            if not (failing and (failing <= base or unit_flaky(failing - base, run_env(TRAIN_ENV)))):
+            if not (failing and (failing <= base or unit_flaky(failing - base))):
                 return False, ["unit"], unit_red_log(o)
         q = quality_problems(TRAIN, landing=new_rows, plan="always")
         if q:
@@ -1121,7 +1143,7 @@ def gate(new_rows, rows, quick=False):
         if r.returncode != 0:
             return False, ["clippy"], (r.stdout + r.stderr)[-6000:]
     t0 = now()
-    r = sh(P["unit"], cwd=TRAIN, check=False, env=env, timeout=1800)
+    r = unit_runs([P["unit"]])[0]
     event("gate_stage", stage="unit", secs=round(now() - t0), rc=r.returncode)
     if r.returncode != 0:
         out = r.stdout + r.stderr
@@ -1130,7 +1152,7 @@ def gate(new_rows, rows, quick=False):
         if failing and failing <= base:  # main is already red on exactly these: not this batch's fault
             event("gate_stage", stage="unit-baseline-red", failing=sorted(failing)[:5])
             r = None
-        elif failing and unit_flaky(failing - base, env):
+        elif failing and unit_flaky(failing - base):
             r = None
     if r is not None and r.returncode != 0 and not P["crate_blame"]:
         return False, ["unit"], unit_red_log(out)
@@ -1495,10 +1517,13 @@ def cmd_train(a):
         try:
             did = train_once()
         except Exception as e:  # noqa: BLE001 - never let one bad train stop the loop
-            event("train_error", error=str(e)[-800:])
-            print(f"{iso()} train error: {str(e)[-400:]}", flush=True)
+            deferred = isinstance(e, desk.Unavailable)
+            event("desk_deferred" if deferred else "train_error", error=str(e)[-800:])
+            print(f"{iso()} train {'deferred, desk' if deferred else 'error'}: {str(e)[-400:]}", flush=True)
             for n in ("train", "state"):
                 release_lock(n)
+            if deferred and a.loop:
+                time.sleep(DESK_RETRY_SECS)
             did = False
         if not a.loop:
             return
@@ -1506,6 +1531,7 @@ def cmd_train(a):
             time.sleep(30)
 
 
+DESK_RETRY_SECS = 300
 MIN_BATCH = int(os.environ.get("HARNESS_MIN_BATCH", "8"))
 BATCH_WAIT_BUSY = int(os.environ.get("HARNESS_BATCH_WAIT_BUSY", str(25 * 60)))  # max wait for MIN_BATCH while claims are in flight
 BATCH_WAIT = 600

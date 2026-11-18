@@ -1,20 +1,41 @@
-"""Acceptance split with a second Windows machine, the desk (ssh HARNESS_REMOTE_HOST, cmd shell). This machine runs
-the parallel unit; the desk runs the run-alone (solo) units one at a time, longest first, and this machine takes any
-it has not started. A desk unit with no verdict runs here and drops the desk for the gate. Cargo runner only.
-On while <state>/desk-on exists; HARNESS_DESK=0/1 overrides.
+"""The desk: a second Windows machine (ssh, cmd shell) running tests from a git bundle. Cargo: acceptance split (solo
+units there, the rest here; no verdict runs here). Other runners: every test run there (`job`); no verdict raises
+Unavailable. On with <state>/desk-on or [desk] host; HARNESS_DESK=0/1 overrides.
 
-  py -3 desk.py accept --rid R   # desk side (run.cmd): run_tests on runs/R.json, write runs/R.result.json
+  py -3 desk.py accept --rid R   # desk side (run.cmd)
 """
 from __future__ import annotations
 
 import argparse, hashlib, json, os, re, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
-HOST = os.environ.get("HARNESS_REMOTE_HOST", "remote-host")
-ROOT = os.environ.get("HARNESS_REMOTE_ROOT", "D:\\fleet")  # remote dir holding repo.git and vh\
-# cmd.exe env prefix on the remote host, e.g. "set CARGO_HOME=D:\\dev\\cargo&& set CARGO_BUILD_JOBS=3"
-ENV = os.environ.get("HARNESS_REMOTE_ENV", "set CARGO_BUILD_JOBS=3")
+
+@dataclass(frozen=True)
+class Conf:
+    host: str
+    root: str
+    env: str  # cmd.exe prefix
+    configured: bool
+
+
+def load_conf(environ, home: Path) -> Conf:
+    """HARNESS_REMOTE_* beat [desk] host, root, env, path (dirs put first on PATH)."""
+    toml = home / "harness.toml"
+    t = {}
+    if toml.exists():
+        import tomllib
+        t = tomllib.loads(toml.read_text(encoding="utf-8")).get("desk", {})
+    env = environ.get("HARNESS_REMOTE_ENV") or t.get("env") or "set CARGO_BUILD_JOBS=3"
+    if t.get("path"):
+        env += f'&& set "PATH={";".join(t["path"])};%PATH%"'
+    return Conf(environ.get("HARNESS_REMOTE_HOST") or t.get("host") or "remote-host",
+                environ.get("HARNESS_REMOTE_ROOT") or t.get("root") or "D:\\fleet", env, bool(t.get("host")))
+
+
+CONF = load_conf(os.environ, Path(os.environ.get("HARNESS_HOME", str(Path(__file__).parent))))
+HOST, ROOT, ENV = CONF.host, CONF.root, CONF.env
 KIT = ROOT + "\\desk-kit"
 RREPO = ROOT + "\\repo.git"
 ON = "desk-on"
@@ -30,9 +51,18 @@ LOCAL_ONLY = ("HARNESS_HOME", "HARNESS_REPO", "HARNESS_WT", "HARNESS_DESK", "HAR
               "HARNESS_REMOTE_", "HARNESS_CLOUD_")  # paths or switches of this machine: never forwarded
 
 
+class Unavailable(Exception):
+    """No desk verdict: never a pass or a fail."""
+
+
 def on(st: Path) -> bool:
     env = os.environ.get("HARNESS_DESK", "")
-    return env == "1" if env in ("0", "1") else (st / ON).exists()
+    return env == "1" if env in ("0", "1") else (st / ON).exists() or CONF.configured
+
+
+def offload(h) -> bool:
+    """Every test run goes to the desk (cargo splits acceptance only)."""
+    return h.P["accept"] != "cargo" and on(h.ST)
 
 
 def ssh(h, cmd: str, timeout=180) -> subprocess.CompletedProcess:
@@ -121,6 +151,7 @@ def kit(h) -> str:
 
 def start(h, rid: str, spec: dict) -> str:
     p = h.ST / "desk" / f"{rid}.json"
+    p.parent.mkdir(exist_ok=True)
     p.write_text(json.dumps(spec), encoding="utf-8")
     r = ssh(h, f"powershell -NoProfile -ExecutionPolicy Bypass -File {KIT}\\start.ps1 {rid}") \
         if scp(h, p, f"{KIT}\\runs\\{rid}.json") else subprocess.CompletedProcess("", 1, "", "scp failed")
@@ -158,27 +189,41 @@ def absorb(h, res: dict, head: str) -> str:
     return why
 
 
+def run_op(h, spec: dict) -> dict:
+    op = spec.get("op", "tests")
+    if op == "cmd":
+        runs = [{"rc": r.returncode, "out": r.stdout + r.stderr}
+                for r in h.unit_runs(spec["cmds"], timeout=spec["timeout"], first_fail=spec["first_fail"])]
+        return {"runs": runs, "log": "\n".join(r["out"] for r in runs if r["rc"])[-20000:]}
+    if op == "alone":
+        return {"red": h.run_alone(spec["tests"]), "tests": spec["tests"]}
+    if op != "tests":
+        raise ValueError(f"unknown desk op {op!r}")
+    lg = h.ST / "last-gate.txt"
+    fails = h.run_tests(spec["tests"], solo=spec["solo"])
+    stems = {Path(t.split("::")[0]).stem for t in spec["tests"]}
+    return dict(fails=fails, tests=spec["tests"],
+                log=lg.read_text(encoding="utf-8", errors="replace")[-20000:] if fails and lg.exists() else "",
+                times={s: v for s, v in h.load(h.ACCEPT_TIMES, {}).items() if s in stems},
+                alone={t: v for t, v in h.load(h.ALONE_TIMES, {}).items() if t in set(spec["solo"]) | set(fails)})
+
+
 def accept(h, rid: str) -> dict:
-    """Desk side: check out the spec's sha in TRAIN, run_tests its unit, write runs/<rid>.result.json."""
+    """Desk side: run runs/<rid>.json at its sha, write its result."""
+    os.environ["HARNESS_DESK"] = "0"  # never offload from here
     runs = h.HOME / "runs"
     spec = json.loads((runs / f"{rid}.json").read_text(encoding="utf-8"))
 
     def lines(f):
         return (h.ST / f).read_text(encoding="utf-8").splitlines() if (h.ST / f).exists() else []
     ev0, pd0, t0, res = len(lines("events.jsonl")), len(lines("perf-debt.jsonl")), time.time(), {"rid": rid}
-    lg = h.ST / "last-gate.txt"
     try:
         if not (h.TRAIN / ".git").exists():
             h.git("worktree", "add", "-f", "--detach", str(h.TRAIN), spec["sha"])
         h.git("checkout", "-q", "--detach", "-f", spec["sha"], cwd=h.TRAIN)
         h.git("clean", "-qfd", cwd=h.TRAIN, check=False)
-        lg.unlink(missing_ok=True)
-        fails = h.run_tests(spec["tests"], solo=spec["solo"])
-        stems = {Path(t.split("::")[0]).stem for t in spec["tests"]}
-        res.update(fails=fails, tests=spec["tests"],
-                   log=lg.read_text(encoding="utf-8", errors="replace")[-20000:] if fails and lg.exists() else "",
-                   times={s: v for s, v in h.load(h.ACCEPT_TIMES, {}).items() if s in stems},
-                   alone={t: v for t, v in h.load(h.ALONE_TIMES, {}).items() if t in set(spec["solo"]) | set(fails)})
+        (h.ST / "last-gate.txt").unlink(missing_ok=True)
+        res.update(run_op(h, spec))
     except Exception as e:  # noqa: BLE001
         res["error"] = str(e)[-2000:]
     res["head"] = h.git("rev-parse", "HEAD", cwd=h.TRAIN, check=False).stdout.strip()
@@ -243,6 +288,60 @@ def pick_stop(h) -> None:
     h.event("pick_accept_preempted", rid=cur["rid"])
 
 
+def remote(h, rid: str, sha: str, spec: dict, limit: float, alive=lambda: True, poll_secs: float = POLL_SECS) -> dict:
+    """`spec` at `sha` on the desk, its result absorbed; Unavailable when late or not alive()."""
+    t0 = time.time()
+    if ssh(h, "echo ok", timeout=60).stdout.strip() != "ok":
+        raise Unavailable(f"{HOST} unreachable")
+    why = send(h, sha) or kit(h)
+    why = why or (start(h, rid, {**spec, "rid": rid, "sha": sha}) if alive() else "preempted")
+    if why:
+        raise Unavailable(f"desk run did not start: {why[-200:]}")
+    sent = time.time()
+    while (res := poll(h, rid)) is None:
+        if not alive() or time.time() - sent > limit:
+            ssh(h, f"{KIT}\\stop.cmd {rid}", timeout=120)
+            raise Unavailable(f"desk run {rid} preempted or late")
+        time.sleep(poll_secs)
+    why = absorb(h, res, sha)
+    if why:
+        raise Unavailable(why)
+    return {**res, "send_secs": round(sent - t0)}
+
+
+HELD = "desk-held.json"  # the train's desk job
+
+
+def held(h) -> bool:
+    cur = h.load(HELD, None)
+    return bool(cur) and h.pid_alive(cur["pid"])
+
+
+def job(h, op: str, limit: float, **spec) -> dict:
+    """One train test run on the desk at TRAIN's HEAD: op tests, alone or cmd."""
+    sha = h.git("rev-parse", "HEAD", cwd=h.TRAIN).stdout.strip()
+    rid = f"{op}-{sha[:12]}-{int(time.time()) % 1000000}"
+    h.save(HELD, {"pid": os.getpid(), "rid": rid})
+    try:
+        pick_stop(h)  # after HELD
+        res = remote(h, rid, sha, {"op": op, **spec}, limit + LATE[1])
+    except Unavailable as e:
+        h.event("desk_error", op=op, rid=rid, reason=str(e)[-300:])
+        raise
+    finally:
+        (h.ST / HELD).unlink(missing_ok=True)
+    fill_times(h, res.get("times", {}), res.get("alone", {}))
+    h.event("desk_job", op=op, rid=rid, secs=res.get("secs"), send_secs=res["send_secs"],
+            fails=len(res.get("fails") or res.get("red") or []))
+    return res
+
+
+def fill_times(h, times: dict, alone: dict) -> None:
+    """Desk seconds fill only gaps here."""
+    h.save(h.ACCEPT_TIMES, {**times, **h.load(h.ACCEPT_TIMES, {})})
+    h.save(h.ALONE_TIMES, {**alone, **h.load(h.ALONE_TIMES, {})})
+
+
 def pick_run(h, commit: str, tests: list, run_secs: float = 1200, poll_secs: float = 15) -> dict:
     """run_tests(tests) at `commit` on the desk, plus send_secs; h.NoVerdict when not run to the end."""
     rid = f"pick-{commit[:12]}-{int(time.time()) % 1000000}"
@@ -251,26 +350,12 @@ def pick_run(h, commit: str, tests: list, run_secs: float = 1200, poll_secs: flo
     def mine() -> bool:  # pick_stop removes the record
         return (h.load(PICK, None) or {}).get("rid") == rid
     try:
-        if h.in_acceptance():
-            raise h.NoVerdict("the train's acceptance holds the desk")
-        t0 = time.time()
-        if ssh(h, "echo ok", timeout=60).stdout.strip() != "ok":
-            raise h.NoVerdict(f"{HOST} unreachable")
-        why = send(h, commit) or kit(h)
-        why = why or (start(h, rid, {"rid": rid, "sha": commit, "tests": tests, "solo": sorted(h.solo_tests(tests))})
-                      if mine() else "preempted")
-        if why:
-            raise h.NoVerdict(f"desk run did not start: {why[-200:]}")
-        sent = time.time()
-        while (res := poll(h, rid)) is None:
-            if not mine() or h.in_acceptance() or time.time() - sent > run_secs:
-                ssh(h, f"{KIT}\\stop.cmd {rid}", timeout=120)
-                raise h.NoVerdict("preempted or late")
-            time.sleep(poll_secs)
-        why = absorb(h, res, commit)
-        if why:
-            raise h.NoVerdict(why)
-        return {**res, "send_secs": round(sent - t0)}
+        if h.in_acceptance() or held(h):
+            raise h.NoVerdict("the train holds the desk")
+        return remote(h, rid, commit, {"tests": tests, "solo": sorted(h.solo_tests(tests))}, run_secs,
+                      alive=lambda: mine() and not h.in_acceptance(), poll_secs=poll_secs)
+    except Unavailable as e:
+        raise h.NoVerdict(str(e)) from None
     finally:
         if mine():
             (h.ST / PICK).unlink(missing_ok=True)
@@ -391,9 +476,7 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
                     todo.append(ks[0])
             if len(fails) < len(us) and (fut is None or not fut.done()):
                 time.sleep(POLL_SECS)
-    # desk seconds fill only what this machine never measured
-    h.save(h.ACCEPT_TIMES, {**dtimes, **h.load(h.ACCEPT_TIMES, {})})
-    h.save(h.ALONE_TIMES, {**dalone, **h.load(h.ALONE_TIMES, {})})
+    fill_times(h, dtimes, dalone)
     out = sorted({t for f in fails.values() for t in f})
     if out:
         lg.write_text("\n".join(logs[k] for k in sorted(logs))[-20000:], encoding="utf-8")
