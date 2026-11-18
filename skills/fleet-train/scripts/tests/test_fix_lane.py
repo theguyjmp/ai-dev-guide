@@ -110,6 +110,13 @@ with tempfile.TemporaryDirectory() as d:
           and "merge-tree --write-tree origin/cloud-base HEAD" in script and "Fix-Check: $t" in script
           and "FIX CHECK OK" in script)
     check("fix-check.sh parses", subprocess.run([BASH, "-n"], input=script.encode()).returncode == 0)
+    check("placeholders become the branch's files; a short command is its own label",
+          "{files}" not in cloud.session_cmd("npx eslint {files}") and "git diff --name-only" in cloud.session_cmd("x {changed}")
+          and cloud.check_label("npx tsc") == "npx" and cloud.check_label("py -3 /q/dup_blocks.py src") == "dup_blocks.py")
+    node = subprocess.run([sys.executable, "-c", "import cloud; print(cloud.check_script(cloud.FIX))"], cwd=str(HERE),
+                          capture_output=True, text=True, env={**os.environ, "HARNESS_STACK": "node"})
+    check("node stack: fix-check.sh is generated and parses", node.returncode == 0 and "FIX CHECK OK" in node.stdout
+          and subprocess.run([BASH, "-n"], input=node.stdout.encode()).returncode == 0, node.stderr[-300:])
     mt = root / "mt"
     git(root, "init", "-q", "-b", "main", str(mt))
     for f, text, ref in (("a.txt", "x", None), ("a.txt", "y", "refs/remotes/origin/cloud-base")):

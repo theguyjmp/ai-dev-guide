@@ -335,7 +335,7 @@ def collect():
             if p.stem in done or p.stem not in owned:
                 p.unlink()
         queued = {q["row"] for q in h.load("queue.json", [])}
-        gone += [n for n in hd if n.startswith(("rebase-", "rebase-claim-")) and n.split("-")[-1] not in queued]
+        gone += [n for n in hd if n.startswith("rebase-") and rebase_row(n) not in queued]
         expire_rebase_claims(hd, st, gone)
         exported = export_conflicts(hd, st)
         if exported:
@@ -545,11 +545,25 @@ def collect_lane(lane: Lane, hd: dict, st: dict) -> dict:
     return {**out, "claimable": len(st[f"{lane.kind}_status"]["claimable"])}
 
 
+CHANGED = f"$(git diff --name-only --diff-filter=AM origin/{BASE}...HEAD)"  # the branch's files, for {changed}/{files}
+
+
+def session_cmd(c: str) -> str:
+    """A train command as the check script runs it: quality scripts from QA_DIR, file placeholders = the branch's files."""
+    return for_session(c).replace("{changed}", CHANGED).replace("{files}", CHANGED)
+
+
+def check_label(c: str) -> str:
+    """The script a check runs (dup_blocks.py), else its first word (npx)."""
+    words = c.split()
+    return next((Path(w).name for w in words if w.endswith(".py")), words[0] if words else "check")
+
+
 def check_script(lane: Lane) -> str:
     """<kind>-check.sh: the train's checks on a lane branch, built from the harness's own commands (no copy to drift). On
     a clean commit that passes, it stamps HEAD with `<stamp><tree>`; collect queues only a tip stamped for its own tree."""
-    checks = [("strict lint", h.CLIPPY_STRICT), ("unit tests", h.P["unit"]),
-              *((c.split()[2].rsplit("/", 1)[-1], for_session(c)) for c in h.QUALITY_CMDS),
+    checks = [("strict lint", session_cmd(h.CLIPPY_STRICT)), ("unit tests", h.P["unit"]),
+              *((check_label(c), session_cmd(c)) for c in h.QUALITY_CMDS),
               ("rules check", SESSION_RULES_CHECK), ("merges with the base", MERGES_CLEAN)]
     body = "".join(f"run '{name}' <<'CMD'\n{cmd}\nCMD\n" for name, cmd in checks if cmd)
     say = f"{lane.kind.upper()} CHECK"
@@ -572,6 +586,11 @@ def cmd_lane(a):
     kind = next(l.kind for l in LANES if l.state == a.cmd)
     s = h.load(STATE, {}).get(f"{kind}_status", {})
     print(json.dumps({"claimable_now": len(s.get("claimable", [])), **s}))
+
+
+def rebase_row(name: str) -> str:
+    """The queued row of a rebase-<row> or rebase-claim-<row> ref (a row may hold dashes: CLEAN-fix-CU-102)."""
+    return name.removeprefix("rebase-claim-") if name.startswith("rebase-claim-") else name.removeprefix("rebase-")
 
 
 def refresh_cloud_base():
