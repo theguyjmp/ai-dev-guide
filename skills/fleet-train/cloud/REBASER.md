@@ -2,6 +2,7 @@
 
 The land train merges queued rows onto `main` in batches. A queued row that no longer merges cleanly is pushed as
 `cloud/rebase-<row>`. Rebase it onto the current `cloud-base` (= the train's main) so the train merges it clean.
+A CLEAN-* row is never yours: its fix lane owns and restacks it. Skip any `cloud/rebase-CLEAN-*` ref.
 
 Every Bash call: `cd /home/user/<repo> && source <env file> && ...` (the shell keeps neither cwd nor env).
 

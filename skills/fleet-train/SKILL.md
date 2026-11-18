@@ -161,6 +161,9 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
   batch: it lands only when lane one lands whole.
 - Rebaser routine (`cloud/REBASER.md`): cloud agents rebase queued rows that stopped merging onto main. Fire it the
   moment a train lands: that is when queued rows stop merging.
+- Rows owned by a fix lane (CLEAN-*, `cloud.lane_owned`) are never sent to the rebasers: a rebase onto cloud-base
+  rewrites the lane's gated sha and breaks a stack on another queued CLEAN row. `send_rebase` is the one place a row
+  goes out and refuses them (`rebase_skip_lane_owned`); a conflicting one waits for its lane to restack it.
 
 ## Run
 1. Set HARNESS_REPO, HARNESS_HOME (state dir parent), HARNESS_WT (fast drive), HARNESS_STACK (rust or node).

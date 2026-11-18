@@ -199,17 +199,49 @@ def batch_rows() -> set:
     return set()
 
 
+def lane_owned(row) -> bool:
+    """True for a row its fix lane owns (CLEAN-*: clean-submit fix batches, cloud fixers and planners), often stacked
+    on another queued CLEAN row. The rebasers never get one: rebased onto cloud-base, its queued sha is rewritten, its
+    stack on the row below breaks and the lane's gated sha is gone. A conflicting one waits in the queue; its lane
+    restacks it when the train's merge conflicts."""
+    return row.startswith(h.quarantine.FIX_PREFIX)
+
+
+def drop_lane_owned_rebases(hd, st, gone):
+    """Lane-owned rows are never out for rebase: their stale rebase_sent marks (which fill_wait counts as out) are
+    cleared and their rebase refs go into gone, so the rebasers drop work already sent. Caller holds the cloud lock."""
+    for row, r in st["rows"].items():
+        if lane_owned(row):
+            r.pop("rebase_sent", None)
+    gone += [n for n in hd if n.startswith("rebase-") and lane_owned(rebase_row(n))]  # rebased-<row>: collect drops it
+
+
+def send_rebase(row, sha, st) -> bool:
+    """Push sha as cloud/rebase-<row> for the rebasers (cloud/REBASER.md); record it only if the push worked. The one
+    place a row goes to the rebasers: a lane-owned row is refused (rebase_skip_lane_owned, once per row and sha).
+    Caller holds the cloud lock (st is cloud.json)."""
+    if lane_owned(row):
+        r = st["rows"].setdefault(row, {})
+        if r.get("rebase_skip") != sha:
+            r["rebase_skip"] = sha
+            h.event("rebase_skip_lane_owned", row=row, sha=sha[:12])
+        return False
+    if h.git("push", "-q", "-f", "origin", f"{sha}:refs/heads/cloud/rebase-{row}", check=False).returncode != 0:
+        return False
+    st["rows"].setdefault(row, {})["rebase_sent"] = sha
+    return True
+
+
 def export_conflicts(hd, st):
     """Queued rows outside the batch in flight that no longer merge onto main go to cloud rebasers as
-    cloud/rebase-<row> (cloud/REBASER.md); rebased while they wait, they merge clean."""
+    cloud/rebase-<row> (cloud/REBASER.md); rebased while they wait, they merge clean. Lane-owned rows wait for
+    their lane (send_rebase)."""
     batch, sent = batch_rows(), 0
     for q in h.load("queue.json", []):
         row, sha = q["row"], q["sha"]
         if row in batch or st["rows"].get(row, {}).get("rebase_sent") == sha or f"rebased-{row}" in hd:
             continue
-        if h.git("merge-tree", "--write-tree", "main", sha, check=False).returncode == 1:
-            h.git("push", "-q", "-f", "origin", f"{sha}:refs/heads/cloud/rebase-{row}", check=False)
-            st["rows"].setdefault(row, {})["rebase_sent"] = sha
+        if h.git("merge-tree", "--write-tree", "main", sha, check=False).returncode == 1 and send_rebase(row, sha, st):
             sent += 1
     return sent
 
@@ -242,9 +274,10 @@ def expire_rebase_claims(hd, st, gone) -> list:
 
 def take_rebased(row, sha, st):
     """Swap a queued row's sha for its cloud rebase, if the row still waits (not in the batch) on the sha we sent.
-    The swap happens under the state lock and leaves claims untouched."""
+    The swap happens under the state lock and leaves claims untouched. A lane-owned row's answer (sent before
+    lane_owned) is never taken: its queued sha stays the lane's."""
     old = st["rows"].get(row, {}).get("rebase_sent")
-    if not old or row in batch_rows():
+    if not old or lane_owned(row) or row in batch_rows():
         return False
     with h.lock("state"):
         queue = h.load("queue.json", [])
@@ -336,6 +369,7 @@ def collect():
                 p.unlink()
         queued = {q["row"] for q in h.load("queue.json", [])}
         gone += [n for n in hd if n.startswith("rebase-") and rebase_row(n) not in queued]
+        drop_lane_owned_rebases(hd, st, gone)
         expire_rebase_claims(hd, st, gone)
         exported = export_conflicts(hd, st)
         if exported:
