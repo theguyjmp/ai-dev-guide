@@ -109,6 +109,66 @@ class RustCounts(Base):
         self.assertEqual(self.problems(r), [])
 
 
+EXPECT = "pub fn f() -> u32 { \"1\".parse().expect(\"n\") }\n"
+
+
+def manifest(name, dev="", normal=""):
+    return (f'[package]\nname = "{name}"\nversion = "0.1.0"\nedition = "2021"\n'
+            + (f'[dependencies]\n{normal} = {{ path = "../{normal}" }}\n' if normal else "")
+            + (f'[dev-dependencies]\n{dev} = {{ path = "../{dev}" }}\n' if dev else ""))
+
+
+WORKSPACE = {"Cargo.toml": '[workspace]\nmembers = ["crates/a", "crates/b", "crates/kit"]\nresolver = "2"\n',
+             "crates/a/Cargo.toml": manifest("a", dev="kit"), "crates/b/Cargo.toml": manifest("b"),
+             "crates/kit/Cargo.toml": manifest("kit"), "crates/a/src/lib.rs": CLEAN_RS, "crates/b/src/lib.rs": CLEAN_RS,
+             "crates/kit/src/lib.rs": "//! kit\n"}
+
+
+class TestCode(Base):
+    """Test code by the tree, never by a hand list: out-of-line #[cfg(test)] modules, crates only dev-dependencies use."""
+
+    def test_out_of_line_cfg_test_module_and_its_submodule(self):
+        r = self.repo({"crates/a/src/lib.rs": CLEAN_RS})
+        self.commit(r, {"crates/a/src/lib.rs": CLEAN_RS + "/// fixture\n#[cfg(test)]\npub(crate) mod fixture;\n",
+                        "crates/a/src/fixture.rs": "mod deep;\n" + EXPECT, "crates/a/src/fixture/deep.rs": EXPECT,
+                        "crates/a/benches/b.rs": EXPECT})
+        self.assertEqual(self.problems(r), [])
+
+    def test_the_same_module_without_cfg_test_is_product(self):
+        r = self.repo({"crates/a/src/lib.rs": CLEAN_RS})
+        self.commit(r, {"crates/a/src/lib.rs": CLEAN_RS + "pub(crate) mod fixture;\n", "crates/a/src/fixture.rs": EXPECT})
+        p = self.problems(r)
+        self.assertEqual(len(p), 1, p)
+        self.assertTrue(p[0].startswith("crates/a/src/fixture.rs:"), p)
+
+    def test_product_counts_and_dev_only_crate_does_not(self):
+        r = self.repo(WORKSPACE)
+        self.assertEqual(rl.rust_tree(r).packages, ("crates/kit/",))
+        self.commit(r, {"crates/kit/src/lib.rs": EXPECT, "crates/a/src/lib.rs": CLEAN_RS + EXPECT})
+        p = self.problems(r)
+        self.assertEqual(len(p), 1, p)
+        self.assertTrue(p[0].startswith("crates/a/src/lib.rs:"), p)
+
+    def test_dev_only_crate_with_a_normal_dependent_counts_again(self):
+        for change in ({"crates/b/Cargo.toml": manifest("b", normal="kit")},
+                       {"crates/a/Cargo.toml": manifest("a", normal="kit")}):
+            with self.subTest(change=list(change)):
+                self.tearDown(), self.setUp()
+                r = self.repo({**WORKSPACE, "crates/kit/src/lib.rs": EXPECT})
+                self.commit(r, change)  # the manifest only: no file of the crate changed
+                p = self.problems(r)
+                self.assertEqual(len(p), 1, p)
+                self.assertTrue(p[0].startswith("crates/kit/src/lib.rs:"), p)
+
+    def test_cargo_failing_is_a_problem_and_nothing_is_dev_only(self):
+        r = self.repo({**WORKSPACE, "Cargo.toml": "[workspace\n"})
+        self.commit(r, {"crates/kit/src/lib.rs": EXPECT})
+        p = self.problems(r)
+        self.assertEqual(len(p), 2, p)
+        self.assertIn("cargo metadata failed", p[0])
+        self.assertTrue(p[1].startswith("crates/kit/src/lib.rs:"), p)
+
+
 class Debt(Base):
     def test_save_refuses_growth_and_tighten_lowers(self):
         self.debt({"expect": {"f.rs": 2}})

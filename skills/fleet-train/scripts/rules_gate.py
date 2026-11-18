@@ -1,7 +1,8 @@
-"""Ratcheted rule checks for the land train: rules no lint config holds, counted per file. No build, no LLM.
+"""Ratcheted rule checks for the land train: rules no lint config holds, counted per file. No build, no LLM (rust
+reads `cargo metadata --no-deps` to find test-only crates).
 
 Run by harness.quality_problems (train, pre-push) and by cloud sessions (`check --state <qa dir>`). Per product file
-(rules_langs.LANGS; test code out): swallow (dropped error or silent default; a `// default: <why>` or
+(rules_langs.LANGS; test code out, TreeCode): swallow (dropped error or silent default; a `// default: <why>` or
 `// best-effort: <why>` comment exempts), expect, panic, allow (a silenced lint), owner (a public type named like
 another module's ARCHITECTURE `Forbidden types:` stem; `Overlaps: <path>::<Name>` exempts one), text (spec and
 CLAUDE.md over the overhaul.toml [text] caps, which may only be tightened). A file fails above its count in
@@ -133,6 +134,18 @@ def default_state() -> Path:
 
 
 # ------------------------------------------------------------------ scanning
+class TreeCode:
+    """The one product/test classification of the tree at `cwd`: the language's file rule plus what the tree shows
+    (Lang.tree; rust: an out-of-line `#[cfg(test)] mod x;` file, a crate used only as a [dev-dependencies] entry).
+    Built per gate call: a long-lived train's tree changes every batch."""
+
+    def __init__(self, lang: rl.Lang, cwd):
+        self.lang, self.tree = lang, lang.tree(Path(cwd))
+
+    def product(self, rel: str) -> bool:
+        return self.lang.is_product(rel) and not self.tree.test(rel)
+
+
 def scan(lang: rl.Lang, rel: str, text: str, arch: Arch | None, rules=None) -> list:
     """Every Hit of `rules` (default all) in product file `rel` with contents `text`."""
     if not lang.is_product(rel):
@@ -213,25 +226,27 @@ def tree_arch(cwd) -> Arch:
     return read_arch(p.read_text(encoding="utf-8", errors="replace")) if p.exists() else Arch()
 
 
-def product_files(lang: rl.Lang, cwd) -> list:
-    r = git(cwd, "ls-files", "--", *lang.roots)
-    return sorted(f for f in r.stdout.split() if lang.is_product(f) and (Path(cwd) / f).exists())
+def product_files(code: TreeCode, cwd, roots=None) -> list:
+    r = git(cwd, "ls-files", "--", *(roots or code.lang.roots))
+    return sorted(f for f in r.stdout.split() if code.product(f) and (Path(cwd) / f).exists())
 
 
-def file_hits(lang: rl.Lang, cwd, rel, arch, caps, rules=None) -> list:
+def file_hits(code: TreeCode, cwd, rel, arch, caps, rules=None) -> list:
     """Every Hit of `rules` (default all) in the product or text file `rel` of the tree at `cwd`."""
+    if not is_text(rel) and not code.product(rel):
+        return []
     text = (Path(cwd) / rel).read_text(encoding="utf-8", errors="replace")
     if is_text(rel):
         return text_hits(rel, text, caps) if "text" in (rules or RULE) else []
-    return scan(lang, rel, text, arch, rules)
+    return scan(code.lang, rel, text, arch, rules)
 
 
 def counts(lang: rl.Lang, cwd, files=None, rules=None) -> dict:
     """{rule: {file: n}} over `files` (default every tracked product and text file) of the tree at `cwd`."""
-    arch, caps = tree_arch(cwd), TextCaps.of(cwd)
+    arch, caps, code = tree_arch(cwd), TextCaps.of(cwd), TreeCode(lang, cwd)  # no metadata: stricter, never looser
     out = {r: {} for r in (rules or RULE)}
-    for rel in files if files is not None else product_files(lang, cwd) + text_files(cwd):
-        for h in file_hits(lang, cwd, rel, arch, caps, rules):
+    for rel in files if files is not None else product_files(code, cwd) + text_files(cwd):
+        for h in file_hits(code, cwd, rel, arch, caps, rules):
             out[h.rule][rel] = out[h.rule].get(rel, 0) + 1
     return out
 
@@ -310,12 +325,28 @@ def added_lines(cwd, base, rel) -> set:
     return out
 
 
-def count_problems(lang: rl.Lang, cwd, base, st, changed) -> list:
+def flipped(code: TreeCode, cwd, base, scratch) -> tuple:
+    """(product files of the packages test-only at `base` but not in `cwd`, problem lines): a manifest change that
+    gives a test crate a normal dependent makes its files product, though none of them changed."""
+    sha = git(cwd, "rev-parse", base).stdout.strip()
+    with tree_at(cwd, sha, scratch) as wt:
+        was = code.lang.tree(wt) if wt is not None else None
+    if was is None or was.error:
+        return [], [f"rules gate: no test-only packages of {base}: {was.error if was else 'cannot add its worktree'}"]
+    gone = tuple(d for d in was.packages if d not in code.tree.packages)
+    return (product_files(code, cwd, gone) if gone else []), []
+
+
+def count_problems(lang: rl.Lang, cwd, base, st, changed, scratch) -> list:
     debt = load_debt(st)["rules"]
-    arch, caps = tree_arch(cwd), TextCaps.of(cwd)
-    files = product_files(lang, cwd) if ARCH in changed else [f for f in changed if lang.is_product(f)]
-    files += [f for f in changed if is_text(f)]
-    out = []
+    arch, caps, code = tree_arch(cwd), TextCaps.of(cwd), TreeCode(lang, cwd)
+    files = product_files(code, cwd) if ARCH in changed else [f for f in changed if code.product(f)]
+    out = [f"rules gate: {code.tree.error} (it classifies product and test packages)"] if code.tree.error else []
+    flip = []
+    if any(f.rsplit("/", 1)[-1] in lang.manifests for f in changed):  # flipped files: checked in full, as if changed
+        flip, err = flipped(code, cwd, base, scratch)
+        out += err
+    files = sorted(set(files) | set(flip)) + [f for f in changed if is_text(f)]
     if "overhaul.toml" in changed:
         loose = caps.loosened(TextCaps.parse(git(cwd, "show", f"{base}:overhaul.toml").stdout))
         if loose:
@@ -324,7 +355,7 @@ def count_problems(lang: rl.Lang, cwd, base, st, changed) -> list:
     hint = "" if debt else "; a new project records main's counts once: rules_gate.py init"
     for rel in files:
         by = {}
-        for h in file_hits(lang, cwd, rel, arch, caps, None if rel in changed else ["owner"]):
+        for h in file_hits(code, cwd, rel, arch, caps, None if rel in changed or rel in flip else ["owner"]):
             by.setdefault(h.rule, []).append(h)
         for rid, hs in by.items():
             allowed = debt.get(rid, {}).get(rel, 0)
@@ -495,7 +526,7 @@ def problems(cwd, base="main", st=None, scratch=None, lang=None, plan="spec", la
     changed = changed_files(cwd, base)
     if changed is None:
         return [f"rules gate: git diff against {base} failed in {cwd}"]
-    return count_problems(lg, cwd, base, st, changed) + (
+    return count_problems(lg, cwd, base, st, changed, Path(scratch or st)) + (
         plan_problems(cwd, base, st, Path(scratch or st), changed, landing, always=plan == "always")
         if plan != "off" else [])
 

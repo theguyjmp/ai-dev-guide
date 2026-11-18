@@ -1,7 +1,7 @@
 """Per-language scanners for rules_gate.py. A new language is one more Lang in LANGS."""
 from __future__ import annotations
 
-import os, re, sys
+import json, os, re, subprocess, sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -18,6 +18,15 @@ def qs_import(name):
 
 
 @dataclass(frozen=True)
+class TreeTests:
+    """Test code a language finds from the whole tree, beyond file names: `test(rel)`, its test-only packages (dirs)
+    and `error` when the package metadata could not be read (then no package is test-only)."""
+    test: Callable[[str], bool] = lambda rel: False
+    packages: tuple = ()
+    error: str = ""
+
+
+@dataclass(frozen=True)
 class Lang:
     name: str
     roots: tuple  # git ls-files pathspecs
@@ -29,6 +38,8 @@ class Lang:
     comment: dict = field(default_factory=dict)  # rule id -> regexes over comments
     keep_empty_braces: bool = False  # JS: an empty catch is one statement
     skip_spans: Callable[[list], list] = lambda toks: []  # test code inside a product file
+    tree: Callable[[Path], TreeTests] = lambda cwd: TreeTests()  # test code the tree shows (built once per gate call)
+    manifests: tuple = ()  # file names whose change can move a package between test and product
 
 
 def statements(lang: Lang, text: str) -> list:
@@ -78,9 +89,103 @@ DECODE = r"\b(?:parse|from_value|from_str|from_slice|from_reader)(?:::<.*?>)?\([
 
 def rust_product(rel: str) -> bool:
     parts = rel.split("/")
-    if not rel.endswith(".rs") or "tests" in parts[:-1] or RUST_TEST_NAME.search(parts[-1]):
+    if not rel.endswith(".rs") or {"tests", "benches"} & set(parts[:-1]) or RUST_TEST_NAME.search(parts[-1]):
         return False
     return parts[0] == "src" or (parts[0] == "crates" and len(parts) > 3 and parts[2] == "src")
+
+
+def dev_only_crates(cwd) -> tuple:
+    """The crate dirs of the workspace at `cwd` used only as a [dev-dependencies] entry, from `cargo metadata
+    --no-deps` (computed, never a hand list; a crate no member depends on is product). No Cargo.toml: (). RuntimeError
+    when cargo gives no metadata."""
+    root = Path(cwd).resolve()
+    if not (root / "Cargo.toml").exists():
+        return ()
+    try:
+        r = subprocess.run(["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"], cwd=str(root),
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        meta = json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+        raise RuntimeError(f"cargo metadata failed in {root}: {e}") from e
+    if meta is None:
+        raise RuntimeError(f"cargo metadata failed in {root}: {r.stderr.strip()[-300:]}")
+    key = lambda p: os.path.normcase(os.path.realpath(p))  # noqa: E731
+    dirs = {key(Path(p["manifest_path"]).parent): Path(p["manifest_path"]).parent for p in meta["packages"]}
+    kinds = {}
+    for p in meta["packages"]:
+        for d in p["dependencies"]:
+            if d.get("path") and key(d["path"]) in dirs:
+                kinds.setdefault(key(d["path"]), set()).add(d.get("kind") or "normal")
+    out = []
+    for k, ks in kinds.items():
+        try:
+            rel = Path(dirs[k]).resolve().relative_to(root).as_posix()
+        except ValueError:  # a member outside the tree holds none of its files
+            continue
+        if ks == {"dev"} and rel != ".":
+            out.append(rel + "/")
+    return tuple(sorted(out))
+
+
+class RustModules:
+    """Out-of-line test modules of the tree at `cwd`: a `#[cfg(test)] mod x;` file and its submodules."""
+
+    def __init__(self, cwd):
+        self.cwd, self._mods, self._test = Path(cwd), {}, {}
+
+    def test_module(self, rel: str) -> bool:
+        """Whether every declaration of module file `rel` (in the parent files that exist) is under `#[cfg(test)]`
+        or in a test module itself."""
+        if rel not in self._test:
+            self._test[rel] = False  # a cycle of declarations is no test module
+            name, parents = module_parents(rel)
+            seen = [test or self.test_module(p) for p in parents for test in self.decls(p).get(name, ())]
+            self._test[rel] = bool(seen) and all(seen)
+        return self._test[rel]
+
+    def decls(self, rel: str) -> dict:
+        """{module name: [under #[cfg(test)]]} of the out-of-line `mod x;` declarations in file `rel`."""
+        if rel not in self._mods:
+            p, out = self.cwd / rel, {}
+            if p.is_file():
+                rs = qs_import("rust_src")
+                toks = rs.tokens(p.read_text(encoding="utf-8", errors="replace"))
+                test = {k for a, b in rs.cfg_test_spans(toks) for k in range(a, b + 1)}
+                for i in range(len(toks) - 6):  # `#[cfg(test)] [pub(..)] mod x;`, rust_src's attribute match
+                    if [t for _, t, _ in toks[i:i + 6]] == ["#", "[", "cfg", "(", "test", ")"]:
+                        j = i + 7
+                        while j < len(toks) and toks[j][1] not in ("{", ";"):
+                            j += 1
+                        if j < len(toks) and toks[j][1] == ";" and toks[j - 2][1] == "mod":
+                            test.add(j - 2)
+                for i in range(len(toks) - 2):
+                    if toks[i][1] == "mod" and toks[i + 1][0] == "ident" and toks[i + 2][1] == ";":
+                        out.setdefault(toks[i + 1][1], []).append(i in test)
+            self._mods[rel] = out
+        return self._mods[rel]
+
+
+def module_parents(rel: str) -> tuple:
+    """(module name, [files that may declare it]) of a .rs file under a src/ dir; ("", []) for a crate root."""
+    parts = rel.split("/")
+    src = parts.index("src") if "src" in parts else -1
+    rest = parts[src + 1:]
+    if src < 0 or rest in (["lib.rs"], ["main.rs"]) or rest[:1] == ["bin"]:
+        return "", []
+    name, up = (parts[-2], parts[:-2]) if rest[-1] == "mod.rs" else (parts[-1][:-3], parts[:-1])
+    if len(up) == src + 1:
+        return name, ["/".join(up + ["lib.rs"]), "/".join(up + ["main.rs"])]
+    return name, ["/".join(up[:-1] + [up[-1] + ".rs"]), "/".join(up + ["mod.rs"])]
+
+
+def rust_tree(cwd) -> TreeTests:
+    """Rust test code beyond file names: out-of-line `#[cfg(test)]` module files, crates only dev-dependencies use."""
+    try:
+        dev, err = dev_only_crates(cwd), ""
+    except RuntimeError as e:
+        dev, err = (), str(e)
+    mods = RustModules(cwd)
+    return TreeTests(lambda rel: rel.startswith(dev) or mods.test_module(rel), dev, err)
 
 
 def rust_items(toks: list) -> list:
@@ -104,6 +209,7 @@ RUST = Lang(
     comments=lambda text: [],
     items=rust_items,
     skip_spans=lambda toks: qs_import("rust_src").cfg_test_spans(toks),
+    tree=rust_tree, manifests=("Cargo.toml",),
     code={
         "swallow": (r"^let _=(?!write(?:ln)?!\().*\(",  # writeln! into a String cannot fail
                     r"^(?!let |return\b)[^=]*\.ok\(\);$",  # a statement that only drops the error
