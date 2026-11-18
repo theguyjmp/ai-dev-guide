@@ -5,14 +5,11 @@ rows of `spec/FUNCTIONS.md`, exactly like the rows already planned there. Builde
 frontier). You write no product code beyond the stubs the plan needs.
 
 1. Setup: if `/opt/harness/env.sh` is missing run `bash tools/cloud/setup.sh 2>&1 | tail -5`, then `source /opt/harness/env.sh`.
-2. Claim a task: `git fetch -q origin harness-cloud`, read `git show origin/harness-cloud:plan-tasks.txt` (one phase id
-   per line). For each, make a UNIQUE claim commit and push it to a new ref:
-   `git commit -q --allow-empty -m "claim plan <phase> $(date +%s%N)" && git push -q origin HEAD:refs/heads/cloud/plan-claim-<phase>`
-   (a unique commit makes the push fail when another session holds the ref; pushing the same commit would "succeed" as
-   up-to-date and two sessions would plan the same phase). Then `git reset -q --hard origin/cloud-base`. The first push
-   that succeeds is yours. None left: stop and report `NO TASK`.
-3. Branch `plan/cloud-<phase>` from `origin/cloud-base` (or from `cloud/wip-plan-<phase>` if it exists: read its HANDOFF
-   first; use `<id>` = `plan-<phase>` below). Read with grep and line ranges only (no whole files over 300 lines):
+2. Claim a task: `bash tools/cloud/claim_task.sh plan`. It claims the first free phase of `plan-tasks.txt` on
+   harness-cloud (unique commit pushed to `cloud/plan-claim-<phase>`) and checks out `plan/cloud-<phase>` from the
+   base, or from `cloud/wip-plan-<phase>` merged with the base (use `<id>` = `plan-<phase>` below; read its HANDOFF
+   first). `NO TASK`: stop and report it. `MERGE CONFLICT`: resolve, commit.
+3. Read with grep and line ranges only (no whole files over 300 lines):
    the phase's ROADMAP rows; 3 recent planned rows in FUNCTIONS.md and their acceptance tests as the pattern; the
    ARCHITECTURE bullets of the modules your rows name; the decision log for ids in use.
 4. Plan at most 15 rows of that phase (the first ones still in ROADMAP whose deps are planned or proven). For each row:

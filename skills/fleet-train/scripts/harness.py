@@ -1017,11 +1017,18 @@ def cmd_clean_submit(a):
         sys.exit("commit first")
     sha = git("rev-parse", "HEAD", cwd=p).stdout.strip()
     with lock("state"):
-        queue = load("queue.json", [])
-        queue.append({"row": f"CLEAN-{a.name}", "sha": sha, "ts": now(), "slot": a.slot})
-        save("queue.json", queue)
-    event("submit", slot=a.slot, row=f"CLEAN-{a.name}", sha=sha)
+        queue_clean(a.name, sha, a.slot, front=a.front)
     print(json.dumps({"ok": True}))
+
+
+def queue_clean(name, sha, slot, front=False) -> None:
+    """Queue sha as row CLEAN-<name> (caller holds the state lock). front: ahead of every queued row (ts = oldest - 1;
+    the train picks by ts), for a fix the owner wants landed first (cloud.py lane fix)."""
+    row = f"CLEAN-{name}"
+    rest = [q for q in load("queue.json", []) if q["row"] != row]
+    ts = min([now()] + [q["ts"] for q in rest]) - 1 if front else now()
+    save("queue.json", rest + [{"row": row, "sha": sha, "ts": ts, "slot": slot}])
+    event("submit", slot=slot, row=row, sha=sha)
 
 
 def known_red() -> dict:
@@ -1939,6 +1946,7 @@ def main():
     p = sp.add_parser("clean-start"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
     p = sp.add_parser("self-review"); p.add_argument("--slot", type=int, required=True)
     p = sp.add_parser("clean-submit"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
+    p.add_argument("--front", action="store_true", help="queue ahead of every row (a fix the owner wants first)")
     sp.add_parser("note", help="append one line to the dated log").add_argument("text")
     sp.add_parser("pick-accept", help="desk acceptance of queued rows (on: state/pick-accept-on)")
     a = ap.parse_args()

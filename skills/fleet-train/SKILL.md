@@ -110,6 +110,14 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
   is a UNIQUE commit pushed to a new ref (an identical commit pushes as a no-op "success", so two sessions would both win).
   Everything bases on `cloud-base`, never main. Sessions push `cloud/wip-<row>` + `HANDOFF-<row>.md` often so another
   session or account resumes (`cloud/HANDOFF-ACCOUNT.md`).
+- Fixers are a third routine, for clean-up packets: the manager lists task ids in `state/fix-tasks.txt` (text in
+  `state/fix-tasks/<id>.md`); `collect` publishes `fix-tasks.txt`, the task texts and `fix-check.sh` (the train's
+  checks plus a merge check with the base; it stamps the passing tree). A session claims one task with
+  `claim_task.sh fix` (planners use `claim_task.sh plan`: one claim script), follows `FIXER.md` (red test first, fix
+  in the owner, self-review twice) and pushes `fix/cloud-<task>`; a stamped tip queues as CLEAN-fix-<task> ahead of
+  every row (`queue_clean(front=True)`, also `clean-submit --front`), anything else goes back to
+  `cloud/wip-fix-<task>` with `fix-rejects/<task>.md`. `cloud.py fixes` shows the lane. One `Lane` type carries
+  every task lane, so a planner collector is the same Lane with a todo of unplanned phases.
 - The real caps on agent count are the frontier (ready rows: deps proven, not claimed) and the landing rate of the
   train, not slots. More builders than frontier rows idle; more than the train lands pile up rejects. Run planners to
   grow the frontier, and size builders to min(frontier, what the train lands).
