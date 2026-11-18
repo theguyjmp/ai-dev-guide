@@ -1,7 +1,8 @@
 """Desk acceptance split: units cover every test once; this machine runs the parallel unit and the desk the solo units,
 and this machine takes the solo units the desk has not started; a desk fail reaches the verdict and last-gate.txt; a
 desk unit with no verdict (error, other tests, other head, late, env fault) runs here and is never a pass; the desk
-down sends everything here; state/desk-on turns it on, HARNESS_DESK=0/1 overrides; the desk side writes its result.
+down sends everything here; this machine busy at gate start (cpu_load() above BUSY_LOAD) keeps no unit while the
+desk is up and still runs everything when the desk is down or errs; state/desk-on turns it on, HARNESS_DESK=0/1 overrides; the desk side writes its result.
 
   py -3 tests/test_desk.py
 """
@@ -102,6 +103,9 @@ def test_units_and_pick():
 
 def test_run_desk(us):
     desk.POLL_SECS = 0.01
+    real_load, desk.cpu_load = desk.cpu_load, (lambda secs=0: 5.0)  # an idle machine (this one may be loaded)
+    lv = real_load(0.2)
+    check("cpu_load reads a busy % or None", lv is None or 0.0 <= lv <= 100.0, lv)
     h.save(h.ALONE_TIMES, {T[3]: 400})
     calls = fake_h(par_secs=0.3)
     out = desk.run_desk(h, T, desk_cls=FakeDesk)
@@ -144,6 +148,42 @@ def test_run_desk(us):
     h.run_tests = lambda tests, timeout=1800, solo=None: ["build"] if solo else []
     check("desk down: a build failure fails the gate", desk.run_desk(h, T, desk_cls=FakeDesk) == ["build"])
     FakeDesk.why0 = ""
+
+    check("local_ok: unknown or at most BUSY_LOAD keeps units here, above does not",
+          desk.local_ok(None) and desk.local_ok(desk.BUSY_LOAD) and not desk.local_ok(desk.BUSY_LOAD + 1))
+    check("pick busy: none here while the desk is up; the desk takes the parallel unit first, then solo longest",
+          desk.pick(us, [2, 0, 1], "here", here=False) == [] and desk.pick(us, [2, 0, 1], "desk", here=False) == [0]
+          and desk.pick(us, [2, 1], "desk", here=False) == [1])
+    check("pick busy, desk out: here takes every unit left",
+          desk.pick(us, [2, 0, 1], "here", desk_up=False, here=False) == [0, 1, 2])
+    desk.cpu_load = lambda secs=0: 95.0
+    calls = fake_h(par_secs=0.05)
+    out = desk.run_desk(h, T, desk_cls=FakeDesk)
+    dk, ev = FakeDesk.last, h.read_events()[-1]
+    check("busy: nothing here, the desk ran every unit once, the parallel one first",
+          out == [] and calls == [] and dk.ran[0] == 0 and sorted(dk.ran) == list(range(len(us)))
+          and dk.tests == set(T), out, len(calls), dk.ran)
+    check("busy: the gate event carries the load and the decision",
+          ev.get("cpu_load") == 95 and ev.get("local_ok") is False and ev.get("desk") == len(us), ev)
+    desk.cpu_load = lambda secs=0: 10.0
+    calls = fake_h(par_secs=0.3)
+    out = desk.run_desk(h, T, desk_cls=FakeDesk)
+    check("idle: today's split, here only the parallel unit, the desk every solo unit",
+          out == [] and calls == [(PAR, [])] and FakeDesk.last.tests == SOLO, out, len(calls))
+    desk.cpu_load = lambda secs=0: 95.0
+    calls = fake_h()
+    FakeDesk.why0 = "remote-host unreachable"
+    out = desk.run_desk(h, T, desk_cls=FakeDesk)
+    check("busy, desk down: every unit here in one call, each test once",
+          out == [] and calls == [(sorted(set(T)), sorted(SOLO))], len(calls))
+    FakeDesk.why0 = ""
+    calls = fake_h(red_local=[PAR[0]])
+    FakeDesk.script = {0: "error"}
+    out = desk.run_desk(h, T, desk_cls=FakeDesk)
+    check("busy, desk error on its first unit: it and every other unit run here, local reds count",
+          out == [PAR[0]] and FakeDesk.last.ran == [0] and ran_once(calls, []), out, FakeDesk.last.ran)
+    FakeDesk.script = {}
+    desk.cpu_load = lambda secs=0: 5.0
 
 
 def test_desk_poll():

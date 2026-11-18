@@ -1,5 +1,5 @@
 """The desk: a second Windows machine (ssh, cmd shell) running tests from a git bundle. Cargo: acceptance split (solo
-units there, the rest here; no verdict runs here). Other runners: every test run there (`job`); no verdict raises
+units there, the rest here; busy here: all there; no verdict runs here). Other runners: every test run there (`job`); no verdict raises
 Unavailable. On with <state>/desk-on or [desk] host; HARNESS_DESK=0/1 overrides.
 
   py -3 desk.py accept --rid R   # desk side (run.cmd)
@@ -46,6 +46,8 @@ LINK_SECS = 6.0
 SOLO_SECS = 120.0  # a solo test with no recorded alone run
 LATE = (3.0, 1500.0)  # no result after 3 x the unit's cost + 25 min (a cold build): no verdict
 POLL_SECS = 20
+BUSY_LOAD = 70.0  # CPU % at gate start above which no unit runs here (a loaded machine is far slower than the desk)
+LOAD_SECS = 2.0
 KIT_SIG = "desk-kit.json"
 LOCAL_ONLY = ("HARNESS_HOME", "HARNESS_REPO", "HARNESS_WT", "HARNESS_DESK", "HARNESS_LOG_DIR", "HARNESS_QS",
               "HARNESS_REMOTE_", "HARNESS_CLOUD_")  # paths or switches of this machine: never forwarded
@@ -259,11 +261,38 @@ def units(tests, solo: set, times: dict, alone: dict, n: int) -> list:
                         key=lambda u: (-u["cost"], u["tests"]))
 
 
-def pick(us: list, todo: list, machine: str, desk_up: bool = True) -> list:
-    """Unit indices `machine` ("here" | "desk") runs next as one run_tests call. The desk takes one solo unit; here
-    takes the lowest index; with the desk out, here takes every unit left."""
-    left = sorted(todo) if machine == "here" else [k for k in sorted(todo) if us[k]["solo"]]
-    return left if machine == "here" and not desk_up else left[:1]
+def cpu_load(secs: float = LOAD_SECS):
+    """CPU busy % over `secs`, None if unreadable (the idle split). Never raises."""
+    try:
+        if os.name != "nt":
+            return 100.0 * os.getloadavg()[0] / (os.cpu_count() or 1)
+        import ctypes
+        from ctypes import wintypes
+
+        def snap():
+            ft = [wintypes.FILETIME() for _ in range(3)]  # idle, kernel + idle, user
+            if not ctypes.windll.kernel32.GetSystemTimes(*(ctypes.byref(f) for f in ft)):
+                raise OSError("GetSystemTimes failed")
+            return [(f.dwHighDateTime << 32) | f.dwLowDateTime for f in ft]
+        a = snap()
+        time.sleep(secs)
+        idle, kern, user = (y - x for x, y in zip(a, snap()))
+        return 100.0 * (kern + user - idle) / (kern + user) if kern + user > 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def local_ok(load) -> bool:
+    """Units may run here: load unknown or at most BUSY_LOAD."""
+    return load is None or load <= BUSY_LOAD
+
+
+def pick(us: list, todo: list, machine: str, desk_up: bool = True, here: bool = True) -> list:
+    """Unit indices `machine` ("here" | "desk") runs next as one run_tests call; the split's one owner. The desk takes
+    one solo unit, here the lowest index; busy (not here): here none, the desk the lowest; desk out: here all left."""
+    if machine == "here":
+        return sorted(todo) if not desk_up else sorted(todo)[:1] if here else []
+    return [k for k in sorted(todo) if us[k]["solo"] or not here][:1]
 
 
 PICK = "desk-pick.json"  # {"pid", "start", "rid"} of harness.pick_accept_queue's desk run
@@ -411,6 +440,8 @@ def run(h, tests, timeout=1800):
 
 def run_desk(h, tests, timeout=1800, desk_cls=Desk):
     t0 = time.time()
+    load = cpu_load()
+    here = local_ok(load)
     us = units(tests, h.solo_tests(tests), h.load(h.ACCEPT_TIMES, {}), h.load(h.ALONE_TIMES, {}), UNITS)
     sha = h.git("rev-parse", "HEAD", cwd=h.TRAIN).stdout.strip()
     gid = f"{sha[:12]}-{int(t0) % 1000000}"
@@ -433,14 +464,14 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
                 logs[k] = log
 
     def give(machine, desk_up):
-        ks = pick(us, todo, machine, desk_up)
+        ks = pick(us, todo, machine, desk_up, here)
         todo[:] = [k for k in todo if k not in ks]
         return ks
 
     with ThreadPoolExecutor(1) as pool:
-        fut = pool.submit(local, give("here", True)) if us else None  # desk setup runs beside it
+        fut = pool.submit(local, give("here", True)) if us and here else None
         desk, skipped = None, "no solo units"
-        if any(u["solo"] for u in us):
+        if any(u["solo"] or not here for u in us):
             desk = desk_cls(h, gid, sha)
             skipped = desk.why
         if skipped:
@@ -485,7 +516,7 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
             solo_units=sum(1 for u in us if u["solo"]),
             solo_here=sum(1 for k, v in where.items() if v == "here" and us[k]["solo"]),
             here_secs=round(busy["here"]), desk_secs=round(busy["desk"]), secs=round(time.time() - t0),
-            n=len(set(tests)), fails=len(out))
+            cpu_load=None if load is None else round(load), local_ok=here, n=len(set(tests)), fails=len(out))
     want = set(tests)
     return [f for f in out if f in want] or out
 
