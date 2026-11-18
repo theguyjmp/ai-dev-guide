@@ -1,0 +1,8 @@
+
+running 280 tests
+............................i.......iii..................................error: test failed, to rerun pass `-p acme-doc --lib`
+
+Caused by:
+  process didn't exit successfully: `C:/work/target/debug/deps/acme_doc-1a8dff8ed1282b16.exe --quiet` (exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)
+error: 1 target failed:
+    `-p acme-doc --lib`

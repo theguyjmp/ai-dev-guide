@@ -1,0 +1,21 @@
+ 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s
+
+
+running 151 tests
+....................................................................................... 87/151
+...........................................................test device::tests::draws_and_reads_back_the_frame has been running for over 60 seconds
+test device::tests::keyed_geometry_is_counted_drawn_and_freed_per_key has been running for over 60 seconds
+test frame::tests::the_verb_reports_frames_and_every_cull_counter has been running for over 60 seconds
+test sheet2d::tests::a_bad_sheet_param_is_refused_on_its_field has been running for over 60 seconds
+test sheet2d::tests::the_verb_draws_a_sheet_sweep_and_reports_the_culled_fills has been running for over 60 seconds
+.
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p acme-view --lib`
+
+Caused by:
+  process didn't exit successfully: `C:/work/target/debug/deps/acme_view-e29302db3205c3de.exe --quiet` (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)
+error: 1 target failed:
+    `-p acme-view --lib`

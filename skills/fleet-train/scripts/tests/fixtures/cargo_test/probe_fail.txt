@@ -1,0 +1,33 @@
+
+running 280 tests
+.............................i.....i...i.i................................ 74/280
+probe_forced_failure::probe_fails_on_purpose --- FAILED
+.....i................................................................................. 162/280
+.........................i.................................. 222/280
+variable_eval::tests::test_a_malformed_expression_is_refused_with_its_field_and_position --- FAILED
+ii.......................i...............................
+failures:
+
+---- probe_forced_failure::probe_fails_on_purpose stdout ----
+
+thread 'probe_forced_failure::probe_fails_on_purpose' (50092) panicked at crates\doc\src\lib.rs:238:13:
+assertion `left == right` failed: forced failure
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- variable_eval::tests::test_a_malformed_expression_is_refused_with_its_field_and_position stdout ----
+
+thread 'variable_eval::tests::test_a_malformed_expression_is_refused_with_its_field_and_position' (26348) panicked at crates\doc\src\variable_eval.rs:72:9:
+Some(("unexpected the end of the expression, expected a value at 1:4", Some("expr")))
+
+
+failures:
+    probe_forced_failure::probe_fails_on_purpose
+    variable_eval::tests::test_a_malformed_expression_is_refused_with_its_field_and_position
+
+test result: FAILED. 269 passed; 2 failed; 9 ignored; 0 measured; 0 filtered out; finished in 2.33s
+
+error: test failed, to rerun pass `-p acme-doc --lib`
+error: 1 target failed:
+    `-p acme-doc --lib`

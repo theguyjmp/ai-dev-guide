@@ -1,0 +1,309 @@
+
+running 280 tests
+test components::tests::a_part_without_props_sits_at_the_origin ... ok
+test components::tests::bytes_resident_counts_the_four_arrays ... ok
+test changed::tests::ids_are_every_touched_record_once_ascending ... ok
+test components::tests::check_load_takes_only_components ... ok
+test components::tests::props_fill_every_array ... ok
+test components::tests::a_bad_prop_is_corrupt_naming_the_part ... ok
+test config::csv::tests::cells_with_separators_or_quotes_are_quoted ... ok
+test config::csv::tests::formula_starts_are_neutralised ... ok
+test config::csv::tests::parse_reads_quotes_crlf_and_drops_blank_lines ... ok
+test config::csv::tests::parse_refuses_bad_quotes ... ok
+test config::csv::tests::export_columns_include_names_only_a_configuration_sets ... ok
+test config::csv::tests::header_is_checked ... ok
+test config::csv::tests::part_numbers_round_trip_in_a_last_column ... ok
+test config::csv::tests::table_round_trips_through_export_and_import ... ok
+test config::edit::tests::add_appends_in_order_and_refuses_a_taken_name ... ok
+test config::csv::tests::rows_are_checked ... ok
+test config::edit::tests::apply_refuses_a_stale_or_out_of_limits_override ... ok
+test config::edit::tests::apply_sets_overrides_and_the_active_name ... ok
+test config::edit::tests::override_of_the_active_configuration_applies_at_once ... ok
+test config::edit::tests::override_refuses_unknown_names_and_bad_expressions ... ok
+test config::edit::tests::override_stores_the_expression_only_while_inactive ... ok
+test config::named::tests::a_part_number_names_a_configuration_and_removing_it_forgets_both ... ok
+test config::table::tests::an_edit_keeps_the_fields_it_leaves_out_and_merges_properties ... ok
+test config::visibility::tests::chains_are_fine_and_loops_are_cycles ... ok
+test config::visibility::tests::check_names_unknown_self_and_cycle ... ok
+test config_input::tests::add_stores_the_input_and_assigns_its_default ... ok
+test config_input::tests::set_in_stores_the_configuration_value_and_refuses_unknowns ... ok
+test config_variant::tests::config_names_follow_the_part_number ... ok
+test expr_roots::r4505a_plan::r4505a_stub ... ignored, R4505a builds expr_roots.rs
+test config_variant::tests::template_splits_text_and_placeholders ... ok
+test config_variant::tests::stored_part_numbers_are_checked_on_read ... ok
+test ext::tests::a_key_name_claimed_twice_is_refused ... ok
+test ext::tests::a_damaged_member_refuses_corrupt_naming_key_and_owner_and_changes_nothing ... ok
+test doc_locale::tests::only_length_units_are_lengths ... ok
+test ext::tests::an_old_document_loads_reads_the_same_and_round_trips_unknown_members_byte_equal ... ok
+test function_define::r4507b_plan::r4507b_stub ... ignored, R4507b builds function_define.rs
+test ext::tests::an_upgrade_lifts_an_older_stored_shape ... ok
+test feature_rename::tests::only_reference_keys_are_rewritten ... ok
+test doc_locale::tests::separators_follow_the_table ... ok
+test ext::tests::record_ids_are_never_reused_after_the_highest_is_deleted ... ok
+test feature_suppress::tests::the_first_suppressed_input_blocks ... ok
+test function_import::r4504_plan::r4504_stub ... ignored, R4504 builds function_import.rs
+test function_list::r4507b_plan::r4507b_stub ... ignored, R4507b builds function_list.rs
+test history::list::tests::entries_are_oldest_first_and_marked_applied_up_to_the_cursor ... ok
+test history::record_merge::tests::a_key_ours_wrote_later_is_kept_by_the_latest_stamp ... ok
+test history::record_merge::tests::a_key_ours_changed_differently_is_a_three_way_conflict_and_the_same_value_is_kept ... ok
+test history::record_merge::tests::a_three_way_and_a_latest_stamp_merge_of_the_same_edit_give_the_same_record ... ok
+test config::csv::tests::row_count_is_capped ... ok
+test config_variant::tests::malformed_rules_are_refused_on_rules ... ok
+test components::tests::run_adds_components_only_on_demand ... ok
+test components::tests::load_refuses_a_bad_edit_and_a_missing_file ... ok
+test info::tests::fnv1a_matches_the_reference_vectors ... ok
+test config::csv::tests::export_refuses_bad_params_and_unwritable_targets ... ok
+test info::tests::summary_defaults_kind_and_name ... ok
+test info::tests::summary_reports_the_model ... ok
+test model::tests::admits_includes_both_ends ... ok
+test model::tests::driven_entries_need_a_variable_and_a_well_formed_source ... ok
+test model::tests::history_absent_is_empty ... ok
+test model::tests::history_cursor_bounds ... ok
+test model::tests::limits_above_each_other_are_corrupt ... ok
+test model::tests::model_breaking_a_stored_invariant_is_corrupt ... ok
+test model::tests::model_decodes_and_keeps_unknown_fields ... ok
+test model::tests::model_missing_bad_or_inconsistent_is_corrupt ... ok
+test model::tests::record_drops_the_undone_tail ... ok
+test model::tests::snapshots_decode_or_are_corrupt ... ok
+test model::tests::steps_move_the_cursor_within_bounds ... ok
+test config::csv::tests::read_csv_maps_every_failure ... ok
+test config::csv::tests::export_refuses_to_write_over_its_own_document ... ok
+test components::tests::load_reads_parts_only_in_id_order_with_journal_edits ... ok
+test config::edit::tests::handlers_refuse_bad_params ... ok
+test history::list::tests::a_document_without_a_journal_lists_nothing ... ok
+test config::csv::tests::import_refusals_leave_the_document_unchanged ... ok
+test probe_forced_failure::probe_aborts_on_purpose ... ok
+test probe_forced_failure::probe_fails_on_purpose ... FAILED
+test property_set::tests::base_and_override_merge_under_the_active_configuration ... ok
+test property_set::tests::empty_card_has_empty_maps ... ok
+test property_set::tests::object_mut_replaces_a_non_object ... ok
+test config::csv::tests::import_merges_and_journals ... ok
+test property_set::tests::unknown_config_is_not_found_and_stores_nothing ... ok
+test q02_plan::text_param_refusal_is_the_core_invalid ... ok
+test ref_paths::r4505b_plan::r4505b_stub ... ignored, R4505b builds ref_paths.rs
+test history::undo::tests::a_corrupt_snapshot_is_refused_and_changes_nothing ... ok
+test config::edit::tests::handlers_journal_each_change ... ok
+test config_from_table::tests::rows_become_configurations_with_part_numbers ... ok
+test rollup::tests::kind_parses_the_three_names_only ... ok
+test select::query::tests::matches_kind_prop_and_box_overlap ... ok
+test select::query::tests::parse_reads_every_key_and_empty_is_all ... ok
+test select::query::tests::parse_refuses_bad_queries_naming_query ... ok
+test select::set::tests::contains_hits_only_ids_in_a_range ... ok
+test select::set::tests::page_crosses_ranges_and_stops_at_the_edges ... ok
+test select::set::tests::runs_and_adjacent_ids_merge_into_ranges ... ok
+test history::list::tests::bad_paths_and_damaged_journals_are_refused ... ok
+test selection_isolate::tests::parse_refuses_blank_name_bad_ids_and_unknown_action ... ok
+test selection_isolate::tests::isolate_hide_and_show_track_what_each_call_hid ... ok
+test selection_isolate::tests::unknown_set_and_unknown_body_are_not_found ... ok
+test new::tests::a_missing_folder_is_refused_not_a_panic ... ok
+test selection_isolate::tests::repeated_isolate_and_resave_keep_what_show_brings_back ... ok
+test sheet2d::tests::a_damaged_entity_is_corrupt_naming_its_record ... ok
+test sheet2d::tests::a_sheet_takes_its_own_entities_or_its_stated_children ... ok
+test sheet2d::tests::an_entity_is_read_in_metres ... ok
+test sheet2d::tests::every_kind_has_one_stored_tag_and_key ... ok
+test sheet::cells::tests::parses_the_corners_and_absolute_marks ... ok
+test sheet::cells::tests::addresses_round_trip ... ok
+test sheet::cells::tests::refuses_bad_addresses_on_the_cell_field ... ok
+test sheet::cells::tests::refuses_objects_and_arrays_on_the_value_field ... ok
+test sheet::cells::tests::stores_typed_records ... ok
+test components::tests::split_covers_every_id_once_in_order ... ok
+test sheet::cells::tests::unknown_sheet_is_not_found_and_empty_cells_show_empty ... ok
+test history::list::tests::edits_are_listed_newest_last ... ok
+test doc_locale::tests::refuses_bad_locale_length_and_path ... ok
+test new::tests::bad_params_are_refused_before_any_file_is_written ... ok
+test sheet::cross_sheet::tests::cross_sheet_refs_and_ranges_evaluate_and_follow_the_source ... ok
+test config_from_table::tests::malformed_tables_are_refused_on_csv_and_leave_the_file ... ok
+test sheet::cross_sheet::tests::resolves_qualified_unqualified_and_unknown_sheets ... ok
+test sheet::dims::tests::combines_and_refuses ... ok
+test sheet::dims::tests::names_round_trip ... ok
+test sheet::dims::tests::walks_formulas_and_cells ... ok
+test sheet::eval::tests::cell_number_reads_numeric_cells_only ... ok
+test sheet::eval::tests::evaluates_arithmetic_refs_and_errors ... ok
+test sheet::errors::tests::the_first_error_wins ... ok
+test property_set::tests::params_are_checked_before_any_write ... ok
+test sheet::eval::tests::recalc_reaches_every_dependent_whatever_the_order ... ok
+test sheet::fn_core::tests::numbers_and_errors ... ok
+test sheet::fn_core::tests::text_logic_and_arity ... ok
+test sheet::fn_eng::tests::convert_and_mat_check_their_inputs ... ok
+test history::undo::tests::bad_params_and_missing_files_are_refused ... ok
+test sheet::fn_eng::tests::iso286_matches_the_reference_deviations ... ok
+test sheet::fn_eng::tests::iso286_refuses_unknown_classes_and_sizes ... ok
+test sheet::fn_lookup::tests::approximate_lookups_and_errors ... ok
+test sheet::fn_lookup::tests::index_reads_by_position_and_refuses_bad_shapes ... ok
+test sheet::fns::tests::unknown_functions_are_name_errors ... ok
+test sheet::fn_lookup::tests::number_formats ... ok
+test sheet::formula::tests::parses_precedence_refs_ranges_and_quantities ... ok
+test ext::tests::raw_extra_access_outside_the_registry_only_shrinks ... ok
+test sheet::formula::tests::reads_ref_error_as_an_off_grid_ref ... ok
+test new::tests::an_existing_path_is_a_conflict_and_is_left_unchanged ... ok
+test sheet::create::tests::a_corrupt_table_is_refused ... ok
+test history::undo::tests::nothing_left_is_a_conflict_and_changes_nothing ... ok
+test sheet::formula::tests::refuses_malformed_formulas_on_the_formula_field ... ok
+test sheet::graph::tests::names_the_cycle_path_and_ignores_chains ... ok
+test rollup::tests::a_missing_node_is_not_found ... ok
+test sheet::name::tests::names_are_words_that_are_not_cells_or_functions ... ok
+test sheet::name::tests::ranges_split_and_resolve ... ok
+test sheet::name::tests::rewrite_changes_only_uses_of_the_name ... ok
+test sheet::paste::tests::reads_targets ... ok
+test sheet::recalc::tests::dirties_dependents_only_in_topological_order ... ok
+test sheet::recalc::tests::recalc_all_reaches_every_dependent_once ... ok
+test doc_locale::tests::sets_locale_and_length_keeping_the_angle_and_undoes ... ok
+test sheet::row_file::tests::rows_page_by_sheet_row_with_empty_rows_empty ... ok
+test info::tests::run_reads_the_file_and_refuses_missing_or_damaged ... ok
+test new::tests::kind_defaults_to_part_and_name_is_left_to_the_file_name ... ok
+test sheet::fill::tests::refuses_bad_ranges_and_targets_out_of_line ... ok
+test sheet::create::tests::missing_document_and_bad_path_are_refused ... ok
+test config_variant::tests::unknown_variable_or_bad_expr_leaves_the_file ... ok
+test sheet::shift::tests::references_moved_off_the_grid_become_ref_errors ... ok
+test sheet::shift::tests::relative_parts_move_and_absolute_parts_stay ... ok
+test sheet::store::tests::names_are_one_to_max_chars_without_bang_or_control ... ok
+test sheet::store::tests::bad_tables_are_corrupt ... ok
+test sheet::store::tests::save_then_load_round_trips_in_order ... ok
+test sheet::store::tests::names_compare_ignoring_case ... ok
+test tests::path_param_takes_a_non_empty_string ... ok
+test history::state::tests::record_bodies_are_decoded_only_by_the_history_entry ... ok
+test sheet::get::tests::reads_records_empty_cells_and_refuses_unknown_sheets ... ok
+test tree::page::tests::params_are_checked ... ok
+test rollup::tests::totals_skip_hidden_subtrees_and_match_the_brute_force ... ok
+test sheet::list::tests::a_document_without_sheets_lists_none ... ok
+test config_variant::tests::run_makes_six_variants_and_reruns_in_place ... ok
+test sheet::list::tests::bad_path_missing_document_and_corrupt_table_are_refused ... ok
+test sheet::list::tests::lists_sheets_in_order_with_cell_counts ... ok
+test sheet::create::tests::creates_empty_sheets_in_order_with_one_entry_each ... ok
+test new::tests::writes_an_empty_v1_model_of_each_kind ... ok
+test config::csv::tests::export_writes_and_returns_the_table ... ok
+test history::undo::tests::redo_after_a_new_edit_is_refused ... ok
+test sheet::row_file::tests::files_are_taken_only_while_the_document_is_unchanged ... ok
+test sheet::set::tests::refuses_unknown_sheet_bad_value_and_bad_cell_leaving_no_entry ... ok
+test tree::page::tests::a_missing_node_or_file_is_not_found_and_a_bad_hidden_is_refused ... ok
+test sheet::set_many::tests::sets_and_clears_many_cells_in_one_entry ... ok
+test sheet::format::tests::refuses_bad_formats_and_cells ... ok
+test tree::page::tests::journal_edits_show_in_the_rows ... ok
+test rollup::tests::edits_after_the_memo_are_re_evaluated ... ok
+test sheet::set_many::tests::one_bad_entry_applies_nothing ... ok
+test tree::reveal::tests::a_missing_element_is_not_found ... ok
+test tree::page::tests::run_prints_the_window ... ok
+test sheet::create::tests::refuses_taken_and_bad_names_leaving_the_file ... ok
+test unit_eval::tests::bad_expressions_refuse_on_expr ... ok
+test unit_eval::tests::default_unit_is_metres ... ok
+test unit_eval::tests::bad_unit_refuses_on_unit ... ok
+test units::format::r4501e_plan::r4501e_stub ... ignored, R4501e moves the unit tables to core::expr::unit
+test unit_eval::tests::mixed_units_show_in_the_asked_unit ... ok
+test units::format::tests::format_trims_to_six_decimals ... ok
+test units::format::tests::in_unit_divides_by_the_unit_factor ... ok
+test units::format::tests::in_unit_of_refuses_unknown_and_other_kind_units ... ok
+test units::format::tests::locale_swaps_the_decimal_separator ... ok
+test units::format::tests::unknown_units_are_refused_on_the_unit_field ... ok
+test units::format::tests::mass_units_show_and_other_kinds_are_refused ... ok
+test units::parse::tests::check_syntax_refuses_bad_text_but_not_a_zero_division ... ok
+test units::parse::tests::mass_units_are_their_own_dimension ... ok
+test units::parse::tests::operators_and_precedence ... ok
+test units::parse::tests::deep_nesting_within_the_cap_parses ... ok
+test units::parse::tests::parse_mass_returns_kilograms_and_refuses_other_dimensions ... ok
+test units::parse::tests::refusals_name_the_expr_field ... ok
+test units::parse::tests::the_length_cap_is_inclusive ... ok
+test units::parse::tests::time_units_read_after_a_number_and_stay_free_as_variable_names ... ok
+test units::parse::tests::unit_names ... ok
+test units::parse::tests::units_scale_to_si ... ok
+test units::parse::tests::variables_resolve_and_match_any_unit ... ok
+test variable_driven::tests::a_taken_name_is_refused_unchanged ... ok
+test variable_driven::tests::drive_reads_the_named_feature_param ... ok
+test variable_driven::tests::refresh_is_a_boolean_that_names_no_source ... ok
+test variable_driven::tests::refresh_without_driven_variables_changes_nothing ... ok
+test variable_driven::tests::refresh_reports_only_moved_values ... ok
+test tree::page::tests::root_window_lists_top_level_rows ... ok
+test variable_driven::tests::source_needs_a_feature_and_a_pointer ... ok
+test variable_driven::tests::unknown_feature_and_non_number_param_are_refused_unchanged ... ok
+test variable_enum::tests::bad_lists_and_values_are_refused_and_leave_the_model ... ok
+test sheet::list::tests::follows_creates_made_through_the_verb ... ok
+test variable_enum::tests::define_sets_the_value_and_defaults_to_the_first ... ok
+test variable_enum::tests::redefining_replaces_the_list ... ok
+test tree::reveal::tests::run_prints_depth_and_path ... ok
+test tree::page::tests::offset_and_limit_cut_the_window_and_match_the_exhaustive_answer ... ok
+test variable_enum::tests::the_longest_values_still_check_their_kind ... ok
+test variable_eval::tests::test_a_literal_answers_value_display_and_hash ... ok
+test config_variant::tests::rerun_updates_the_active_variant_at_once ... ok
+test variable_eval::tests::test_a_malformed_expression_is_refused_with_its_field_and_position ... FAILED
+test variable_graph::r4506_plan::r4506_stub ... ignored, R4506 builds variable_graph.rs
+test variable_typed::r4507a_plan::r4507a_stub ... ignored, R4507a builds variable_typed.rs
+test variables::limits::tests::limit_refuses_bad_limits_and_leaves_the_model ... ok
+test variables::limits::tests::limit_stores_si_bounds_and_keeps_the_expr ... ok
+test config_variant::tests::activate_reads_a_part_number_and_keeps_f13_refusals ... ok
+test txn::tests::a_refused_change_leaves_the_file_unchanged ... ok
+test tree::reveal::tests::path_runs_from_the_top_level_with_sibling_indexes ... ok
+test txn::tests::a_paged_write_journals_its_history_item_and_a_no_history_write_none ... ok
+test variables::list::tests::the_document_unit_comes_from_the_stored_length ... ok
+test txn::r1901a_params::an_edit_journals_the_params_of_its_own_call_only ... ok
+test variables::rename::tests::delete_refuses_a_base_expression_use ... ok
+test variables::rename::tests::delete_refuses_a_variable_in_use_and_removes_overrides ... ok
+test sheet::format::tests::formats_change_the_display_only ... ok
+test variables::rename::tests::names_follow_the_expression_grammar ... ok
+test variables::rename::tests::rename_and_delete_keep_the_driven_sources_in_step ... ok
+test sheet::fill::tests::continues_a_series_and_shifts_formulas_in_one_entry ... ok
+test variables::rename::tests::rename_refuses_a_missing_or_taken_name_unchanged ... ok
+test variables::rename::tests::rename_moves_the_variable_and_rewrites_every_expression ... ok
+test variables::set::tests::assign_keeps_an_enum_to_its_list ... ok
+test variables::set::tests::assign_keeps_limits_and_refuses_values_outside ... ok
+test history::undo::tests::undo_and_redo_walk_the_journal ... ok
+test txn_records::tests::a_document_that_is_not_paged_is_refused_as_before ... ok
+test variables::set::tests::assign_stores_value_and_expr ... ok
+test variables::set::tests::names ... ok
+test view_state::r1237a_plan::r1237a_stub ... ignored, R1237a builds view_state.rs
+test variables::set::tests::variable_known_refuses_a_missing_name_on_the_field ... ok
+test sheet::set::tests::stores_under_the_canonical_address_and_clears_with_null ... ok
+test variable_driven::tests::run_refreshes_in_one_history_entry ... ok
+test unit_eval::tests::a_document_shows_in_its_unit_and_locale ... ok
+test variables::list::tests::get_shows_one_variable ... ok
+test txn::tests::missing_or_damaged_files_are_refused ... ok
+test variables::set::tests::a_driven_variable_is_refused_and_the_file_kept ... ok
+test txn::tests::edit_mutates_journals_and_keeps_other_chunks ... ok
+test variable_driven::tests::run_validates_params_before_touching_the_file ... ok
+test variables::list::tests::bad_params_are_refused_on_their_field ... ok
+test txn_records::tests::replace_sets_whole_props_and_undo_restores_them ... ok
+test variables::list::tests::list_shows_every_variable_in_the_unit ... ok
+test variable_enum::tests::run_validates_params ... ok
+test variables::rename::tests::verbs_validate_params_and_journal_the_change ... ok
+test variables::limits::tests::run_validates_params_and_journals_the_change ... ok
+test txn_records::tests::no_change_writes_nothing_and_a_model_edit_rides_along ... ok
+test txn_records::tests::a_put_undoes_and_redoes_through_history ... ok
+test variable_enum::tests::run_journals_a_definition_and_reports_it ... ok
+test variables::set::tests::run_validates_params_and_writes_the_document ... ok
+test txn_records::tests::a_create_undone_and_redone_keeps_its_id ... ok
+test tree::reveal::tests::a_wide_parent_is_searched_across_list_blocks ... ok
+test txn_records::tests::a_delete_and_its_refusals ... ok
+test config::edit::tests::concurrent_creates_lose_no_configuration ... ok
+test new::tests::concurrent_creates_of_one_path_make_exactly_one_document ... ok
+test sheet::create::tests::concurrent_creates_lose_no_sheet ... ok
+test txn::tests::concurrent_edits_lose_no_write ... ok
+test config::csv::tests::concurrent_imports_lose_no_configuration ... ok
+test variables::limits::tests::concurrent_limits_lose_no_write ... ok
+test variables::rename::tests::concurrent_deletes_lose_no_write ... ok
+test history::undo::tests::concurrent_undos_each_take_one_step ... ok
+test variable_enum::tests::concurrent_definitions_lose_no_write ... ok
+
+failures:
+
+---- probe_forced_failure::probe_fails_on_purpose stdout ----
+
+thread 'probe_forced_failure::probe_fails_on_purpose' (30116) panicked at crates\doc\src\lib.rs:238:13:
+assertion `left == right` failed: forced failure
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- variable_eval::tests::test_a_malformed_expression_is_refused_with_its_field_and_position stdout ----
+
+thread 'variable_eval::tests::test_a_malformed_expression_is_refused_with_its_field_and_position' (61516) panicked at crates\doc\src\variable_eval.rs:72:9:
+Some(("unexpected the end of the expression, expected a value at 1:4", Some("expr")))
+
+
+failures:
+    probe_forced_failure::probe_fails_on_purpose
+    variable_eval::tests::test_a_malformed_expression_is_refused_with_its_field_and_position
+
+test result: FAILED. 269 passed; 2 failed; 9 ignored; 0 measured; 0 filtered out; finished in 2.43s
+
+     Running unittests src\lib.rs (C:/work/target/debug/deps/acme_doc-1a8dff8ed1282b16.exe)
+error: test failed, to rerun pass `-p acme-doc --lib`
+error: 1 target failed:
+    `-p acme-doc --lib`

@@ -1,0 +1,35 @@
+filtered out; finished in 1.75s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 10 tests
+..........
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.26s
+
+
+running 142 tests
+....................................................................................... 87/142
+..... 92/142
+frame::tests::a_loaded_frame_submits_load_times_the_scene --- FAILED
+.................................................
+failures:
+
+---- frame::tests::a_loaded_frame_submits_load_times_the_scene stdout ----
+
+thread 'frame::tests::a_loaded_frame_submits_load_times_the_scene' (77984) panicked at crates\view\src\frame.rs:1005:67:
+render: Refusal { code: NotFound, message: "d.acme: entity not found", field: Some("path"), reason: None }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    frame::tests::a_loaded_frame_submits_load_times_the_scene
+
+test result: FAILED. 141 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.27s
+
+error: test failed, to rerun pass `-p acme-view --lib`
+error: 1 target failed:
+    `-p acme-view --lib`

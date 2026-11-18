@@ -22,7 +22,7 @@ from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
-import desk, quarantine, rules_gate, rules_langs
+import cargo_failures as cf, desk, quarantine, rules_gate, rules_langs
 
 REPO = Path(os.environ.get("HARNESS_REPO", "."))
 HOME = Path(os.environ.get("HARNESS_HOME", str(Path(__file__).parent)))
@@ -431,7 +431,8 @@ STACKS = {
         "unit": "cargo test -q --workspace --lib --bins --no-fail-fast",
         "unit_one": "cargo test -q --workspace --lib --bins -- --exact {name} --test-threads=1",
         "name_escape": False,  # unit_one gets the raw test name
-        "unit_fail_re": [r"^(\S+) --- FAILED$", r"^test (\S+) \.\.\. FAILED$"],
+        "unit_parser": "cargo",  # cargo_failures.parse; a binary that crashed naming no test is kept by selector
+        "unit_target": "cargo test -q {target} -- --test-threads=1",
         "lint": "cargo clippy -q --workspace --all-targets -- -D warnings",
         "lint_strict": ("cargo clippy -q --workspace --all-targets -- -D warnings -D clippy::too_many_lines "
                         "-D clippy::unwrap_used -D clippy::cognitive_complexity"),
@@ -482,6 +483,8 @@ STACKS = {
         "unit": "node --test --test-reporter=tap",
         "unit_one": "node --test --test-reporter=tap --test-name-pattern=\"^{name}$\"",
         "name_escape": True,  # unit_one gets re.escape(name)
+        "unit_parser": "regex",
+        "unit_target": "",
         "unit_fail_re": [r"^\s*not ok \d+ - (.+?)(?: # .*)?$", r"^\s*[✖✕×] (.+?)(?: \([\d.]+ ?m?s\))?$"],
         "lint": "",
         "lint_strict": "",  # eslint on {files} when the project has eslint (load_profile)
@@ -874,32 +877,38 @@ def regen_tree(cwd) -> str:
     return ""
 
 
-def unit_failures(out: str, first_only=False) -> set:
-    """Failing unit test names in a unit run's output (the quick gate has always parsed only the first pattern)."""
-    pats = P["unit_fail_re"][:1] if first_only else P["unit_fail_re"]
-    return set().union(*(re.findall(p, out, re.M) for p in pats))
+def unit_failures(out: str) -> cf.CargoFailures:
+    """The one reading of a unit run: names, and (cargo) each failed target no name accounts for."""
+    if P["unit_parser"] == "cargo":
+        return cf.parse(out)
+    return cf.CargoFailures(tuple(sorted(set().union(*(re.findall(p, out, re.M) for p in P["unit_fail_re"])))))
 
 
 def unit_red_log(out: str) -> str:
     """Output tail plus each failing test's own lines, last: a reject reason (the last 1500 chars) names what failed."""
-    hits = sorted((m.start(), m.group(1)) for p in P["unit_fail_re"] for m in re.finditer(p, out, re.M))
-    if not hits:
+    failing = unit_failures(out)
+    if not failing.found:
         return out[-6000:]
-    per = max(200, 1400 // len(hits[:4]))
+    hits = sorted((i, n) for n in failing.tests if (i := out.find(n)) >= 0)
+    per = max(200, 1400 // max(1, len(hits[:4])))
     lines = "".join(chr(10) + out[i:i + per].rstrip() for i, _ in hits[:4])
-    return out[-6000:] + chr(10) + f"unit failures ({len(hits)}): " + "; ".join(n for _, n in hits[:8]) + lines
+    keys = failing.keys()
+    return out[-6000:] + chr(10) + f"unit failures ({len(keys)}): " + "; ".join(keys[:8]) + lines
 
 
-def unit_flaky(failing: set) -> bool:
-    """True when every failing unit test passes when rerun alone (single thread): load flakiness, not the batch.
-    2026-11-12: a store snapshot timing test failed the whole gate under train load twice; it passes alone."""
-    if not failing or len(failing) > 5 or not P["unit_one"]:
+def unit_flaky(failing: cf.CargoFailures) -> bool:
+    """True when each failing test, and each target that crashed naming none, passes alone on one thread (load
+    flakiness). A cargo rerun must pass a test: `--exact` on a name matching nothing exits 0."""
+    keys = failing.keys()
+    if not keys or len(keys) > 5 or not P["unit_one"] or (failing.unnamed and not P["unit_target"]):
         return False
-    cmds = [P["unit_one"].replace("{name}", re.escape(n).replace('"', ".") if P["name_escape"] else n)
-            for n in sorted(failing)]
-    if any(r.returncode != 0 for r in unit_runs(cmds, timeout=900, first_fail=True)):
-        return False
-    event("gate_stage", stage="unit-flaky-passed-alone", failing=sorted(failing))
+    cmds = [P["unit_target"].replace("{target}", k) if k in failing.unnamed else
+            P["unit_one"].replace("{name}", re.escape(k).replace('"', ".") if P["name_escape"] else k) for k in keys]
+    for key, r in zip(keys, unit_runs(cmds, timeout=900, first_fail=True)):
+        if r.returncode != 0 or (P["unit_parser"] == "cargo" and not cf.passed(r.stdout)):
+            event("gate_stage", stage="unit-red-alone", failing=key, rc=r.returncode)
+            return False
+    event("gate_stage", stage="unit-flaky-passed-alone", failing=keys)
     return True
 
 
@@ -915,18 +924,18 @@ def at_main():
         git("checkout", "-q", "--detach", "-f", cur, cwd=TRAIN)
 
 
-def main_unit_baseline() -> set:
-    """Unit tests failing on main itself (cached per main sha)."""
+def main_unit_baseline() -> cf.CargoFailures:
+    """Unit failures on main itself (cached per main sha)."""
     sha = git("rev-parse", "main").stdout.strip()
     cache = load("unit-baseline.json", {})
     if cache.get("sha") != sha:
         with at_main():
             rr = unit_runs([P["unit"]])[0]
-        fails = unit_failures(rr.stdout + rr.stderr)
-        cache = {"sha": sha, "fails": sorted(fails)}
+        fails = unit_failures(rr.stdout + rr.stderr).keys()
+        cache = {"sha": sha, "fails": fails}
         save("unit-baseline.json", cache)
-        event("unit_baseline", sha=sha, fails=sorted(fails)[:10])
-    return set(cache["fails"])
+        event("unit_baseline", sha=sha, fails=fails[:10])
+    return cf.from_keys(cache["fails"])
 
 
 QUALITY_CMDS = [c.replace("{QS}", QS) if " " in c else f"py -3 {QS}/{c} {' '.join(P['src_dirs'])}" for c in P["qa"]]
@@ -1124,9 +1133,9 @@ def gate(new_rows, rows, quick=False):
         r = unit_runs([P["unit"]])[0]
         if r.returncode != 0:
             o = r.stdout + r.stderr
-            failing = unit_failures(o, first_only=True)
-            base = main_unit_baseline()
-            if not (failing and (failing <= base or unit_flaky(failing - base))):
+            failing = unit_failures(o)
+            left = failing.without(main_unit_baseline())
+            if not (failing.found and (not left.found or unit_flaky(left))):
                 return False, ["unit"], unit_red_log(o)
         q = quality_problems(TRAIN, landing=new_rows, plan="always")
         if q:
@@ -1148,20 +1157,19 @@ def gate(new_rows, rows, quick=False):
     if r.returncode != 0:
         out = r.stdout + r.stderr
         failing = unit_failures(out)
-        base = main_unit_baseline()
-        if failing and failing <= base:  # main is already red on exactly these: not this batch's fault
-            event("gate_stage", stage="unit-baseline-red", failing=sorted(failing)[:5])
+        left = failing.without(main_unit_baseline())
+        if failing.found and not left.found:  # main is red on exactly these
+            event("gate_stage", stage="unit-baseline-red", failing=failing.keys()[:5])
             r = None
-        elif failing and unit_flaky(failing - base):
+        elif left.found and unit_flaky(left):
             r = None
     if r is not None and r.returncode != 0 and not P["crate_blame"]:
         return False, ["unit"], unit_red_log(out)
     if r is not None and r.returncode != 0:
-        crates = sorted(set(re.findall(r"-p (" + re.escape(CRATE) + r"-[\w-]+)", out)))
-        dirs = " ".join("crates/" + c[len(CRATE) + 1:] + "/" for c in crates if c != CRATE)
-        if f"-p {CRATE} " in out or f"`-p {CRATE}`" in out:
-            dirs += " src/"
-        return False, ["unit"], f"failing crates: {dirs}" + chr(10) + unit_red_log(out)
+        pkgs = sorted({t.split()[1] for t in failing.targets if t.split()[1].startswith(CRATE)})
+        dirs = " ".join("src/" if p == CRATE else "crates/" + p[len(CRATE) + 1:] + "/" for p in pkgs)
+        # the description sits above `failing crates:`, which try_batch splits into blame paths
+        return False, ["unit"], failing.describe() + chr(10) + f"failing crates: {dirs}" + chr(10) + unit_red_log(out)
     if quality_on():
         t0 = now()
         q = quality_problems(TRAIN, landing=new_rows, plan="always")
