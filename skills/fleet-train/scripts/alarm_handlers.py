@@ -234,7 +234,7 @@ def request_lane(h, rel: str) -> str:
 
 # ---------------------------------------------------------------- the table
 LANDS = 90  # cooldown minutes for a fix landing through the train
-RED = ("REPEAT-TEST", "KNOWN-RED", "MAIN-RED", "TRAIN-DOWN", "TRAIN-ERROR", "TRAIN-ENV")
+RED = ("REPEAT-TEST", "KNOWN-RED", "MAIN-RED", "TRAIN-DOWN", "TRAIN-ERROR", "TRAIN-ENV", "DESK-DOWN")
 HARNESS_FIX = Agent("harness-fix", cap_min=75, calls=80)
 TABLE = {
     "ORIGIN-BEHIND": Auto(push_origin, patience=3600),
@@ -263,5 +263,6 @@ TABLE = {
     "REQUEST-ERROR": HARNESS_FIX,
     "BEAT-TIMEOUT": HARNESS_FIX,
     "TRAIN-PID": Manager("stop this project's train once by its own pid; the next beat starts it with a pid file"),
+    "DESK-DOWN": Manager("the desk gives no verdict (desk_error reasons): bring back its ssh and toolchain; batches wait"),
     "TRAIN-KILLABLE": Manager("restart the train with the quoted full path between batches (never mid-land)"),
 }
