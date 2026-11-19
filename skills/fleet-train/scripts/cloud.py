@@ -338,8 +338,15 @@ def collect():
                     readd.append((slot, row))
                     gone += [row, f"claim-{row}", f"prev-{row}"]
                     continue
-                with h.lock("state"):
-                    h.queue_sha(slot, row, sha, c["ts"])
+                try:
+                    with h.lock("state"):
+                        h.queue_sha(slot, row, sha, c["ts"])
+                except h.QueueRefused as e:  # another slot's packet holds the row: released like a duplicate
+                    release(slot, row, "cloud: " + str(e))
+                    st["rows"].setdefault(row, {}).pop("claim_seen", None)
+                    readd.append((slot, row))
+                    gone += [row, f"claim-{row}", f"prev-{row}"]
+                    continue
                 st["rows"].setdefault(row, {}).update(queued_sha=sha, queued=h.iso())
                 done.append(row)
                 gone += [row, f"claim-{row}", f"prev-{row}"]
@@ -524,8 +531,15 @@ def lane_pushed(lane: Lane, st: dict, todo: dict, out: dict, freed: set) -> None
                 freed.add(task)
                 drop_ref(ref, sha)
             continue
-        with h.lock("state"):
-            h.queue_clean(f"{lane.kind}-{task}", sha, 0, front=lane.front)
+        try:
+            with h.lock("state"):
+                h.queue_clean(f"{lane.kind}-{task}", sha, 0, front=lane.front)
+        except h.QueueRefused as e:  # another slot queued this row with a sha this push does not contain
+            if salvage(lane, task, sha, str(e)):
+                out["salvaged"].append(task)
+                freed.add(task)
+                drop_ref(ref, sha)
+            continue
         queued[task] = {"sha": sha, "queued": h.iso()}
         out["queued"].append(task)
         (CW / f"{lane.kind}-rejects" / f"{task}.md").unlink(missing_ok=True)

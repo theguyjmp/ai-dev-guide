@@ -372,6 +372,10 @@ def cmd_claim(a):
                       "env_prefix": " ".join(f"{k}={v}" for k, v in e.items()).replace("\\", "/")}, indent=1))
 
 
+class QueueRefused(SystemExit):
+    """queue_sha / queue_clean refused a sha (replace_refusal): a CLI exit with the reason; cloud.py catches it."""
+
+
 def replace_refusal(row, sha, slot, replace=False) -> str:
     """Why `slot` may not queue `sha` over row's queued entry, else "" (caller holds the state lock). A resubmit
     replaces the queued sha only when it contains it (a restack's requeue-in-place merges it), the same slot queued it,
@@ -384,8 +388,11 @@ def replace_refusal(row, sha, slot, replace=False) -> str:
             f"merge h/{row} into your branch and submit again, or pass --replace to drop that packet on purpose")
 
 
-def queue_sha(slot, row, sha, since) -> int:
-    """Queue sha as slot's submission of row and drop slot's claim (caller holds the state lock); the queue length."""
+def queue_sha(slot, row, sha, since, replace=False) -> int:
+    """Queue sha as slot's submission of row and drop slot's claim (caller holds the state lock); the queue length.
+    Raises QueueRefused when another slot's packet holds the row (replace_refusal)."""
+    if why := replace_refusal(row, sha, slot, replace):
+        raise QueueRefused(why)
     git("branch", "-f", f"h/{row}", sha)
     queue = [q for q in load("queue.json", []) if q["row"] != row] + [{"row": row, "sha": sha, "ts": now(), "slot": slot}]
     save("queue.json", queue)
@@ -410,9 +417,7 @@ def cmd_submit(a):
         sha = git("rev-parse", "HEAD", cwd=p).stdout.strip()
         if git("rev-list", "--count", f"main..{sha}").stdout.strip() == "0":
             sys.exit("no commits on top of main")
-        if why := replace_refusal(a.row, sha, a.slot, a.replace):
-            sys.exit(why)
-        print(json.dumps({"ok": True, "queued": queue_sha(a.slot, a.row, sha, c["ts"])}))
+        print(json.dumps({"ok": True, "queued": queue_sha(a.slot, a.row, sha, c["ts"], replace=a.replace)}))
 
 
 def cmd_release(a):
@@ -1100,18 +1105,18 @@ def cmd_clean_submit(a):
         sys.exit("commit first")
     sha = git("rev-parse", "HEAD", cwd=p).stdout.strip()
     with lock("state"):
-        if why := replace_refusal(f"CLEAN-{a.name}", sha, a.slot, a.replace):
-            sys.exit(why)
-        queue_clean(a.name, sha, a.slot, front=a.front, absorbs=a.absorbs.split(",") if a.absorbs else None)
+        queue_clean(a.name, sha, a.slot, front=a.front, absorbs=a.absorbs.split(",") if a.absorbs else None, replace=a.replace)
     print(json.dumps({"ok": True}))
 
 
-def queue_clean(name, sha, slot, front=False, absorbs=None) -> None:
+def queue_clean(name, sha, slot, front=False, absorbs=None, replace=False) -> None:
     """Queue sha as row CLEAN-<name> (caller holds the state lock). front: ahead of every queued row (ts = oldest - 1;
     the train picks by ts), for a fix the owner wants landed first (cloud.py lane fix). absorbs: the rows this
     integration row lands with it (lands_rows); None keeps the queued entry's own, so a resubmit never drops them.
     Each is verified against sha first."""
     row = f"CLEAN-{name}"
+    if why := replace_refusal(row, sha, slot, replace):  # QueueRefused: another slot's packet holds the row
+        raise QueueRefused(why)
     queue = load("queue.json", [])
     if absorbs is None:
         absorbs = next((q.get("absorbs", []) for q in queue if q["row"] == row), [])
