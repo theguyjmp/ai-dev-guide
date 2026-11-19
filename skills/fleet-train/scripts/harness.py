@@ -461,7 +461,7 @@ STACKS = {
         "path_re": r"((?:crates|src|tests)[\\/][\w\\/.-]+\.rs)",  # repo files a failure log names
         "quoted_path_re": r"[\"'`]((?:crates|src|tests)/[\w/.-]+\.rs)[\"'`]",  # repo files a test reads
         "strip_root": False,
-        "assert_sides_re": r"^\s*left: (.*)\n\s*right: (.*)$",  # assert_eq!'s two sides (assert_diff_files)
+        "assert_sides_re": r"^\s*left: (.*)\n\s*right: (.*)$",
         # env the toolchain needs: on Windows the MSVC linker and cc builds are found through ProgramFiles(x86),
         # which Git Bash drops. A profile can add its own (harness.toml [profile] require_env = [...]).
         "require_env": ["ProgramFiles(x86)"] if os.name == "nt" else [],
@@ -1423,7 +1423,7 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     # before blame and probe, which pin a main-red test on an innocent row
     if quarantine.heal(sys.modules[__name__], merged, rows, fails):
         return try_batch(merged, rows, depth + 1, reviewed=True)
-    # blame by file: eject the one branch whose own changes touch a file the failure names; more suspects bisect
+    # blame by file
     if P["strip_root"]:  # absolute paths in the log -> repo-relative
         for root in {str(TRAIN), TRAIN.as_posix()}:
             log = (log or "").replace(root + chr(92), "").replace(root + "/", "")
@@ -1455,8 +1455,7 @@ LAND_SUBJECT = re.compile(r"^train: land (\S+)")  # build_train's merge subject
 
 
 def assert_diff_files(log: str) -> set:
-    """Paths an assertion's two sides (profile assert_sides_re) name on one side only or with another value: two maps
-    of many paths differing in one name that one, never all. A side cut off by the log tail is skipped."""
+    """Paths an assertion's two sides (profile assert_sides_re) name on one side only or with another value."""
     out = set()
     for left, right in (re.findall(P["assert_sides_re"], log or "", re.M) if P["assert_sides_re"] else []):
         sides = []
@@ -1471,9 +1470,8 @@ def assert_diff_files(log: str) -> set:
 
 
 def blame_named(rows, fails, log, tree=TRAIN) -> set:
-    """Files a red gate names: an assertion diff's alone (the panic site and failing crates would blame every row in
-    the test's package), else the log's paths, failing crates, failing tests' row files and the files an unowned
-    failing test reads."""
+    """Files a red gate names: an assertion diff's alone, else the log's paths, failing crates, failing tests' row
+    files and the files an unowned failing test reads."""
     named = assert_diff_files(log)
     if named:
         return named
@@ -1494,9 +1492,8 @@ def blame_named(rows, fails, log, tree=TRAIN) -> set:
 
 
 def own_files(merged, tree=TRAIN) -> dict:
-    """{row: files} its `train: land` merge adds over its first parent (the rows merged ahead of it, or main), so a
-    row stacked on a queued row, even on its pre-restack commits, never owns its parent's files; main...sha named
-    them all and ejected a whole stack for one row. main...sha stays the fallback for an entry the chain lacks."""
+    """{row: files} its `train: land` merge adds over its first parent, so a stacked row never owns its parent's
+    files (main...sha, the fallback, named them all)."""
     land = {}
     for line in git("log", "--first-parent", "--format=%H%x09%s", "main..HEAD", cwd=tree, check=False).stdout.splitlines():
         c, _, subj = line.partition(chr(9))
@@ -1516,8 +1513,7 @@ def touching(files, named) -> set:
 
 
 def blame_by_file(merged, rows, fails, log, tree=TRAIN):
-    """The one blame owner: (entries whose own files touch a named file, named, own). The caller ejects one guilty
-    entry and bisects more: file overlap alone never ejects a set."""
+    """The one blame owner: (entries whose own files touch a named file, named, own). One is ejected, more bisect."""
     named = blame_named(rows, fails, log, tree)
     if not named:
         return [], named, {}
