@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory() as d:
     h.save("claims.json", {"1": {"row": "R1", "ts": 1}})
     dup = [{"file": "crates/x.rs", "fn": "modify", "existing": "crates/y.rs::modify", "why": "same job"}]
     h.batch_review = lambda *a, **k: dup
-    ns = argparse.Namespace(slot=1, row="R1")
+    ns = argparse.Namespace(slot=1, row="R1", replace=False)
     try:
         h.cmd_submit(ns)
         msg = None

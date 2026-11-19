@@ -372,6 +372,18 @@ def cmd_claim(a):
                       "env_prefix": " ".join(f"{k}={v}" for k, v in e.items()).replace("\\", "/")}, indent=1))
 
 
+def replace_refusal(row, sha, slot, replace=False) -> str:
+    """Why `slot` may not queue `sha` over row's queued entry, else "" (caller holds the state lock). A resubmit
+    replaces the queued sha only when it contains it (a restack's requeue-in-place merges it), the same slot queued it,
+    or the lane passes --replace. Pilot: a second lane's unrelated submit of the same fix row replaced the first lane's
+    gated packet and moved h/<row>, silently."""
+    q = next((q for q in load("queue.json", []) if q["row"] == row), None)
+    if replace or not q or q.get("slot") == slot or git("merge-base", "--is-ancestor", q["sha"], sha, check=False).returncode == 0:
+        return ""
+    return (f"submit: {row} is already queued at {q['sha'][:12]} by slot {q.get('slot')} and {sha[:12]} does not contain it; "
+            f"merge h/{row} into your branch and submit again, or pass --replace to drop that packet on purpose")
+
+
 def queue_sha(slot, row, sha, since) -> int:
     """Queue sha as slot's submission of row and drop slot's claim (caller holds the state lock); the queue length."""
     git("branch", "-f", f"h/{row}", sha)
@@ -398,6 +410,8 @@ def cmd_submit(a):
         sha = git("rev-parse", "HEAD", cwd=p).stdout.strip()
         if git("rev-list", "--count", f"main..{sha}").stdout.strip() == "0":
             sys.exit("no commits on top of main")
+        if why := replace_refusal(a.row, sha, a.slot, a.replace):
+            sys.exit(why)
         print(json.dumps({"ok": True, "queued": queue_sha(a.slot, a.row, sha, c["ts"])}))
 
 
@@ -1086,6 +1100,8 @@ def cmd_clean_submit(a):
         sys.exit("commit first")
     sha = git("rev-parse", "HEAD", cwd=p).stdout.strip()
     with lock("state"):
+        if why := replace_refusal(f"CLEAN-{a.name}", sha, a.slot, a.replace):
+            sys.exit(why)
         queue_clean(a.name, sha, a.slot, front=a.front, absorbs=a.absorbs.split(",") if a.absorbs else None)
     print(json.dumps({"ok": True}))
 
@@ -2136,6 +2152,7 @@ def main():
     sp.add_parser("frontier")
     p = sp.add_parser("claim"); p.add_argument("--slot", type=int, required=True); p.add_argument("--wait", type=float, default=0)
     p = sp.add_parser("submit"); p.add_argument("--slot", type=int, required=True); p.add_argument("--row", required=True)
+    p.add_argument("--replace", action="store_true", help="replace another slot's queued sha this one does not contain")
     p = sp.add_parser("release"); p.add_argument("--slot", type=int, required=True); p.add_argument("--row", required=True); p.add_argument("--reason", required=True)
     p = sp.add_parser("train"); p.add_argument("--loop", action="store_true")
     sp.add_parser("status")
@@ -2146,6 +2163,7 @@ def main():
     p.add_argument("--absorbs", default="", help="row ids this integration row lands with it, comma separated; each is "
                    "verified in the branch")
     p.add_argument("--front", action="store_true", help="queue ahead of every row (a fix the owner wants first)")
+    p.add_argument("--replace", action="store_true", help="replace another slot's queued sha this one does not contain")
     sp.add_parser("note", help="append one line to the dated log").add_argument("text")
     sp.add_parser("pick-accept", help="desk acceptance of queued rows (on: state/pick-accept-on)")
     a = ap.parse_args()
