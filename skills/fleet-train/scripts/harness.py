@@ -1038,12 +1038,25 @@ def quality_problems(cwd, base: str = "main", landing=(), plan: str = "spec") ->
     """Output of every quality check that fails (empty = clean). `base` is what the size gate measures growth from."""
     static = static_problems(cwd, base, plan, landing)
     out = [static] if static else []
-    env = run_env(TRAIN_ENV)
-    for c in expand(CLIPPY_STRICT, changed_files(cwd, base) if "{file" in CLIPPY_STRICT else []):
-        r = sh(c, cwd=cwd, check=False, env=env, timeout=1800)
-        if r.returncode != 0:
-            out.append((r.stdout + r.stderr)[-4000:])
+    env = run_env(qc_env(cwd))
+    with lock("qc-other", wait=4000) if Path(env.get("CARGO_TARGET_DIR", "")).name == "qc-other" else nullcontext():
+        for c in expand(CLIPPY_STRICT, changed_files(cwd, base) if "{file" in CLIPPY_STRICT else []):
+            r = sh(c, cwd=cwd, check=False, env=env, timeout=1800)
+            if r.returncode != 0:
+                out.append((r.stdout + r.stderr)[-4000:])
     return chr(10).join(out)
+
+
+def qc_env(cwd) -> dict:
+    """TRAIN_ENV for linting cwd: train target, caller's CARGO_TARGET_DIR, slot target, else qc-other (hold its lock)."""
+    env = dict(TRAIN_ENV)
+    if "CARGO_TARGET_DIR" not in env or Path(cwd).resolve() == TRAIN.resolve():
+        return env
+    m = re.match(r"s(\d+)$", Path(cwd).name)
+    env["CARGO_TARGET_DIR"] = (os.environ.get("CARGO_TARGET_DIR")
+                               or (env_for(int(m.group(1))).get("CARGO_TARGET_DIR") if m else "")
+                               or str(TARGETS / "qc-other"))
+    return env
 
 
 def static_problems(cwd, base: str = "main", plan: str = "spec", landing=()) -> str:
