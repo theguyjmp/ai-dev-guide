@@ -1,5 +1,11 @@
 # overhaul-plan changelog
 
+## One body per entry point, 2026-11-18
+A pilot plan stubbed every verb as a `run` that refused until built plus the body `apply`, and told each builder
+"make `run` call `apply`": about 700 one-line forwarding wrappers landed, one per verb, and the plan seam kept
+teaching them. module-brief.md now says: stub and register the function the registry calls, with the not-built
+refusal in it, and never add a function that only forwards to it.
+
 ## Small rows with work packets, 2026-11-10
 Owner: agents are slow when rows are big; an audit found 38 of 75 the pilot project needs-plan rows still too big, because the
 plan-fix agents supervise.py and router.py start (and the planner rules) did not carry the size rule. A row is now one

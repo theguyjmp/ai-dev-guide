@@ -17,6 +17,9 @@ Rust plan: stub bodies are `todo!()`, the files compile (`cargo check --workspac
 `#[test] fn`s in tests/acceptance/<f>.rs through `mod entry;` (tests/acceptance/entry/mod.rs), each file a root
 Cargo.toml `[[test]]` named after its stem; property tests are 1 to 3 `#[test] fn`s inside `proptest!` in
 tests/property/test_<id>.rs, also a `[[test]]`. Check with `cargo test --no-run --workspace` instead of pytest.
+One body per entry point: when the registry calls a function, stub and register that function itself (it returns
+the project's not-built refusal until built). Never a second function that only forwards to it (`run` calling
+`apply`): the builder fills the one body, and the packet names it.
 
 Never edit spec/, overhaul.toml, conftest.py, _entry.py or another module's files: report a needed change instead.
 Check before handing back: `py -3 -m pytest --collect-only -q tests` exits 0, and your tests fail (the product is
