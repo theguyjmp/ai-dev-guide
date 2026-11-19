@@ -2,7 +2,8 @@
 and this machine takes the solo units the desk has not started; a desk fail reaches the verdict and last-gate.txt; a
 desk unit with no verdict (error, other tests, other head, late, env fault) runs here and is never a pass; the desk
 down sends everything here; this machine busy at gate start (cpu_load() above BUSY_LOAD) keeps no unit while the
-desk is up and still runs everything when the desk is down or errs; a unit the desk could not build runs there once
+desk is up and still runs everything when the desk is down or errs (the cold start; with throughput history a
+unit goes here only when this machine is not slower and finishes no later; stale history: cold start); a unit the desk could not build runs there once
 more after its incremental clean, then here; state/desk-on turns it on, HARNESS_DESK=0/1 overrides; the desk side writes its result.
 
   py -3 tests/test_desk.py
@@ -35,8 +36,10 @@ def check(name, ok, *info):
 
 
 def fake_h(red_local=(), par_secs=0.0):
-    """run_tests recorded (fails = red_local among the unit's tests; a unit with parallel tests takes par_secs)."""
+    """run_tests recorded (fails = red_local among the unit's tests; a unit with parallel tests takes par_secs); no
+    throughput history (the cold start)."""
     calls = []
+    (h.ST / desk.RATES).unlink(missing_ok=True)
 
     def run_tests(tests, timeout=1800, solo=None):
         calls.append((sorted(tests), sorted(solo or [])))
@@ -357,9 +360,54 @@ def test_desk_unit_env():
     desk.poll, desk.ssh, desk.start = real
 
 
+def test_throughput():
+    """Placement by measured throughput: parallel unit 2484 and 7 solo units 1270 cost-seconds, as on the source
+    project, where a loaded machine kept the parallel unit 5016 s while the desk ran the solo units in 1114 s."""
+    us = [{"cost": 2484.0, "tests": ["p"], "solo": []}] + [
+        {"cost": c, "tests": [f"s{i}"], "solo": [f"s{i}"]} for i, c in enumerate([327, 215, 190, 180, 150, 120, 88])]
+    hist = {}
+    for ts, work in ((0, {"here": {"par": [6174, 2484]}, "desk": {"solo": [804, 1270]}}),
+                     (1, {"here": {"par": [2209, 2484]}}), (2, {"desk": {"par": [3038, 2484], "solo": [1246, 1270]}}),
+                     (3, {"here": {"par": [5016, 2484]}, "desk": {"solo": [1114, 1270]}})):
+        hist = desk.learn(hist, work, ts)
+    p = desk.place(us, desk.rates(hist, True, 10))
+    check("loaded here (median 2.0 s per cost-second vs the desk's 1.22): 0 units here, nothing to steal",
+          not p.here and not p.steal, p)
+    slow_desk = {"here": {"par": [[0, 0.5]]}, "desk": {"par": [[0, 1.5]], "solo": [[0, 1.5]]}}
+    p = desk.place(us, desk.rates(slow_desk, True, 10))
+    check("idle here, slow desk: the parallel unit here, every solo unit stealable",
+          p.here == {0} and p.steal == set(range(1, len(us))), p)
+    late = desk.RATE_TTL["here"] + 10
+    check("stale history here: cold start, the parallel unit here when not busy, none when busy",
+          desk.place(us, desk.rates(hist, True, late)).here == {0}
+          and not desk.place(us, desk.rates(hist, False, late)).here)
+    check("learn keeps RATE_KEEP samples per machine and kind",
+          len(desk.learn({"here": {"par": [[i, 1.0] for i in range(9)]}}, {"here": {"par": [1, 1]}}, 9)["here"]["par"])
+          == desk.RATE_KEEP)
+    calls = fake_h(par_secs=0.05)
+    now = time.time()
+    h.save(desk.RATES, {"here": {"par": [[now, 3.0]]}, "desk": {"par": [[now, 1.2]]}})
+    FakeDesk.script, FakeDesk.why0 = {}, ""
+    out = desk.run_desk(h, T, desk_cls=FakeDesk)
+    ev = [json.loads(l) for l in (h.ST / "events.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    gs = [e for e in ev if e.get("stage") == "acceptance-desk"][-1]
+    hist = h.load(desk.RATES, {})
+    check("slow here: nothing here, the desk ran every test once; the event carries the plan; the work is learned",
+          out == [] and calls == [] and FakeDesk.last.tests == set(T) and gs.get("plan_here") == []
+          and gs.get("rates", {}).get("here/par") == 3.0 and len(hist["desk"]["par"]) == 2, (out, len(calls), gs))
+    calls = fake_h()
+    h.save(desk.RATES, {"here": {"par": [[now, 3.0]]}, "desk": {"par": [[now, 1.2]]}})
+    FakeDesk.why0 = "desk unreachable"
+    out = desk.run_desk(h, T, desk_cls=FakeDesk)
+    check("slow here, desk down: every unit here in one call, each test once",
+          out == [] and calls == [(sorted(set(T)), sorted(SOLO))], [len(c[0]) for c in calls])
+    FakeDesk.why0 = ""
+
+
 def main():
     us = test_units_and_pick()
     test_run_desk(us)
+    test_throughput()
     test_desk_poll()
     test_desk_unit_env()
     test_switch_and_routing()

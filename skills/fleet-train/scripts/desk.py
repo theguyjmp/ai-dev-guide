@@ -1,5 +1,5 @@
 """The desk: a second Windows machine (ssh, cmd shell) running tests from a git bundle. Cargo: acceptance split (solo
-units there, the rest here; busy here: all there; no verdict runs here; a unit that did not build runs there once
+units placed by measured throughput, state/unit-rates.json; cold start by CPU load; no verdict runs here; a unit that did not build runs there once
 more after its incremental clean, then here). Other runners: every test run there (`job`); no verdict raises
 Unavailable. On with <state>/desk-on or [desk] host; HARNESS_DESK=0/1 overrides.
 
@@ -7,7 +7,7 @@ Unavailable. On with <state>/desk-on or [desk] host; HARNESS_DESK=0/1 overrides.
 """
 from __future__ import annotations
 
-import argparse, hashlib, json, os, re, subprocess, sys, time
+import argparse, hashlib, json, os, re, statistics, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,8 +47,12 @@ LINK_SECS = 6.0
 SOLO_SECS = 120.0  # a solo test with no recorded alone run
 LATE = (3.0, 1500.0)  # no result after 3 x the unit's cost + 25 min (a cold build): no verdict
 POLL_SECS = 20
-BUSY_LOAD = 70.0  # CPU % at gate start above which no unit runs here (a loaded machine is far slower than the desk)
+BUSY_LOAD = 70.0  # cold start: CPU % at gate start above which no unit runs here
 LOAD_SECS = 2.0
+RATES = "unit-rates.json"  # {machine: {kind: [[ts, wall secs / unit cost], ...]}}, newest last
+RATE_KEEP = 3  # samples per machine and kind; the plan uses their median
+RATE_TTL = {"here": 12 * 3600.0}  # this machine's load swings; the desk's samples do not age
+MACHINES, KINDS = ("here", "desk"), ("par", "solo")
 KIT_SIG = "desk-kit.json"
 LOCAL_ONLY = ("HARNESS_HOME", "HARNESS_REPO", "HARNESS_WT", "HARNESS_DESK", "HARNESS_LOG_DIR", "HARNESS_QS",
               "HARNESS_REMOTE_", "HARNESS_CLOUD_")  # paths or switches of this machine: never forwarded
@@ -305,12 +309,64 @@ def local_ok(load) -> bool:
     return load is None or load <= BUSY_LOAD
 
 
-def pick(us: list, todo: list, machine: str, desk_up: bool = True, here: bool = True) -> list:
-    """Unit indices `machine` ("here" | "desk") runs next as one run_tests call; the split's one owner. The desk takes
-    one solo unit, here the lowest index; busy (not here): here none, the desk the lowest; desk out: here all left."""
+def kind(u: dict) -> str:
+    return "solo" if u["solo"] else "par"
+
+
+def learn(hist: dict, work: dict, ts: float) -> dict:
+    """hist plus a gate's work {machine: {kind: [wall secs, cost]}}."""
+    out = {m: {k: list(v) for k, v in ks.items()} for m, ks in hist.items()}
+    for m, ks in work.items():
+        for k, (secs, cost) in ks.items():
+            if cost > 0:
+                out.setdefault(m, {}).setdefault(k, []).append([round(ts), round(secs / cost, 4)])
+                out[m][k] = out[m][k][-RATE_KEEP:]
+    return out
+
+
+def rates(hist: dict, here: bool, now: float) -> dict:
+    """{(machine, kind): wall secs per cost-second}: median of fresh samples; this machine's load slows both kinds, so
+    else its other kind's; else cold: desk 1.0, here the desk's when here, never when busy."""
+    def med(m, k):
+        xs = [r for ts, r in hist.get(m, {}).get(k, []) if now - ts <= RATE_TTL.get(m, float("inf"))]
+        return statistics.median(xs) if xs else None
+    out = {}
+    for m in ("desk", "here"):
+        for k, o in zip(KINDS, reversed(KINDS)):
+            r = med(m, k)
+            r = med(m, o) if r is None and m == "here" else r
+            out[m, k] = r if r is not None else 1.0 if m == "desk" else out["desk", k] if here else float("inf")
+    return out
+
+
+@dataclass(frozen=True)
+class Plan:
+    here: frozenset  # the unit here opens with
+    steal: frozenset  # units here may take when idle
+    expect: tuple  # wall secs (here, desk)
+
+
+def place(us: list, rate: dict) -> Plan:
+    """This machine takes only units it is not slower at, else all go to the desk (in order): it opens with the first
+    whose finish here is no later than the desk's with every unit, and idle steals an unstarted one."""
+    t = [{m: u["cost"] * rate[m, kind(u)] for m in MACHINES} for u in us]
+    desk_s = sum(x["desk"] for x in t)
+    ok = [k for k, x in enumerate(t) if x["here"] <= x["desk"]]
+    first = next((k for k in ok if t[k]["here"] <= desk_s), None)
+    mine = frozenset() if first is None else frozenset({first})
+    steal = frozenset(ok) - mine
+    return Plan(mine, steal, (round(sum(t[k]["here"] for k in mine)), round(desk_s - sum(t[k]["desk"] for k in mine))))
+
+
+def pick(us: list, todo: list, machine: str, desk_up: bool = True, here: bool = True, plan: Plan = None) -> list:
+    """The unit indices `machine` ("here" | "desk") runs next as one run_tests() call; todo: unstarted indices;
+    plan default: the cold start. Desk out of the gate (desk_up False): here every unit left in one call."""
+    plan = plan or place(us, rates({}, here, 0.0))
     if machine == "here":
-        return sorted(todo) if not desk_up else sorted(todo)[:1] if here else []
-    return [k for k in sorted(todo) if us[k]["solo"] or not here][:1]
+        if not desk_up:
+            return sorted(todo)
+        return ([k for k in sorted(todo) if k in plan.here] or [k for k in sorted(todo) if k in plan.steal])[:1]
+    return [k for k in sorted(todo) if k not in plan.here][:1]
 
 
 PICK = "desk-pick.json"  # {"pid", "start", "rid"} of harness.pick_accept_queue's desk run
@@ -466,10 +522,14 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
     load = cpu_load()
     here = local_ok(load)
     us = units(tests, h.solo_tests(tests), h.load(h.ACCEPT_TIMES, {}), h.load(h.ALONE_TIMES, {}), UNITS)
+    hist = h.load(RATES, {})
+    rate = rates(hist, here, t0)
+    plan = place(us, rate)
     sha = h.git("rev-parse", "HEAD", cwd=h.TRAIN).stdout.strip()
     gid = f"{sha[:12]}-{int(t0) % 1000000}"
     fails, logs, where, todo = {}, {}, {}, list(range(len(us)))
     busy, dtimes, dalone = {"here": 0.0, "desk": 0.0}, {}, {}
+    work = {m: {} for m in MACHINES}  # {machine: {kind: [wall secs, cost]}}
     lg = h.ST / "last-gate.txt"
 
     def local(ks):
@@ -486,15 +546,21 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
             if log:
                 logs[k] = log
 
+    def did(machine, ks, wall):  # a run of one kind of unit is a throughput sample
+        if len({kind(us[k]) for k in ks}) == 1:
+            w = work[machine].setdefault(kind(us[ks[0]]), [0.0, 0.0])
+            w[0], w[1] = w[0] + wall, w[1] + sum(us[k]["cost"] for k in ks)
+
     def give(machine, desk_up):
-        ks = pick(us, todo, machine, desk_up, here)
+        ks = pick(us, todo, machine, desk_up, plan=plan)
         todo[:] = [k for k in todo if k not in ks]
         return ks
 
     with ThreadPoolExecutor(1) as pool:
-        fut = pool.submit(local, give("here", True)) if us and here else None
-        desk, skipped = None, "no solo units"
-        if any(u["solo"] or not here for u in us):
+        ks = give("here", True)
+        fut = pool.submit(local, ks) if ks else None
+        desk, skipped = None, "every unit here"
+        if len(plan.here) < len(us):
             desk = desk_cls(h, gid, sha)
             skipped = desk.why
         if skipped:
@@ -507,6 +573,7 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
                 mine[0] |= set(f) - set().union(*mine)  # a name of no unit ("build") counts too
                 for i, k in enumerate(ks):
                     take(k, sorted(mine[i]), log if i == 0 else "", "here", secs if i == 0 else 0.0)
+                did("here", ks, secs)
                 fut = None
             if desk is not None and desk.k is not None:
                 got = desk.poll(us[desk.k])
@@ -515,6 +582,8 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
                     desk = None
                     todo.append(got[0])
                 elif got is not None:
+                    if got[0] not in fails:
+                        did("desk", [got[0]], time.time() - dt0)
                     take(got[0], got[1]["fails"], got[1].get("log", ""), "desk", got[1].get("secs", 0))
                     dtimes.update(got[1].get("times", {}))
                     dalone.update(got[1].get("alone", {}))
@@ -523,7 +592,7 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
                 ks = give("here", desk is not None)
                 fut = pool.submit(local, ks) if ks else None
             if desk is not None and desk.k is None:
-                ks = give("desk", True)
+                ks, dt0 = give("desk", True), time.time()
                 if ks and not desk.start(ks[0], us[ks[0]]):
                     h.event("desk_error", gate=gid, reason=desk.why)
                     desk = None
@@ -531,6 +600,8 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
             if len(fails) < len(us) and (fut is None or not fut.done()):
                 time.sleep(POLL_SECS)
     fill_times(h, dtimes, dalone)
+    h.save(RATES, learn(hist, work, time.time()))
+    work = {m: {k: [round(s), round(c)] for k, (s, c) in ks.items()} for m, ks in work.items() if ks}
     out = sorted({t for f in fails.values() for t in f})
     if out:
         lg.write_text("\n".join(logs[k] for k in sorted(logs))[-20000:], encoding="utf-8")
@@ -539,7 +610,9 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
             solo_units=sum(1 for u in us if u["solo"]),
             solo_here=sum(1 for k, v in where.items() if v == "here" and us[k]["solo"]),
             here_secs=round(busy["here"]), desk_secs=round(busy["desk"]), secs=round(time.time() - t0),
-            cpu_load=None if load is None else round(load), local_ok=here, n=len(set(tests)), fails=len(out))
+            cpu_load=None if load is None else round(load), local_ok=here, n=len(set(tests)), fails=len(out),
+            rates={f"{m}/{k}": round(r, 3) for (m, k), r in rate.items() if r != float("inf")},
+            plan_here=sorted(plan.here), expect=list(plan.expect), work=work)
     want = set(tests)
     return [f for f in out if f in want] or out
 
