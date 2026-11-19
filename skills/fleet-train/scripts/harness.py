@@ -18,6 +18,7 @@ whose [profile] table overrides any command or pattern in STACKS below.
 from __future__ import annotations
 
 import argparse, json, os, re, shutil, subprocess, sys, time
+from collections import Counter
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
@@ -460,6 +461,7 @@ STACKS = {
         "path_re": r"((?:crates|src|tests)[\\/][\w\\/.-]+\.rs)",  # repo files a failure log names
         "quoted_path_re": r"[\"'`]((?:crates|src|tests)/[\w/.-]+\.rs)[\"'`]",  # repo files a test reads
         "strip_root": False,
+        "assert_sides_re": r"^\s*left: (.*)\n\s*right: (.*)$",  # assert_eq!'s two sides (assert_diff_files)
         # env the toolchain needs: on Windows the MSVC linker and cc builds are found through ProgramFiles(x86),
         # which Git Bash drops. A profile can add its own (harness.toml [profile] require_env = [...]).
         "require_env": ["ProgramFiles(x86)"] if os.name == "nt" else [],
@@ -512,6 +514,7 @@ STACKS = {
         "path_re": r"((?:[\w.-]+[\\/])+[\w.-]+\.(?:[mc]?js|jsx|[mc]?ts|tsx))",
         "quoted_path_re": r"[\"'`]((?:\.{1,2}/)*[\w./-]+\.(?:[mc]?js|jsx|[mc]?ts|tsx|json))[\"'`]",
         "strip_root": True,  # logs carry absolute paths: drop the train root so the names are repo-relative
+        "assert_sides_re": "",
         "require_env": [],
         "env_fail_re": "",
         "crate_blame": False,
@@ -1420,34 +1423,19 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     # before blame and probe, which pin a main-red test on an innocent row
     if quarantine.heal(sys.modules[__name__], merged, rows, fails):
         return try_batch(merged, rows, depth + 1, reviewed=True)
-    # blame by file: eject branches that touched a file the failure output names
+    # blame by file: eject the one branch whose own changes touch a file the failure names; more suspects bisect
     if P["strip_root"]:  # absolute paths in the log -> repo-relative
         for root in {str(TRAIN), TRAIN.as_posix()}:
             log = (log or "").replace(root + chr(92), "").replace(root + "/", "")
-    named = set(m.replace(chr(92), "/") for m in re.findall(P["path_re"], log or ""))
-    m = re.search(r"failing crates: ([^\n]*)", log or "")
-    if m:
-        named |= set(m.group(1).split())
-    for r_ in rows.values():  # a failing test points at its row's declared files
-        if any(t in fails for t in r_["tests"]):
-            named |= set(r_["file_list"])
-    for t in fails:  # a test no row owns (a quality or regression test) points at the repo files it reads
-        src = TRAIN / t.split("::")[0]
-        if "::" in t and src.is_file():
-            import posixpath  # a relative import ("../x.js") resolves against the test file's folder
-            named |= set(posixpath.normpath(posixpath.join(posixpath.dirname(t.split("::")[0]), p)) if p.startswith(".") else p
-                         for p in re.findall(P["quoted_path_re"], src.read_text(encoding="utf-8", errors="replace")))
-    if len(merged) > 1 and named:
-        guilty = []
-        for q in merged:
-            fs = set(git("diff", "--name-only", f"main...{q['sha']}", check=False).stdout.split())
-            if fs & named or any(f.startswith(d) for f in fs for d in named if d.endswith("/")):
-                guilty.append(q)
-        if guilty and len(guilty) < len(merged):
-            for q in guilty:
-                reject(q, f"gate red ({fails[:3]}) in a file your branch changed: {sorted(named)[:5]} :: {log[-1200:]}")
-            event("blame_by_file", ejected=[q["row"] for q in guilty])
-            return try_batch([q for q in merged if q not in guilty], rows, depth + 1)
+    if len(merged) > 1:
+        guilty, named, own = blame_by_file(merged, rows, fails, log)
+        if len(guilty) == 1:
+            q = guilty[0]
+            reject(q, f"gate red ({fails[:3]}) in a file your branch changed: {sorted(touching(own[q['row']], named))[:5]} :: {log[-1200:]}")
+            event("blame_by_file", ejected=[q["row"]], named=sorted(named)[:10])
+            return try_batch([x for x in merged if x is not q], rows, depth + 1)
+        if guilty:
+            event("blame_suspects", rows=[q["row"] for q in guilty], named=sorted(named)[:10])
     if len(merged) > 1 and fails and not set(fails) & {"clippy", "unit", "quality"}:
         bad = probe_culprit(merged, rows, fails)
         if bad is not None:
@@ -1461,6 +1449,80 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     if left:
         promote(left)
     return left + try_batch(merged[mid:], rows, depth + 1)
+
+
+LAND_SUBJECT = re.compile(r"^train: land (\S+)")  # build_train's merge subject
+
+
+def assert_diff_files(log: str) -> set:
+    """Paths an assertion's two sides (profile assert_sides_re) name on one side only or with another value: two maps
+    of many paths differing in one name that one, never all. A side cut off by the log tail is skipped."""
+    out = set()
+    for left, right in (re.findall(P["assert_sides_re"], log or "", re.M) if P["assert_sides_re"] else []):
+        sides = []
+        for side in (left, right):
+            if side.count("{") + side.count("[") + side.count("(") != side.count("}") + side.count("]") + side.count(")"):
+                break
+            sides.append(Counter((p.replace("\\\\", "/").replace(chr(92), "/"), (v or "").strip()) for p, v in
+                                 re.findall("\"" + P["path_re"] + r"\"(?:\s*[:,]\s*([^,\"}\])\s][^,}\])]*))?", side)))
+        if len(sides) == 2:
+            out |= {p for p, _ in (sides[0] - sides[1]) + (sides[1] - sides[0])}
+    return out
+
+
+def blame_named(rows, fails, log, tree=TRAIN) -> set:
+    """Files a red gate names: an assertion diff's alone (the panic site and failing crates would blame every row in
+    the test's package), else the log's paths, failing crates, failing tests' row files and the files an unowned
+    failing test reads."""
+    named = assert_diff_files(log)
+    if named:
+        return named
+    named = set(m.replace(chr(92), "/") for m in re.findall(P["path_re"], log or ""))
+    m = re.search(r"failing crates: ([^\n]*)", log or "")
+    if m:
+        named |= set(m.group(1).split())
+    for r_ in rows.values():  # a failing test points at its row's declared files
+        if any(t in fails for t in r_["tests"]):
+            named |= set(r_["file_list"])
+    for t in fails:  # a test no row owns (a quality or regression test) points at the repo files it reads
+        src = tree / t.split("::")[0]
+        if "::" in t and src.is_file():
+            import posixpath  # a relative import ("../x.js") resolves against the test file's folder
+            named |= set(posixpath.normpath(posixpath.join(posixpath.dirname(t.split("::")[0]), p)) if p.startswith(".") else p
+                         for p in re.findall(P["quoted_path_re"], src.read_text(encoding="utf-8", errors="replace")))
+    return named
+
+
+def own_files(merged, tree=TRAIN) -> dict:
+    """{row: files} its `train: land` merge adds over its first parent (the rows merged ahead of it, or main), so a
+    row stacked on a queued row, even on its pre-restack commits, never owns its parent's files; main...sha named
+    them all and ejected a whole stack for one row. main...sha stays the fallback for an entry the chain lacks."""
+    land = {}
+    for line in git("log", "--first-parent", "--format=%H%x09%s", "main..HEAD", cwd=tree, check=False).stdout.splitlines():
+        c, _, subj = line.partition(chr(9))
+        if (m := LAND_SUBJECT.match(subj)) and m.group(1) not in land:
+            land[m.group(1)] = c
+    out = {}
+    for q in merged:
+        c = land.get(q["row"])
+        rng = [f"{c}^1", c] if c else [f"main...{q['sha']}"]
+        out[q["row"]] = set(git("diff", "--name-only", *rng, cwd=tree if c else REPO, check=False).stdout.split())
+    return out
+
+
+def touching(files, named) -> set:
+    """files in named, a named dir/ matching all under it."""
+    return {f for f in files if f in named or any(d.endswith("/") and f.startswith(d) for d in named)}
+
+
+def blame_by_file(merged, rows, fails, log, tree=TRAIN):
+    """The one blame owner: (entries whose own files touch a named file, named, own). The caller ejects one guilty
+    entry and bisects more: file overlap alone never ejects a set."""
+    named = blame_named(rows, fails, log, tree)
+    if not named:
+        return [], named, {}
+    own = own_files(merged, tree)
+    return [q for q in merged if touching(own[q["row"]], named)], named, own
 
 
 def probe_culprit(merged, rows, fails):
