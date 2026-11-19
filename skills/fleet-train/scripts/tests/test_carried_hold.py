@@ -100,6 +100,7 @@ h.finish_spec = lambda ids: calls["finish"].append(sorted(ids))
 h.build_train = lambda batch, rows_: (list(batch), [])
 h.TRAIN = h.REPO  # the green path reads the train head
 rows["CLEAN-s"] = {"id": "CLEAN-s", "tests": [], "status": "cleanup", "file_list": [], "deps": [], "module": "cleanup"}
+h.save("queue.json", [INTA, S_])  # a row lands only while queued with its sha (harness.superseded)
 got = h.try_batch([INTA, S_], rows, reviewed=True)
 check("a red absorbed test rejects its integration row and the rest lands", got == [S_] and calls == {"reject": ["CLEAN-int"], "finish": [["CLEAN-s"]]}, calls)
 

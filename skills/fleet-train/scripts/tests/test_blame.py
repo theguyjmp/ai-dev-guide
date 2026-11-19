@@ -106,6 +106,7 @@ if True:
     git(train, "merge", "-q", "--no-ff", "--no-edit", "-X", "theirs", "-m", "train: land E", ee)
     rows = {r: {"id": r, "tests": [], "file_list": [], "status": "cleanup", "deps": []} for r in ("D", "E")}
     red.append(log)
+    h.save("queue.json", merged + two[1:])  # a row lands only while queued with its sha (harness.superseded)
     landed = h.try_batch(two, rows, reviewed=True)
     check("two suspects are bisected, never ejected together", not rejected and "blame_suspects" in events
           and [q["row"] for q in landed] == ["D", "E"], rejected, events, gated[1:])

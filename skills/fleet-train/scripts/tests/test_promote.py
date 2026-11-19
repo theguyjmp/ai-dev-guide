@@ -55,6 +55,7 @@ def test_bisect_never_lands_the_rejected_half():
         return (False, ["unit"], "") if (h.TRAIN / "R2.txt").exists() else (True, [], "")
     h.gate, h.batch_review, h.finish_spec = gate, (lambda merged, cwd=None, base="main": []), (lambda ids: None)
     h.quarantine.heal = lambda *a, **k: False
+    h.save("queue.json", batch)  # a row lands only while queued with its sha (harness.superseded)
     h.GREEN["head"] = ""
     landed = h.try_batch(batch, rows)
     check("bisect lands R1 only", [q["row"] for q in landed] == ["R1"], landed)
@@ -63,6 +64,40 @@ def test_bisect_never_lands_the_rejected_half():
     check("main has R1", on_main("R1.txt"))
     check("main never gets the rejected R2", not on_main("R2.txt"), git("log", "--oneline", "-3", "main"))
     check("R2 rejected", "R2" in h.load("rejects.json", {}))
+
+
+
+def test_a_requeued_row_never_lands_its_old_sha():
+    """A lane requeues R4 in place while the gate runs (a fix of the unit test its old sha breaks): the old sha is not
+    landed on that green verdict; the rest is gated again without it and lands; the new sha stays queued, unrejected."""
+    batch = []
+    for i, r in enumerate(("R3", "R4", "R4fix")):
+        git("checkout", "-q", "-B", r, "main")
+        (h.REPO / f"{r[:2]}.txt").write_text(r, encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", r)
+        batch.append({"row": r[:2], "sha": git("rev-parse", "HEAD"), "ts": 10 + i})
+        git("checkout", "-q", "main")
+    old, new = batch[1]["sha"], batch.pop()["sha"]
+    rows = {r: {"id": r, "tests": [], "status": "cleanup", "file_list": [f"{r}.txt"], "deps": [], "module": "cleanup"}
+            for r in ("R3", "R4")}
+    gated = []
+
+    def gate(ids, rows_, quick=False):
+        if not gated:  # the requeue in place lands in queue.json mid-gate
+            h.save("queue.json", [dict(q, sha=new) if q["row"] == "R4" else q for q in h.load("queue.json", [])])
+        gated.append(sorted(ids))
+        return True, [], ""
+    h.gate = gate
+    h.save("queue.json", batch)
+    h.GREEN["head"] = ""
+    landed = h.try_batch(batch, rows)
+    h.promote(landed)
+    has_old = subprocess.run(["git", "merge-base", "--is-ancestor", old, "main"], cwd=str(h.REPO)).returncode == 0
+    check("the superseded sha never reaches main", not has_old and [q["row"] for q in landed] == ["R3"], gated)
+    check("the rest is gated again without it", gated == [["R3", "R4"], ["R3"]], gated)
+    check("the new sha stays queued, unrejected", {q["row"]: q["sha"] for q in h.load("queue.json", [])}.get("R4") == new
+          and "R4" not in h.load("rejects.json", {}))
 
 
 if __name__ == "__main__":

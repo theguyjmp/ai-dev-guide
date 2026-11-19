@@ -65,6 +65,7 @@ class Fixture(unittest.TestCase):
                  "finish_spec": lambda ids: self.log.append(("land", tuple(ids))),
                  "reject": lambda q, why: self.log.append(("reject", q["row"])),
                  "probe_culprit": lambda merged, rows, fails: self.log.append(("probe", tuple(fails))), "gate": gate}
+        h.save("queue.json", list(BATCH))  # a row lands only while queued with its sha (harness.superseded)
         with mock.patch.multiple(h, **fakes):
             return h.try_batch(list(BATCH), dict(ROWS))
 

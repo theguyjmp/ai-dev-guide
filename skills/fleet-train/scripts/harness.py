@@ -1220,7 +1220,11 @@ def gate(new_rows, rows, quick=False):
 
 
 def build_train(batch, rows):
-    """Merge every queued sha onto main in the train worktree. Returns (merged, conflicted)."""
+    """Merge every queued sha onto main in the train worktree. Returns (merged, conflicted). An entry no longer queued
+    with its sha (superseded) is left out: not merged, not rejected; the queued sha goes in a later train."""
+    if stale := superseded(batch):
+        event("train_superseded", rows=[q["row"] for q in stale], shas=[q["sha"][:12] for q in stale], at="build")
+        batch = [q for q in batch if q not in stale]
     if not (TRAIN / ".git").exists():
         git("worktree", "add", "-f", "--detach", str(TRAIN), "main")
     git("reset", "-q", "--hard", cwd=TRAIN, check=False)
@@ -1430,6 +1434,10 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     ids = sorted(landing_ids(merged))
     ok, fails, log = gate(ids, rows, quick)
     if ok:
+        if stale := superseded(merged):  # requeued in place while gated: the verdict is for code nobody queues now
+            event("train_superseded", rows=[q["row"] for q in stale], shas=[q["sha"][:12] for q in stale], at="green")
+            rest = [q for q in merged if q not in stale]
+            return try_batch(rest, rows, depth + 1, reviewed=True) if rest else []
         finish_spec(ids)
         GREEN["head"] = git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip()
         return merged
@@ -1560,12 +1568,27 @@ def probe_culprit(merged, rows, fails):
     return cand[0]
 
 
+class UnprovenLand(RuntimeError):
+    """promote refused: an entry it would land is no longer queued with its sha."""
+
+
+def superseded(entries) -> list:
+    """The entries no longer queued with their own sha (queue.json now): requeued in place or dequeued since the pick.
+    The one rule for "a row lands only with the sha currently queued" (build_train, try_batch's green path, promote)."""
+    queued = {(q["row"], q["sha"]) for q in load("queue.json", [])}
+    return [q for q in entries if (q["row"], q["sha"]) not in queued]
+
+
 def promote(landed):
-    """Fast-forward main to the last gate-verified train head (GREEN); a no-op when main already has it."""
+    """Fast-forward main to the last gate-verified train head (GREEN); a no-op when main already has it. Raises
+    UnprovenLand when an entry not yet on main is no longer queued with its sha (a requeue in place mid-train)."""
     head = GREEN["head"]
     before = git("rev-parse", "main").stdout.strip()
     if not head or head == before:
         return
+    pending = [q for q in landed if git("merge-base", "--is-ancestor", q["sha"], before, check=False).returncode != 0]
+    if stale := [q["row"] for q in superseded(pending)]:
+        raise UnprovenLand(f"promote {head[:12]}: superseded {stale}")
     if git("status", "--porcelain", "--untracked-files=no").stdout.strip():
         git("update-ref", "refs/heads/main", head)  # main checkout dirty: move the ref only
     else:
