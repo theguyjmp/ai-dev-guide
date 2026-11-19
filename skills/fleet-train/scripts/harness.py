@@ -1634,8 +1634,9 @@ def disjoint(queue: list) -> list:
 def lands_rows(q) -> list:
     """The rows queue entry q lands: its own, then the rows an integration entry absorbs on purpose (`absorbs`, set by
     clean-submit --absorbs). The one answer for the hold rule, the frontier, the gate's new rows, finish_spec and the
-    land event."""
-    return [q["row"], *q.get("absorbs", [])]
+    land event.
+    In a train, gate_rows adds `proves` (memory only): rows the branch's spec marks proven and main's does not."""
+    return [q["row"], *q.get("absorbs", []), *q.get("proves", [])]
 
 
 def landing_ids(entries) -> set:
@@ -1663,23 +1664,26 @@ def gate_rows(entries, rows) -> list:
     """Fill rows (main's spec, the gate's) with each row the entries land that main's spec lacks: a CLEAN-* row as a
     test-less cleanup stub; an absorbed spec row from the entry's own spec (an integration row may add it), status
     "absorbed" until it lands, so the gate runs its acceptance tests as a new row's and finish_spec marks it proven.
-    Returns [(entry, why)] for entries absorbing a spec row with no acceptance tests: no row is proven without its tests."""
+    A row the branch's spec marks proven and main's does not lands with the entry too (q["proves"]), so its tests run
+    here: a merge would otherwise bring it to main proven, untested (CLEAN-int3 carried 8 such rows, 2026-11-18).
+    Returns [(entry, why)] for entries landing a spec row with no acceptance tests: no row is proven without its tests."""
     bad = []
     for q in entries:
-        branch = None
+        q.pop("proves", None)
+        branch = parse_spec(git("show", f"{q['sha']}:{SPEC}", check=False).stdout)
+        own = set(lands_rows(q))
+        q["proves"] = sorted(i for i, r in branch.items() if r["status"] == "proven" and i not in own
+                             and rows.get(i, {}).get("status") != "proven")
         for i in lands_rows(q):
             if i.startswith("CLEAN-"):
                 rows.setdefault(i, {"id": i, "tests": [], "status": "cleanup", "file_list": [], "deps": [], "module": "cleanup"})
                 continue
             if i == q["row"]:
                 continue
-            if i not in rows:
-                if branch is None:
-                    branch = parse_spec(git("show", f"{q['sha']}:{SPEC}", check=False).stdout)
-                if i in branch:
-                    rows[i] = dict(branch[i], status="absorbed")
+            if i not in rows and i in branch:
+                rows[i] = dict(branch[i], status="absorbed")
             if not rows.get(i, {}).get("tests"):
-                bad.append((q, f"absorbed spec row {i} has no acceptance tests in {SPEC} (main or the branch): it cannot be proven"))
+                bad.append((q, f"landed spec row {i} has no acceptance tests in {SPEC} (main or the branch): it cannot be proven"))
                 break
     return bad
 

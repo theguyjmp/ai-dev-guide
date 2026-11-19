@@ -63,7 +63,8 @@ git("branch", "h/CLEAN-k", "HEAD")
 git("checkout", "-q", "-b", "int", "main")
 git("merge", "-q", "--no-ff", "-m", "Merge CLEAN-k into int", "CLEAN-k")
 (h.REPO / "spec").mkdir(exist_ok=True)
-(h.REPO / "spec" / "FUNCTIONS.md").write_text("| R9 | 1 | m | - | cli | tests/acceptance/r9.rs::t_r9 | planned | r9.txt |" + chr(10))
+(h.REPO / "spec" / "FUNCTIONS.md").write_text("| R9 | 1 | m | - | cli | tests/acceptance/r9.rs::t_r9 | planned | r9.txt |" + chr(10)
+                                           + "| R10 | 1 | m | - | cli | tests/acceptance/r10.rs::t_r10 | proven | r10.txt |" + chr(10))
 git("add", "-A")
 git("commit", "-q", "-m", "R9: work")
 int_sha = git("rev-parse", "HEAD")
@@ -89,6 +90,8 @@ check("absorbed rows are provided by their entry: it and its stack are picked",
 rows = {}
 check("gate rows: an absorbed spec row brings its tests from the branch", h.gate_rows([INTA], rows) == []
       and rows["R9"]["tests"] == ["tests/acceptance/r9.rs::t_r9"] and rows["R9"]["status"] == "absorbed")
+check("a row the branch marks proven and main does not lands with the entry, with its tests",
+      INTA.get("proves") == ["R10"] and rows["R10"]["tests"] == ["tests/acceptance/r10.rs::t_r10"], INTA)
 check("an absorbed spec row with no tests cannot land", len(h.gate_rows([dict(INT, absorbs=["R8"])], {})) == 1)
 calls, verdicts = {"reject": [], "finish": []}, [(False, ["tests/acceptance/r9.rs::t_r9"], ""), (True, [], "")]
 h.gate = lambda ids, rows_, quick=False: verdicts.pop(0)
