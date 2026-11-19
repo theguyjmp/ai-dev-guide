@@ -368,7 +368,7 @@ def test_desk_unit_env():
 def test_throughput():
     """Placement for the earliest gate finish: parallel unit 2484 and 7 solo units 1270 cost-seconds, as on the
     source project, where a loaded machine kept the parallel unit 5016 s while the desk ran the solo units in 1114 s,
-    and two later gates were planned on one machine (rates slightly worse here) where a split finishes ~25% sooner."""
+    and a later gate planned all on the desk (rates slightly worse here) where a split finishes ~24% sooner."""
     us = [{"cost": 2484.0, "tests": ["p"], "solo": []}] + [
         {"cost": c, "tests": [f"s{i}"], "solo": [f"s{i}"]} for i, c in enumerate([327, 215, 190, 180, 150, 120, 88])]
     hist = {}
@@ -386,8 +386,8 @@ def test_throughput():
           0 not in p.here and p.expect[0] <= p.expect[1] and max(p.expect) < alone(r, "desk"), p)
     for r in ({("here", "par"): 2.019, ("here", "solo"): 2.019, ("desk", "par"): 1.719, ("desk", "solo"): 1.048},
               {("here", "par"): 1.719, ("here", "solo"): 1.048, ("desk", "par"): 1.719, ("desk", "solo"): 1.048}):
-        p = desk.place(us, r)  # recorded gates planned on one machine: 5601 s, now 4270 s (the tie: less here)
-        check("slightly slower here: both machines, sooner than either alone, the parallel unit on the desk",
+        p = desk.place(us, r)  # recorded: all on the desk 5601 s, now 4270 s; equal rates: the tie, less here
+        check("slightly slower or equal here: both machines, sooner than either alone, the parallel unit on the desk",
               p.here == set(range(1, len(us))) and max(p.expect) < min(alone(r, m) for m in desk.MACHINES), p)
     slow_desk = {"here": {"par": [[0, 0.5]]}, "desk": {"par": [[0, 1.5]], "solo": [[0, 1.5]]}}
     r = desk.rates(slow_desk, True, 10)
