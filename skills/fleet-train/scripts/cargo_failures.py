@@ -17,6 +17,7 @@ CRASH = re.compile(r"to rerun pass `([^`]+)`\s*\n\s*Caused by:\s*\n\s*process di
                    r"\((exit code: (?!101\))[^)]*|signal: [^)]*)\)")
 PASSED = re.compile(r"^test result: \w+\. (\d+) passed", re.M)
 UNBUILT = re.compile(r"^error: could not compile `([\w-]+)`(?: \((?:\w+ )*?(?:lib|\w+ \"([\w-]+)\"))?", re.M)
+LIB_UNBUILT = re.compile(r"^error: could not compile `([\w-]+)` \(lib\)", re.M)  # the library itself, not its tests
 # A link error's owners: the archive member or object holding an unresolved reference (`libX-<hash>.rlib(...)` or
 # `X.<cgu>.<n>.rcgu.o`), never the linker's argument list. Logs may carry cargo's JSON escapes (a literal \r\n).
 LINK_OWNER = re.compile(r"(?:\blib(\w+)-[0-9a-f]{16}\.rlib\([^)\s]*\)|(?<![\w.-])(\w+)\.\w+\.\w+\.rcgu\.o) : error LNK\d+")
@@ -32,7 +33,7 @@ class CargoFailures:
     unnamed: tuple = ()  # failed targets no printed name accounts for
     crashes: dict = field(default_factory=dict)  # {selector: "exit code: ..."}
     unbuilt: tuple = ()  # targets cargo could not compile or link, by crate name (incremental/<name>-*)
-    packages: tuple = ()  # packages of those targets, as cargo names them (`cargo clean -p <package>`)
+    lib_packages: tuple = ()  # packages whose library cargo could not compile, as cargo names them
     linked: tuple = ()  # crates a link error names: its archive/object owners and unresolved symbols' crates
 
     @property
@@ -51,7 +52,7 @@ class CargoFailures:
     def without(self, known: CargoFailures) -> CargoFailures:
         unnamed = tuple(t for t in self.unnamed if t not in known.unnamed)
         return CargoFailures(tuple(t for t in self.tests if t not in known.tests), self.targets, unnamed,
-                             {t: c for t, c in self.crashes.items() if t in unnamed}, self.unbuilt, self.packages,
+                             {t: c for t, c in self.crashes.items() if t in unnamed}, self.unbuilt, self.lib_packages,
                              self.linked)
 
     def describe(self, cap: int = 5) -> str:
@@ -76,8 +77,8 @@ def parse(out: str) -> CargoFailures:
     unnamed = tuple(t for t in targets if short or t in crashes)
     unbuilt_at = UNBUILT.findall(out)
     unbuilt = tuple(dict.fromkeys((t or c).replace("-", "_") for c, t in unbuilt_at))
-    packages = tuple(dict.fromkeys(c for c, _ in unbuilt_at))
-    return CargoFailures(tuple(sorted(names)), targets, unnamed, crashes, unbuilt, packages, linked_crates(out))
+    libs = tuple(dict.fromkeys(LIB_UNBUILT.findall(out)))
+    return CargoFailures(tuple(sorted(names)), targets, unnamed, crashes, unbuilt, libs, linked_crates(out))
 
 
 def linked_crates(out: str) -> tuple:

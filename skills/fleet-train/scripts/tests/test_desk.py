@@ -351,8 +351,14 @@ def test_desk_unit_env():
         return d
     d = at({"g-0": built, "g-0-env": {**built, "fails": [], "log": ""}})
     check("build failure: no fail, one desk re-run under a new rid", d.poll(u) is None and starts == ["g-0-env"], starts)
-    check("build failure: cargo clean -p the bin's package, release, in the desk's target dir and tree",
-          len(cmds) == 1 and cmds[0].endswith(
+    check("build failure: the bin's link failed naming no stale object: nothing cleaned, no metadata call",
+          cmds == [], cmds)
+    built = {**built, "log": "app.cgu0.x1.rcgu.o : error LNK2001: unresolved external symbol _RNvCs0_3app1f\r\n" + LINK_FAIL}
+    cmds.clear()
+    d = at({"g-0": built, "g-0-env": {**built, "fails": [], "log": ""}})
+    d.poll(u)
+    check("build failure: the bin's own objects are stale: cargo clean -p its package, release, in the desk's tree",
+          len(cmds) == 2 and " metadata --no-deps " in cmds[0] and cmds[1].endswith(
               f'&& cd /d "{TREE}" && (echo @@app & cargo clean -p app --release --target-dir "{TGT}" --offline 2>&1)'),
           cmds)
     ev = [json.loads(l) for l in (h.ST / "events.jsonl").read_text(encoding="utf-8").splitlines()
@@ -372,9 +378,9 @@ def test_desk_unit_env():
     check("a job result without tests is never classified", desk.unit_env(h, {"fails": ["x"], "log": LINK_FAIL}) == "")
     stale = {**built, "log": STALE_RLIB}
     why = desk.unit_env(h, stale)
-    check("stale dependency rlib: cargo clean -p its package (lib crate -> package), then the bin's package",
-          "(echo @@app-render & cargo clean -p app-render --release " in cmds[-1] and " clean -p app --release " in cmds[-1]
-          and why.endswith("(cargo clean -p app-render -p app)"), (why, cmds[-1]))
+    check("stale dependency rlib: cargo clean -p its package only (lib crate -> package), never the bin's",
+          "(echo @@app-render & cargo clean -p app-render --release " in cmds[-1] and " clean -p app " not in cmds[-1]
+          and why.endswith("(cargo clean -p app-render)"), (why, cmds[-1]))
     kept = dict(gone)
     gone.clear()
     why = desk.unit_env(h, stale)
@@ -385,7 +391,7 @@ def test_desk_unit_env():
     gone.update(kept)
     f = h.cf.parse(STALE_RLIB)
     check("parse: the linker's crates are the archive owner and the symbol's crate, never the argument list",
-          f.build_failed and f.linked == ("app_render",) and f.packages == ("app",), f)
+          f.build_failed and f.linked == ("app_render",) and f.lib_packages == (), f)
     h.P["accept"] = "other"
     check("a non-cargo runner is never classified", desk.unit_env(h, built) == "")
     h.P["accept"] = "cargo"

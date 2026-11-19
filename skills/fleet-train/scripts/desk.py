@@ -233,8 +233,9 @@ def clean_packages(h, tree: str, target: str, packages: list) -> dict:
 
 def unit_env(h, res: dict) -> str:
     """A cargo unit that did not build (cargo_failures build_failed) is an env fault, never its tests' fails: event,
-    `cargo clean -p` the packages its output names (cargo's unbuilt packages; the linker's archive/object owners and
-    unresolved symbols' crates mapped to the desk workspace's packages) in the desk's own target dir, ENV_UNIT + why.
+    `cargo clean -p` only the library packages its errors name (a lib cargo could not compile; the linker's
+    archive/object owners and unresolved symbols' crates mapped to the desk workspace's packages, so a bin's package
+    only when its own objects are named: cleaning it rebuilds every test binary) in the desk's target dir, ENV_UNIT + why.
     cleaned is true only when files were removed. "" otherwise. Desk.poll re-runs the unit once."""
     ok = h.P.get("accept") == "cargo" and "tests" in res and res.get("fails") and res.get("target")
     f = h.cf.parse(res.get("log") or "") if ok else h.cf.CargoFailures()
@@ -242,7 +243,7 @@ def unit_env(h, res: dict) -> str:
         return ""
     tree = res.get("tree") or ""
     ws = workspace_packages(h, tree) if f.linked and tree else {}
-    stale = list(dict.fromkeys([ws[c] for c in f.linked if c in ws] + list(f.packages)))
+    stale = list(dict.fromkeys([ws[c] for c in f.linked if c in ws] + list(f.lib_packages)))
     removed = {p: n for p, n in clean_packages(h, tree, res["target"], stale).items() if n}
     h.event("desk_unit_env", rid=res.get("rid"), unbuilt=list(f.unbuilt), linked=list(f.linked), packages=stale,
             removed=removed, tests=len(res["tests"]), cleaned=bool(removed))
