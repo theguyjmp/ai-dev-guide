@@ -458,8 +458,16 @@ def plan_message(base, new) -> list:
             + "".join(f"\n  {x[:400]}" for x in new[:15])] if new else []
 
 
+def plan_applies(cwd) -> bool:
+    """plan_validate holds an overhaul plan to its contract; a repo with no overhaul.toml has no such plan, and its own
+    spec format would fail every row (a node project's FUNCTIONS.md refused each spec update)."""
+    return (Path(cwd) / "overhaul.toml").is_file()
+
+
 def plan_problems(cwd, base, st, scratch, changed, landing=(), always=False) -> list:
     """New plan_validate lines of `cwd` over `base`, on a spec/*.md change or `always`."""
+    if not plan_applies(cwd):
+        return []
     if not always and not any(re.fullmatch(r"spec/[^/]+\.md", f) for f in changed):
         return []
     with ThreadPoolExecutor(2) as pool:  # each run takes minutes: side by side the gate waits for one
@@ -493,6 +501,8 @@ def stub_lines(rows, repo) -> list:
 
 def row_plan_problems(cwd, base, scratch, landing=()) -> list:
     """New check_stubs lines of `cwd` over commit `base` on the rows its diff reaches; RuntimeError = no verdict."""
+    if not plan_applies(cwd):
+        return []
     pv = rl.qs_import("plan_validate")
     r = git(cwd, "diff", "--name-only", "--no-renames", base)  # deletions too
     if r.returncode:

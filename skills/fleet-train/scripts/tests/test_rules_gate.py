@@ -249,8 +249,24 @@ def fn_row(rid, status, files):
 
 FNS = FN_HEAD + fn_row("R1", "planned", "crates/a/src/one.rs") + fn_row("R2", "planned", "crates/a/src/two.rs") \
     + fn_row("R3", "planned", "crates/a/src/three.rs") + fn_row("R5", "proven", "crates/a/src/two.rs")
-PLAN_BASE = {"spec/FUNCTIONS.md": FNS, "crates/a/src/one.rs": STUB, "crates/a/src/two.rs": STUB,
+PLAN_BASE = {"overhaul.toml": "[text]\n", "spec/FUNCTIONS.md": FNS, "crates/a/src/one.rs": STUB, "crates/a/src/two.rs": STUB,
              "crates/a/src/three.rs": DONE, "crates/b/src/lib.rs": "//! b\n"}
+
+
+class PlanApplies(Base):
+    """No overhaul.toml = no overhaul plan: the plan checks stay silent whatever spec/FUNCTIONS.md holds."""
+
+    def test_no_overhaul_toml_no_plan_lines(self):
+        row = "| Y002 | P18 | kit | - | a.mjs | t.test.mjs::* | open |\n"
+        r = self.repo({"spec/FUNCTIONS.md": row})
+        self.commit(r, {"spec/FUNCTIONS.md": row + "| Z001 | P19 | kit | - | b.mjs | u.test.mjs::* | open |\n"})
+        self.assertFalse(g.plan_applies(r))
+        self.assertEqual(g.plan_problems(r, "main", self.tmp, self.tmp, ["spec/FUNCTIONS.md"], always=True), [])
+        self.assertEqual(g.row_plan_problems(r, "main", self.tmp, ("Z001",)), [])
+
+    def test_overhaul_toml_turns_it_on(self):
+        r = self.repo({"overhaul.toml": "[text]\n", "spec/NOTES.md": "x\n"})
+        self.assertTrue(g.plan_applies(r))
 
 
 class RowPlan(Base):
@@ -301,7 +317,7 @@ class PlanModes(Base):
         lib = "crates/a/src/lib.rs"
         g.plan_lines = lambda repo: [] if "todo!()" in (Path(repo) / lib).read_text(encoding="utf-8") \
             else ["spec/FUNCTIONS.md R7: no stub in crates/a/src/lib.rs: no body calls todo!()"]
-        r = self.repo({lib: STUB})
+        r = self.repo({"overhaul.toml": "[text]\n", lib: STUB})
         self.commit(r, {lib: DONE})
         self.assertEqual(g.problems(r, "main", self.st, self.tmp, "rust"), [])  # plan="spec": no spec edit, no run
         p = g.problems(r, "main", self.st, self.tmp, "rust", plan="always")
