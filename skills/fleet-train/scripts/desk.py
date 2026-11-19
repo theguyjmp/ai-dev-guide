@@ -1,7 +1,8 @@
-"""The desk: a second Windows machine (ssh, cmd shell) running tests from a git bundle. Cargo: acceptance split (solo
-units placed by measured throughput, state/unit-rates.json; cold start by CPU load; no verdict runs here; a unit that did not build runs there once
-more after its incremental clean, then here). Other runners: every test run there (`job`); no verdict raises
-Unavailable. On with <state>/desk-on or [desk] host; HARNESS_DESK=0/1 overrides.
+"""The desk: a second Windows machine (ssh, cmd shell) running tests from a git bundle. Cargo: acceptance split (units
+on both machines for the earliest finish by measured throughput, state/unit-rates.json; cold start by CPU load; no
+verdict runs here; a unit that did not build runs there once more after its incremental clean, then here).
+Other runners: every test run there (`job`); no verdict raises Unavailable.
+On with <state>/desk-on or [desk] host; HARNESS_DESK=0/1 overrides.
 
   py -3 desk.py accept --rid R   # desk side (run.cmd)
 """
@@ -40,7 +41,8 @@ HOST, ROOT, ENV = CONF.host, CONF.root, CONF.env
 KIT = ROOT + "\\desk-kit"
 RREPO = ROOT + "\\repo.git"
 ON = "desk-on"
-UNITS = int(os.environ.get("HARNESS_DESK_UNITS", "8"))  # the parallel unit + up to 7 solo units
+MAX_UNITS = 12  # place() tries 2^n splits
+UNITS = min(MAX_UNITS, int(os.environ.get("HARNESS_DESK_UNITS", "8")))  # the parallel unit + solo units
 MIN_TESTS = 60  # fewer (probe, bisect): setup costs more than it saves
 POOL = 10  # run_tests_cargo's parallel binaries
 LINK_SECS = 6.0
@@ -341,32 +343,37 @@ def rates(hist: dict, here: bool, now: float) -> dict:
 
 @dataclass(frozen=True)
 class Plan:
-    here: frozenset  # the unit here opens with
-    steal: frozenset  # units here may take when idle
-    expect: tuple  # wall secs (here, desk)
+    here: frozenset  # units here; the desk runs the rest
+    steal: frozenset  # desk units here may take when idle (not slower at them)
+    back: frozenset  # units here the idle desk may take (not slower at them)
+    expect: tuple  # planned wall secs (here, desk)
 
 
 def place(us: list, rate: dict) -> Plan:
-    """This machine takes only units it is not slower at, else all go to the desk (in order): it opens with the first
-    whose finish here is no later than the desk's with every unit, and idle steals an unstarted one."""
-    t = [{m: u["cost"] * rate[m, kind(u)] for m in MACHINES} for u in us]
-    desk_s = sum(x["desk"] for x in t)
-    ok = [k for k, x in enumerate(t) if x["here"] <= x["desk"]]
-    first = next((k for k in ok if t[k]["here"] <= desk_s), None)
-    mine = frozenset() if first is None else frozenset({first})
-    steal = frozenset(ok) - mine
-    return Plan(mine, steal, (round(sum(t[k]["here"] for k in mine)), round(desk_s - sum(t[k]["desk"] for k in mine))))
+    """Of every split (<= MAX_UNITS units), the one with the earliest later finish; ties: less here."""
+    inf = float("inf")
+    t = [{m: u["cost"] * rate[m, kind(u)] if rate[m, kind(u)] != inf else inf for m in MACHINES} for u in us]
+
+    def cost(s):
+        here = sum(t[k]["here"] for k in s)
+        return max(here, sum(x["desk"] for k, x in enumerate(t) if k not in s)), here, sorted(s)
+    best = min((frozenset(k for k in range(len(us)) if b >> k & 1) for b in range(1 << len(us))), key=cost)
+    _, here, _ = cost(best)
+    rest = frozenset(range(len(us))) - best
+    return Plan(best, frozenset(k for k in rest if t[k]["here"] <= t[k]["desk"]),
+                frozenset(k for k in best if t[k]["desk"] <= t[k]["here"]),
+                (round(here), round(sum(t[k]["desk"] for k in rest))))
 
 
 def pick(us: list, todo: list, machine: str, desk_up: bool = True, here: bool = True, plan: Plan = None) -> list:
     """The unit indices `machine` ("here" | "desk") runs next as one run_tests() call; todo: unstarted indices;
-    plan default: the cold start. Desk out of the gate (desk_up False): here every unit left in one call."""
+    plan default: the cold start. Own units first, then steal (here the desk's first, the desk here's last). Desk out of the gate (desk_up False): here every unit left in one call."""
     plan = plan or place(us, rates({}, here, 0.0))
     if machine == "here":
         if not desk_up:
             return sorted(todo)
         return ([k for k in sorted(todo) if k in plan.here] or [k for k in sorted(todo) if k in plan.steal])[:1]
-    return [k for k in sorted(todo) if k not in plan.here][:1]
+    return ([k for k in sorted(todo) if k not in plan.here] or [k for k in sorted(todo) if k in plan.back][-1:])[:1]
 
 
 PICK = "desk-pick.json"  # {"pid", "start", "rid"} of harness.pick_accept_queue's desk run

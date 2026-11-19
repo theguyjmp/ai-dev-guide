@@ -97,10 +97,15 @@ def test_units_and_pick():
     check("solo units longest first", [u["cost"] for u in us[1:]] == sorted((u["cost"] for u in us[1:]), reverse=True)
           and us[1]["tests"] == [T[3]])
     check("no solo tests: one unit", len(desk.units(PAR, set(), {}, {}, 8)) == 1)
-    check("pick: desk takes one solo unit, never the parallel one",
-          desk.pick(us, [0, 2, 1], "desk") == [1] and desk.pick(us, [0], "desk") == [])
-    check("pick: here takes parallel first, then the longest unstarted solo",
-          desk.pick(us, [2, 1, 0], "here") == [0] and desk.pick(us, [3, 2], "here") == [2])
+    p = desk.place(us, desk.rates({}, True, 0.0))  # cold, equal rates: here the 400 s solo unit, the desk the rest
+    check("place cold: both machines, the later finish below one machine's",
+          p.here == {1} and max(p.expect) == round(sum(u["cost"] for u in us) - us[1]["cost"])
+          and max(p.expect) < sum(u["cost"] for u in us), p)
+    check("pick: desk takes its own units in order, then here's unstarted ones",
+          desk.pick(us, [0, 2, 1], "desk") == [0] and desk.pick(us, [1], "desk") == [1]
+          and desk.pick(us, [], "desk") == [])
+    check("pick: here takes its own unit first, then the desk's first unstarted one",
+          desk.pick(us, [2, 1, 0], "here") == [1] and desk.pick(us, [3, 2], "here") == [2])
     check("pick: desk out, here takes every unit left", desk.pick(us, [3, 1, 2], "here", desk_up=False) == [1, 2, 3])
     return us
 
@@ -361,8 +366,9 @@ def test_desk_unit_env():
 
 
 def test_throughput():
-    """Placement by measured throughput: parallel unit 2484 and 7 solo units 1270 cost-seconds, as on the source
-    project, where a loaded machine kept the parallel unit 5016 s while the desk ran the solo units in 1114 s."""
+    """Placement for the earliest gate finish: parallel unit 2484 and 7 solo units 1270 cost-seconds, as on the
+    source project, where a loaded machine kept the parallel unit 5016 s while the desk ran the solo units in 1114 s,
+    and two later gates were planned on one machine (rates slightly worse here) where a split finishes ~25% sooner."""
     us = [{"cost": 2484.0, "tests": ["p"], "solo": []}] + [
         {"cost": c, "tests": [f"s{i}"], "solo": [f"s{i}"]} for i, c in enumerate([327, 215, 190, 180, 150, 120, 88])]
     hist = {}
@@ -370,23 +376,37 @@ def test_throughput():
                      (1, {"here": {"par": [2209, 2484]}}), (2, {"desk": {"par": [3038, 2484], "solo": [1246, 1270]}}),
                      (3, {"here": {"par": [5016, 2484]}, "desk": {"solo": [1114, 1270]}})):
         hist = desk.learn(hist, work, ts)
-    p = desk.place(us, desk.rates(hist, True, 10))
-    check("loaded here (median 2.0 s per cost-second vs the desk's 1.22): 0 units here, nothing to steal",
-          not p.here and not p.steal, p)
+
+    def alone(r, m):  # every unit on machine m
+        return sum(u["cost"] * r[m, desk.kind(u)] for u in us)
+    r = desk.rates(hist, True, 10)
+    p = desk.place(us, r)
+    check("loaded here (median 2.0 s per cost-second vs the desk's 1.22): the parallel unit on the desk, here no "
+          "later than the desk, the gate sooner than all on the desk",
+          0 not in p.here and p.expect[0] <= p.expect[1] and max(p.expect) < alone(r, "desk"), p)
+    for r in ({("here", "par"): 2.019, ("here", "solo"): 2.019, ("desk", "par"): 1.719, ("desk", "solo"): 1.048},
+              {("here", "par"): 1.719, ("here", "solo"): 1.048, ("desk", "par"): 1.719, ("desk", "solo"): 1.048}):
+        p = desk.place(us, r)  # recorded gates planned on one machine: 5601 s, now 4270 s (the tie: less here)
+        check("slightly slower here: both machines, sooner than either alone, the parallel unit on the desk",
+              p.here == set(range(1, len(us))) and max(p.expect) < min(alone(r, m) for m in desk.MACHINES), p)
     slow_desk = {"here": {"par": [[0, 0.5]]}, "desk": {"par": [[0, 1.5]], "solo": [[0, 1.5]]}}
-    p = desk.place(us, desk.rates(slow_desk, True, 10))
-    check("idle here, slow desk: the parallel unit here, every solo unit stealable",
-          p.here == {0} and p.steal == set(range(1, len(us))), p)
+    r = desk.rates(slow_desk, True, 10)
+    p = desk.place(us, r)
+    check("idle here, slow desk: the parallel unit here, both machines, sooner than here alone, every desk unit "
+          "stealable", 0 in p.here and len(p.here) < len(us) and p.steal == set(range(len(us))) - p.here
+          and not p.back and max(p.expect) < alone(r, "here"), p)
     late = desk.RATE_TTL["here"] + 10
-    check("stale history here: cold start, the parallel unit here when not busy, none when busy",
-          desk.place(us, desk.rates(hist, True, late)).here == {0}
-          and not desk.place(us, desk.rates(hist, False, late)).here)
+    cold, busy = desk.place(us, desk.rates(hist, True, late)), desk.place(us, desk.rates(hist, False, late))
+    check("stale history here: cold start; not busy: the parallel unit alone on the desk, the rest here; busy: "
+          "nothing here, nothing to steal", cold.here == set(range(1, len(us)))
+          and max(cold.expect) == round(2484 * desk.rates(hist, True, late)["desk", "par"])
+          and not busy.here and not busy.steal, (cold, busy))
     check("learn keeps RATE_KEEP samples per machine and kind",
           len(desk.learn({"here": {"par": [[i, 1.0] for i in range(9)]}}, {"here": {"par": [1, 1]}}, 9)["here"]["par"])
           == desk.RATE_KEEP)
     calls = fake_h(par_secs=0.05)
     now = time.time()
-    h.save(desk.RATES, {"here": {"par": [[now, 3.0]]}, "desk": {"par": [[now, 1.2]]}})
+    h.save(desk.RATES, {"here": {"par": [[now, 1e3]]}, "desk": {"par": [[now, 1.2]]}})
     FakeDesk.script, FakeDesk.why0 = {}, ""
     out = desk.run_desk(h, T, desk_cls=FakeDesk)
     ev = [json.loads(l) for l in (h.ST / "events.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
@@ -394,14 +414,25 @@ def test_throughput():
     hist = h.load(desk.RATES, {})
     check("slow here: nothing here, the desk ran every test once; the event carries the plan; the work is learned",
           out == [] and calls == [] and FakeDesk.last.tests == set(T) and gs.get("plan_here") == []
-          and gs.get("rates", {}).get("here/par") == 3.0 and len(hist["desk"]["par"]) == 2, (out, len(calls), gs))
+          and gs.get("rates", {}).get("here/par") == 1e3 and len(hist["desk"]["par"]) == 2, (out, len(calls), gs))
     calls = fake_h()
-    h.save(desk.RATES, {"here": {"par": [[now, 3.0]]}, "desk": {"par": [[now, 1.2]]}})
+    h.save(desk.RATES, {"here": {"par": [[now, 1e3]]}, "desk": {"par": [[now, 1.2]]}})
     FakeDesk.why0 = "desk unreachable"
     out = desk.run_desk(h, T, desk_cls=FakeDesk)
     check("slow here, desk down: every unit here in one call, each test once",
           out == [] and calls == [(sorted(set(T)), sorted(SOLO))], [len(c[0]) for c in calls])
     FakeDesk.why0 = ""
+    calls = fake_h(par_secs=0.3)  # an idle desk takes here's unstarted units, last first, while here runs the parallel
+    h.save(desk.RATES, {"here": {"par": [[now, 1.0]], "solo": [[now, 1.0]]},
+                        "desk": {"par": [[now, 10.0]], "solo": [[now, 1.0]]}})
+    out = desk.run_desk(h, T, desk_cls=FakeDesk)
+    ev = [json.loads(l) for l in (h.ST / "events.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    gs = [e for e in ev if e.get("stage") == "acceptance-desk"][-1]
+    mine, ran = [k for k in gs["plan_here"] if k], FakeDesk.last.ran
+    check("desk steals back: here only the parallel unit, the desk its own unit then here's solo units, last first",
+          out == [] and gs["plan_here"][:1] == [0] and len(mine) >= 2 and calls == [(sorted(set(T) - SOLO), [])]
+          and ran[len(ran) - len(mine):] == sorted(mine, reverse=True) and FakeDesk.last.tests == SOLO,
+          (gs["plan_here"], ran, len(calls)))
 
 
 def main():
