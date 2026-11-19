@@ -1,6 +1,7 @@
 """The desk: a second Windows machine (ssh, cmd shell) running tests from a git bundle. Cargo: acceptance split (units
 on both machines for the earliest finish by measured throughput, state/unit-rates.json; cold start by CPU load; no
-verdict runs here; a unit that did not build runs there once more after its incremental clean, then here).
+verdict runs here; a unit that did not build runs there once more after `cargo clean -p` of what its build output
+names, then here).
 Other runners: every test run there (`job`); no verdict raises Unavailable.
 On with <state>/desk-on or [desk] host; HARNESS_DESK=0/1 overrides.
 
@@ -199,20 +200,54 @@ def absorb(h, res: dict, head: str) -> str:
 
 
 ENV_UNIT = "desk unit did not build: "
+REMOVED = re.compile(r"Removed (\d+) files")
+
+
+def workspace_packages(h, tree: str) -> dict:
+    """{package or lib crate name: package} of the desk tree's cargo workspace (metadata --no-deps); {} unreadable."""
+    r = ssh(h, f'{ENV}&& cd /d "{tree}" && cargo metadata --no-deps --format-version 1 --offline', timeout=300)
+    try:
+        pkgs = json.loads(r.stdout)["packages"]
+    except (ValueError, KeyError, TypeError):
+        return {}
+    return {n: p["name"] for p in pkgs for n in [p["name"]] + [t["name"].replace("-", "_") for t in p.get("targets", [])
+                                                               if "lib" in t.get("kind", []) or "rlib" in t.get("kind", [])]}
+
+
+def clean_packages(h, tree: str, target: str, packages: list) -> dict:
+    """`cargo clean -p <package> --release` for each package in the desk's own target dir: {package: files removed}.
+    A clean that removed nothing counts 0 whatever its exit code (an incremental-dir glob once matched nothing and
+    still reported cleaned)."""
+    if not packages or not tree:
+        return {p: 0 for p in packages}
+    each = " & ".join(f'echo @@{p} & cargo clean -p {p} --release --target-dir "{target}" --offline 2>&1'
+                      for p in packages)
+    out = ssh(h, f'{ENV}&& cd /d "{tree}" && ({each})', timeout=1800).stdout or ""
+    got = {p: 0 for p in packages}
+    for part in out.split("@@")[1:]:
+        name, _, rest = part.partition("\n")
+        if name.strip() in got:
+            got[name.strip()] = sum(int(n) for n in REMOVED.findall(rest))
+    return got
 
 
 def unit_env(h, res: dict) -> str:
     """A cargo unit that did not build (cargo_failures build_failed) is an env fault, never its tests' fails: event,
-    clean those targets' incremental objects in the desk's own target dir, ENV_UNIT + why. "" otherwise."""
+    `cargo clean -p` the packages its output names (cargo's unbuilt packages; the linker's archive/object owners and
+    unresolved symbols' crates mapped to the desk workspace's packages) in the desk's own target dir, ENV_UNIT + why.
+    cleaned is true only when files were removed. "" otherwise. Desk.poll re-runs the unit once."""
     ok = h.P.get("accept") == "cargo" and "tests" in res and res.get("fails") and res.get("target")
     f = h.cf.parse(res.get("log") or "") if ok else h.cf.CargoFailures()
     if not f.build_failed:
         return ""
-    inc = res["target"].replace("/", "\\") + "\\release\\incremental"
-    r = ssh(h, f'cd /d "{inc}" && for /d %d in ({" ".join(n + "-*" for n in f.unbuilt)}) do rd /s /q "%d"', timeout=600)
-    h.event("desk_unit_env", rid=res.get("rid"), unbuilt=list(f.unbuilt), tests=len(res["tests"]),
-            cleaned=r.returncode == 0)
-    return ENV_UNIT + ", ".join(f.unbuilt) + (" (incremental cleaned)" if r.returncode == 0 else " (clean failed)")
+    tree = res.get("tree") or ""
+    ws = workspace_packages(h, tree) if f.linked and tree else {}
+    stale = list(dict.fromkeys([ws[c] for c in f.linked if c in ws] + list(f.packages)))
+    removed = {p: n for p, n in clean_packages(h, tree, res["target"], stale).items() if n}
+    h.event("desk_unit_env", rid=res.get("rid"), unbuilt=list(f.unbuilt), linked=list(f.linked), packages=stale,
+            removed=removed, tests=len(res["tests"]), cleaned=bool(removed))
+    return ENV_UNIT + ", ".join(f.unbuilt) + (f" (cargo clean -p {' -p '.join(removed)})" if removed
+                                              else " (nothing cleaned)")
 
 
 def run_op(h, spec: dict) -> dict:
@@ -228,7 +263,7 @@ def run_op(h, spec: dict) -> dict:
     lg = h.ST / "last-gate.txt"
     fails = h.run_tests(spec["tests"], solo=spec["solo"])
     stems = {Path(t.split("::")[0]).stem for t in spec["tests"]}
-    return dict(fails=fails, tests=spec["tests"], target=h.TRAIN_ENV.get("CARGO_TARGET_DIR", ""),
+    return dict(fails=fails, tests=spec["tests"], target=h.TRAIN_ENV.get("CARGO_TARGET_DIR", ""), tree=str(h.TRAIN),
                 log=lg.read_text(encoding="utf-8", errors="replace")[-20000:] if fails and lg.exists() else "",
                 times={s: v for s, v in h.load(h.ACCEPT_TIMES, {}).items() if s in stems},
                 alone={t: v for t, v in h.load(h.ALONE_TIMES, {}).items() if t in set(spec["solo"]) | set(fails)})

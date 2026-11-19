@@ -17,6 +17,11 @@ CRASH = re.compile(r"to rerun pass `([^`]+)`\s*\n\s*Caused by:\s*\n\s*process di
                    r"\((exit code: (?!101\))[^)]*|signal: [^)]*)\)")
 PASSED = re.compile(r"^test result: \w+\. (\d+) passed", re.M)
 UNBUILT = re.compile(r"^error: could not compile `([\w-]+)`(?: \((?:\w+ )*?(?:lib|\w+ \"([\w-]+)\"))?", re.M)
+# A link error's owners: the archive member or object holding an unresolved reference (`libX-<hash>.rlib(...)` or
+# `X.<cgu>.<n>.rcgu.o`), never the linker's argument list. Logs may carry cargo's JSON escapes (a literal \r\n).
+LINK_OWNER = re.compile(r"(?:\blib(\w+)-[0-9a-f]{16}\.rlib\([^)\s]*\)|(?<![\w.-])(\w+)\.\w+\.\w+\.rcgu\.o) : error LNK\d+")
+UNRESOLVED = re.compile(r"unresolved external symbol (_R\w+)")
+INSTANTIATING = re.compile(r".*Cs[0-9A-Za-z]*_(\d+)([A-Za-z]\w*)$")  # v0 mangling: the symbol's instantiating crate
 SELECTOR = "-p "
 
 
@@ -27,6 +32,8 @@ class CargoFailures:
     unnamed: tuple = ()  # failed targets no printed name accounts for
     crashes: dict = field(default_factory=dict)  # {selector: "exit code: ..."}
     unbuilt: tuple = ()  # targets cargo could not compile or link, by crate name (incremental/<name>-*)
+    packages: tuple = ()  # packages of those targets, as cargo names them (`cargo clean -p <package>`)
+    linked: tuple = ()  # crates a link error names: its archive/object owners and unresolved symbols' crates
 
     @property
     def found(self) -> bool:
@@ -44,7 +51,8 @@ class CargoFailures:
     def without(self, known: CargoFailures) -> CargoFailures:
         unnamed = tuple(t for t in self.unnamed if t not in known.unnamed)
         return CargoFailures(tuple(t for t in self.tests if t not in known.tests), self.targets, unnamed,
-                             {t: c for t, c in self.crashes.items() if t in unnamed}, self.unbuilt)
+                             {t: c for t, c in self.crashes.items() if t in unnamed}, self.unbuilt, self.packages,
+                             self.linked)
 
     def describe(self, cap: int = 5) -> str:
         if not self.found:
@@ -66,8 +74,23 @@ def parse(out: str) -> CargoFailures:
     # an unaccounted target cannot be pinned: keep them all
     short = len(targets) - len(crashes) > len(RESULT_FAILED.findall(out))
     unnamed = tuple(t for t in targets if short or t in crashes)
-    unbuilt = tuple(dict.fromkeys((t or c).replace("-", "_") for c, t in UNBUILT.findall(out)))
-    return CargoFailures(tuple(sorted(names)), targets, unnamed, crashes, unbuilt)
+    unbuilt_at = UNBUILT.findall(out)
+    unbuilt = tuple(dict.fromkeys((t or c).replace("-", "_") for c, t in unbuilt_at))
+    packages = tuple(dict.fromkeys(c for c, _ in unbuilt_at))
+    return CargoFailures(tuple(sorted(names)), targets, unnamed, crashes, unbuilt, packages, linked_crates(out))
+
+
+def linked_crates(out: str) -> tuple:
+    """Crate names a link error blames, in order: the archive or object owning each unresolved reference, then each
+    unresolved symbol's instantiating crate (v0 `Cs<hash>_<len><name>` suffix). Std and registry crates may appear;
+    the caller keeps the ones it can map to its workspace's packages."""
+    out = (out or "").replace("\\r\\n", "\n").replace("\\n", "\n")
+    found =[a or o for a, o in LINK_OWNER.findall(out)]
+    for sym in UNRESOLVED.findall(out):
+        m = INSTANTIATING.search(sym)
+        if m and len(m.group(2)) == int(m.group(1)):
+            found.append(m.group(2))
+    return tuple(dict.fromkeys(found))
 
 
 def from_keys(keys) -> CargoFailures:

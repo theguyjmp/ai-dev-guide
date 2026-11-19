@@ -10,7 +10,7 @@ more after its incremental clean, then here; state/desk-on turns it on, HARNESS_
 """
 from __future__ import annotations
 
-import ast, json, os, shutil, subprocess, sys, tempfile, time
+import ast, json, os, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -312,6 +312,13 @@ LINK_FAIL = ("app.0x1.rcgu.o : error LNK2001: unresolved external symbol _RINvNt
 RED_ALONE = ("== s1::test_s1_1 (serial): running 1 test\ntest test_s1_1 ... FAILED\n\nfailures:\n\n"
              "failures:\n    test_s1_1\n\ntest result: FAILED. 0 passed; 1 failed\n")
 TGT = "D:/fleet/repo.git/.overhaul/target/land-0"
+TREE = "D:\\fleet\\land-0"
+STALE_RLIB = ('"/OUT:app.exe" "libserde-0123456789abcdef.rlib"\r\n'
+              "libapp_render-0123456789abcdef.rlib(app_render-0123456789abcdef.x1.y2.rcgu.o) : error LNK2019: "
+              "unresolved external symbol _RINvNtCs0_4core3ptr9drop_glueNtCs1_3libECs8r9_10app_render referenced in "
+              "function _RNvNtCs8r9_10app_render7effects4push\\r\\n"
+              "D:\\fleet\\target\\release\\deps\\app.exe : fatal error LNK1120: 1 unresolved externals\r\n"
+              'error: could not compile `app` (bin "app") due to 1 previous error\n')
 
 
 def test_desk_unit_env():
@@ -320,10 +327,21 @@ def test_desk_unit_env():
     objects cleaned in the desk's own target dir, one desk re-run under a new rid, then here; a real red counts."""
     ts = sorted(T[3:6])
     u = {"cost": 10.0, "tests": ts, "solo": ts}
-    built = {"fails": ts, "tests": ts, "head": SHA, "events": [], "perf_debt": [], "log": LINK_FAIL, "target": TGT}
+    built = {"fails": ts, "tests": ts, "head": SHA, "events": [], "perf_debt": [], "log": LINK_FAIL, "target": TGT,
+             "tree": TREE}
     cmds, starts, h.P["accept"] = [], [], "cargo"
     real = desk.poll, desk.ssh, desk.start
-    desk.ssh = lambda h_, cmd, timeout=180: cmds.append(cmd) or SimpleNamespace(stdout="", returncode=0)
+    gone = {"app": 120, "app-render": 40}
+    meta = json.dumps({"packages": [{"name": n, "targets": [{"name": n.replace("-", "_"), "kind": ["lib"]}]}
+                                    for n in gone]})
+
+    def fake_ssh(h_, cmd, timeout=180):  # cargo metadata, then `echo @@pkg & cargo clean -p pkg` per package
+        cmds.append(cmd)
+        if " metadata " in cmd:
+            return SimpleNamespace(stdout=meta, returncode=0)
+        return SimpleNamespace(returncode=0, stdout="".join(
+            f"@@{p} \r\n     Removed {gone.get(p, 0)} files, 1.0MiB total\r\n" for p in re.findall(r"@@(\S+)", cmd)))
+    desk.ssh = fake_ssh
     desk.start = lambda h_, rid, spec: starts.append(rid) and ""
 
     def at(answers):
@@ -333,9 +351,14 @@ def test_desk_unit_env():
         return d
     d = at({"g-0": built, "g-0-env": {**built, "fails": [], "log": ""}})
     check("build failure: no fail, one desk re-run under a new rid", d.poll(u) is None and starts == ["g-0-env"], starts)
-    check("build failure: the clean is the desk's target dir, the unbuilt target only",
-          cmds == [r'cd /d "D:\fleet\repo.git\.overhaul\target\land-0\release\incremental" && '
-                   r'for /d %d in (app-*) do rd /s /q "%d"'], cmds)
+    check("build failure: cargo clean -p the bin's package, release, in the desk's target dir and tree",
+          len(cmds) == 1 and cmds[0].endswith(
+              f'&& cd /d "{TREE}" && (echo @@app & cargo clean -p app --release --target-dir "{TGT}" --offline 2>&1)'),
+          cmds)
+    ev = [json.loads(l) for l in (h.ST / "events.jsonl").read_text(encoding="utf-8").splitlines()
+          if '"desk_unit_env"' in l]
+    check("build failure: cleaned only when files were removed, logged by package",
+          ev[-1].get("cleaned") is True and ev[-1].get("removed") == {"app": 120}, ev[-1:])
     k, res = d.poll(u)
     check("build failure: the clean re-run's verdict counts", res is not None and res["fails"] == [], d.why)
     d = at({"g-0": built, "g-0-env": built})
@@ -347,6 +370,22 @@ def test_desk_unit_env():
     check("a real desk red counts as before, nothing cleaned", res is not None and res["fails"] == [ts[0]]
           and len(cmds) == nc, d.why)
     check("a job result without tests is never classified", desk.unit_env(h, {"fails": ["x"], "log": LINK_FAIL}) == "")
+    stale = {**built, "log": STALE_RLIB}
+    why = desk.unit_env(h, stale)
+    check("stale dependency rlib: cargo clean -p its package (lib crate -> package), then the bin's package",
+          "(echo @@app-render & cargo clean -p app-render --release " in cmds[-1] and " clean -p app --release " in cmds[-1]
+          and why.endswith("(cargo clean -p app-render -p app)"), (why, cmds[-1]))
+    kept = dict(gone)
+    gone.clear()
+    why = desk.unit_env(h, stale)
+    ev = [json.loads(l) for l in (h.ST / "events.jsonl").read_text(encoding="utf-8").splitlines()
+          if '"desk_unit_env"' in l]
+    check("the old no-op is caught: a clean that exits 0 and removes nothing is never cleaned: true",
+          ev[-1].get("cleaned") is False and ev[-1].get("removed") == {} and why.endswith("(nothing cleaned)"), ev[-1:])
+    gone.update(kept)
+    f = h.cf.parse(STALE_RLIB)
+    check("parse: the linker's crates are the archive owner and the symbol's crate, never the argument list",
+          f.build_failed and f.linked == ("app_render",) and f.packages == ("app",), f)
     h.P["accept"] = "other"
     check("a non-cargo runner is never classified", desk.unit_env(h, built) == "")
     h.P["accept"] = "cargo"
