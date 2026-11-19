@@ -126,13 +126,16 @@ if stale:
     alarms.append(f"STALE-CLAIMS {stale[:6]} held over 3h: release them")
 if queue and now - min(q["ts"] for q in queue) > 4 * 3600:
     alarms.append(f"OLD-QUEUE oldest queued row waited {round((now - min(q['ts'] for q in queue)) / 3600, 1)} h")
-# a stacked row held at pick (harness.carried_rows) whose carried row is neither queued nor claimed waits forever
-_live = {q["row"] for q in queue} | {c["row"] for c in h.load("claims.json", {}).values()}
+# a stacked row held at pick (harness.carried_rows) whose carried row is neither queued, absorbed by a queued
+# integration row (harness.lands_rows) nor claimed waits forever: name each one and what it waits for
+_live = h.landing_ids(queue) | {c["row"] for c in h.load("claims.json", {}).values()}
 _orph = {r: [d for d in ds if d not in _live] for r, ds in h.load("pick-held.json", {}).items() if set(ds) - _live}
 if _orph:
-    r0 = sorted(_orph)[0]
-    alarms.append(f"STACK-ORPHAN {len(_orph)} queued rows carry commits of rows neither queued nor claimed (e.g. {r0} "
-                  f"carries {_orph[r0]}): rebase each onto main without them, or requeue the carried row")
+    alarms.append(f"STACK-ORPHAN {len(_orph)} queued rows carry commits of rows neither queued, absorbed nor claimed: "
+                  + "; ".join(f"{r} needs {m}" for r, m in sorted(_orph.items())[:10])
+                  + (f"; +{len(_orph) - 10} more" if len(_orph) > 10 else "")
+                  + ": rebase each onto main without them, requeue the carried rows, or, for an integration row that "
+                  "absorbs them on purpose, clean-submit --absorbs")
 if [e for e in ev if e.get("event") == "train_error" and now - e["ts"] < 3600]:
     alarms.append("TRAIN-ERROR in the last hour (events.jsonl train_error, train.err)")
 _desk = [e for e in ev if e.get("event") in ("desk_deferred", "desk_job")]

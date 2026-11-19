@@ -207,7 +207,7 @@ def held_rows() -> set:
 
 
 def frontier(rows, claims, queue, attempts):
-    busy = {c["row"] for c in claims.values()} | {q["row"] for q in queue} | held_rows()
+    busy = {c["row"] for c in claims.values()} | landing_ids(queue) | held_rows()
     # Only rows being BUILT (claims) count against the module cap and file overlap. Counting queued rows (built,
     # waiting to land) too left 0 of 93 ready rows buildable while 93 waited in the land queue: builders starved
     # exactly when landing was behind. The trial-merge batch pick handles queued-vs-new overlap at land time.
@@ -1083,18 +1083,28 @@ def cmd_clean_submit(a):
         sys.exit("commit first")
     sha = git("rev-parse", "HEAD", cwd=p).stdout.strip()
     with lock("state"):
-        queue_clean(a.name, sha, a.slot, front=a.front)
+        queue_clean(a.name, sha, a.slot, front=a.front, absorbs=a.absorbs.split(",") if a.absorbs else None)
     print(json.dumps({"ok": True}))
 
 
-def queue_clean(name, sha, slot, front=False) -> None:
+def queue_clean(name, sha, slot, front=False, absorbs=None) -> None:
     """Queue sha as row CLEAN-<name> (caller holds the state lock). front: ahead of every queued row (ts = oldest - 1;
-    the train picks by ts), for a fix the owner wants landed first (cloud.py lane fix)."""
+    the train picks by ts), for a fix the owner wants landed first (cloud.py lane fix). absorbs: the rows this
+    integration row lands with it (lands_rows); None keeps the queued entry's own, so a resubmit never drops them.
+    Each is verified against sha first."""
     row = f"CLEAN-{name}"
-    rest = [q for q in load("queue.json", []) if q["row"] != row]
+    queue = load("queue.json", [])
+    if absorbs is None:
+        absorbs = next((q.get("absorbs", []) for q in queue if q["row"] == row), [])
+    absorbs = [r for r in dict.fromkeys(r.strip() for r in absorbs) if r and r != row]
+    if bad := absorbs_unverified(sha, absorbs):
+        sys.exit(f"clean-submit: {sha[:12]} does not contain the commits of absorbed rows {bad} (each needs commits under "
+                 "its own subject in main..sha and, when h/<row> exists, that tip as an ancestor)")
+    rest = [q for q in queue if q["row"] != row]
     ts = min([now()] + [q["ts"] for q in rest]) - 1 if front else now()
-    save("queue.json", rest + [{"row": row, "sha": sha, "ts": ts, "slot": slot}])
-    event("submit", slot=slot, row=row, sha=sha)
+    extra = {"absorbs": absorbs} if absorbs else {}
+    save("queue.json", rest + [{"row": row, "sha": sha, "ts": ts, "slot": slot, **extra}])
+    event("submit", slot=slot, row=row, sha=sha, **extra)
 
 
 def known_red() -> dict:
@@ -1393,7 +1403,7 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
             event("review_reject", rows=[q["row"] for q in guilty])
             rest = [q for q in merged if q not in guilty]
             return try_batch(rest, rows, depth + 1, quick=False, reviewed=True) if rest else []
-    ids = [q["row"] for q in merged]
+    ids = sorted(landing_ids(merged))
     ok, fails, log = gate(ids, rows, quick)
     if ok:
         finish_spec(ids)
@@ -1402,10 +1412,10 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     own = {i for i in ids for t in rows[i]["tests"] if t in fails}
     if fails not in (["clippy"], ["unit"], ["quality"]) and own and all(any(t in rows[i]["tests"] for i in own) for t in fails):
         # only the batch's own tests failed: eject those rows, retry the rest
-        for q in merged:
-            if q["row"] in own:
-                reject(q, "own acceptance failed on merged tree: " + ", ".join(t for t in fails if t in rows[q["row"]]["tests"]))
-        rest = [q for q in merged if q["row"] not in own]
+        for q in merged:  # an absorbed row's red test is its integration entry's
+            if mine := [t for i in lands_rows(q) for t in rows[i]["tests"] if t in fails]:
+                reject(q, "own acceptance failed on merged tree: " + ", ".join(mine))
+        rest = [q for q in merged if not own & set(lands_rows(q))]
         return try_batch(rest, rows, depth + 1, quick=True) if rest else []
     # before blame and probe, which pin a main-red test on an innocent row
     if quarantine.heal(sys.modules[__name__], merged, rows, fails):
@@ -1482,7 +1492,7 @@ def promote(landed):
     else:
         git("merge", "-q", "--ff-only", head)
     git("push", "-q", "origin", "main", check=False)
-    event("land", rows=[q["row"] for q in landed], sha=head)
+    event("land", rows=sorted(landing_ids(landed)), sha=head)
     tighten_rules_debt(before, head)
 
 
@@ -1597,12 +1607,12 @@ def fill_wait(queue: list, picks: list) -> bool:
 def disjoint(queue: list) -> list:
     """Oldest first, the rows that merge cleanly onto main plus every earlier pick (git merge-tree trial merges;
     file-disjoint before git 2.38); the rest wait. A row carrying another unproven row's commits waits until that row
-    is picked earlier or proven (state/pick-held.json)."""
-    acc, out, held = git("rev-parse", "main").stdout.strip(), [], {}
+    is landed by an earlier pick (its own or absorbed, lands_rows) or proven (state/pick-held.json)."""
+    acc, out, held, provided = git("rev-parse", "main").stdout.strip(), [], {}, set()
     spec = main_spec()
     proven = {i for i, r in spec.items() if r["status"] == "proven"}
     for q in queue:
-        dep = carried_rows(q, spec) - proven - {p["row"] for p in out}
+        dep = carried_rows(q, spec) - proven - provided
         if dep:
             held[q["row"]] = sorted(dep)
             continue
@@ -1616,16 +1626,70 @@ def disjoint(queue: list) -> list:
             return _disjoint_files(queue)
         acc = c
         out.append(q)
+        provided |= set(lands_rows(q))
     save("pick-held.json", held)
     return out
 
 
+def lands_rows(q) -> list:
+    """The rows queue entry q lands: its own, then the rows an integration entry absorbs on purpose (`absorbs`, set by
+    clean-submit --absorbs). The one answer for the hold rule, the frontier, the gate's new rows, finish_spec and the
+    land event."""
+    return [q["row"], *q.get("absorbs", [])]
+
+
+def landing_ids(entries) -> set:
+    """Every row the queue entries land (lands_rows)."""
+    return {i for q in entries for i in lands_rows(q)}
+
+
+def absorbs_unverified(sha: str, absorbs) -> list:
+    """The rows of `absorbs` whose commits sha does not contain, by git: sha must carry commits under the row's own
+    subject (main..sha; a spec row may be one the branch adds), and the row's h/<row> tip, when that branch exists,
+    must be an ancestor of sha."""
+    if not absorbs:
+        return []
+    spec = {**main_spec(), **parse_spec(git("show", f"{sha}:{SPEC}", check=False).stdout)}
+    carried = carried_rows({"row": "", "sha": sha}, spec)
+    bad = []
+    for r in absorbs:
+        tip = git("rev-parse", "--verify", "-q", f"h/{r}", check=False).stdout.strip()
+        if r not in carried or (tip and git("merge-base", "--is-ancestor", tip, sha, check=False).returncode != 0):
+            bad.append(r)
+    return bad
+
+
+def gate_rows(entries, rows) -> list:
+    """Fill rows (main's spec, the gate's) with each row the entries land that main's spec lacks: a CLEAN-* row as a
+    test-less cleanup stub; an absorbed spec row from the entry's own spec (an integration row may add it), status
+    "absorbed" until it lands, so the gate runs its acceptance tests as a new row's and finish_spec marks it proven.
+    Returns [(entry, why)] for entries absorbing a spec row with no acceptance tests: no row is proven without its tests."""
+    bad = []
+    for q in entries:
+        branch = None
+        for i in lands_rows(q):
+            if i.startswith("CLEAN-"):
+                rows.setdefault(i, {"id": i, "tests": [], "status": "cleanup", "file_list": [], "deps": [], "module": "cleanup"})
+                continue
+            if i == q["row"]:
+                continue
+            if i not in rows:
+                if branch is None:
+                    branch = parse_spec(git("show", f"{q['sha']}:{SPEC}", check=False).stdout)
+                if i in branch:
+                    rows[i] = dict(branch[i], status="absorbed")
+            if not rows.get(i, {}).get("tests"):
+                bad.append((q, f"absorbed spec row {i} has no acceptance tests in {SPEC} (main or the branch): it cannot be proven"))
+                break
+    return bad
+
+
 def carried_rows(q, spec: dict) -> set:
-    """Rows other than q's own whose commits (not on main) q's branch carries: a commit subject starting `<row id>:`
+    """Rows other than the ones q lands (lands_rows) whose commits (not on main) q's branch carries: a commit subject starting `<row id>:`
     or `stack: <row id>` for a spec row or a CLEAN-* fix. A stacked row landing without them fails the plan check."""
     subj = git("log", "--no-merges", "--format=%s", f"main..{q['sha']}", check=False).stdout
     ids = {m.group(1).rstrip(":") for m in re.finditer(r"^(?:stack: )?(\S+)", subj, re.M)}
-    return {i for i in ids if i in spec or i.startswith("CLEAN-")} - {q["row"]}
+    return {i for i in ids if i in spec or i.startswith("CLEAN-")} - set(lands_rows(q))
 
 
 def _disjoint_files(queue: list) -> list:
@@ -1918,9 +1982,11 @@ def train_once():
             return False
         if fill_wait(queue, batch):
             return False
-        for q in batch:
-            if q["row"] not in rows:
-                rows[q["row"]] = {"id": q["row"], "tests": [], "status": "cleanup", "file_list": [], "deps": [], "module": "cleanup"}
+        for q, why in gate_rows(batch, rows):
+            reject(q, why)
+            batch = [x for x in batch if x is not q]
+        if not batch:
+            return True
         t0 = now()
         event("train_start", rows=[q["row"] for q in batch])
         GREEN["head"] = ""
@@ -1940,7 +2006,7 @@ def train_once():
             queue = load("queue.json", [])
             done = {q["sha"] for q in batch}
             save("queue.json", [q for q in queue if q["sha"] not in done])
-        event("train_end", landed=[q["row"] for q in landed], tried=len(batch), secs=round(now() - t0))
+        event("train_end", landed=sorted(landing_ids(landed)), tried=len(batch), secs=round(now() - t0))
         for gen in ("dash.py",):  # dashboards are regenerated by the train, never by memory
             if (HOME / gen).exists():
                 # run detached: a slow dashboard (15 min timeout) inside the train lock blocked every next batch
@@ -2015,6 +2081,8 @@ def main():
     p = sp.add_parser("clean-start"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
     p = sp.add_parser("self-review"); p.add_argument("--slot", type=int, required=True)
     p = sp.add_parser("clean-submit"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
+    p.add_argument("--absorbs", default="", help="row ids this integration row lands with it, comma separated; each is "
+                   "verified in the branch")
     p.add_argument("--front", action="store_true", help="queue ahead of every row (a fix the owner wants first)")
     sp.add_parser("note", help="append one line to the dated log").add_argument("text")
     sp.add_parser("pick-accept", help="desk acceptance of queued rows (on: state/pick-accept-on)")

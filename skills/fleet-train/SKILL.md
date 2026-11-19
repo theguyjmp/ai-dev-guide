@@ -17,7 +17,9 @@ fixes stubs): there is no needs-plan exit, and one gate run covers a whole batch
 ## Parts
 - `scripts/harness.py` (no LLM): `claim --slot N --wait S` hands out the highest-impact buildable row and prepares a
   fixed per-slot worktree (warm incremental builds); `submit`, `release`; `train --loop` is the land train;
-  `status`; `frontier`; `clean-start` / `clean-submit` for cleanup branches (CLEAN-* queue rows);
+  `status`; `frontier`; `clean-start` / `clean-submit` for cleanup branches (CLEAN-* queue rows;
+  `--absorbs a,b` for an integration row that lands other rows' commits on purpose: verified by git, never held for them,
+  each absorbed spec row proven by its own tests in the same gate);
   `self-review --slot N` runs the train's own duplicate reviewer on a slot's branch (functions it adds vs main).
 - `workflows/builders.js`: Claude Code Workflow, N worker loops, each spawning a FRESH builder agent per row
   (args: {slots, max, idle, home, slot_list}). Builders run only their row's tests and clippy on touched crates, then
