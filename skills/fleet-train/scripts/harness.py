@@ -48,15 +48,30 @@ def iso() -> str:
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no console windows for children
 
 
+def kill_tree(pid: int, sig: int = 9) -> None:
+    """Kill pid and its tree: taskkill /T on Windows, its process group on POSIX (sh() children lead one), else pid."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, creationflags=NO_WINDOW)
+        return
+    try:
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, sig)
+        else:
+            os.kill(pid, sig)
+    except (ProcessLookupError, PermissionError):  # default: already gone
+        pass
+
+
 def sh(cmd, cwd=REPO, check=True, env=None, timeout=None, stdin=None) -> subprocess.CompletedProcess:
     p = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
                          errors="replace", env=env, shell=isinstance(cmd, str),
-                         stdin=subprocess.PIPE if stdin is not None else None, creationflags=NO_WINDOW)
+                         stdin=subprocess.PIPE if stdin is not None else None, creationflags=NO_WINDOW,
+                         start_new_session=os.name != "nt")
     try:
         out, err = p.communicate(input=stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
         # kill the whole tree: a grandchild (app.exe under a test) keeps the pipes open and would hang us forever
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, creationflags=NO_WINDOW)
+        kill_tree(p.pid)
         try:
             out, err = p.communicate(timeout=60)
         except subprocess.TimeoutExpired:

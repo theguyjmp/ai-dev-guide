@@ -446,14 +446,9 @@ def pick_stop(h) -> None:
         return
     (h.ST / PICK).unlink(missing_ok=True)
     if not cur.get("start") or h.proc_start(cur["pid"]) != cur["start"]:
-        pass  # a reused pid or no identity: kill nothing here
-    elif os.name == "nt":
-        h.sh(["taskkill", "/T", "/F", "/PID", str(cur["pid"])], check=False)
+        pass  # reused pid or no identity
     else:
-        try:
-            os.kill(cur["pid"], 15)
-        except OSError:
-            pass
+        h.kill_tree(cur["pid"], sig=15)
     ssh(h, f"{KIT}\\stop.cmd {cur['rid']}", timeout=120)
     h.event("pick_accept_preempted", rid=cur["rid"])
 
