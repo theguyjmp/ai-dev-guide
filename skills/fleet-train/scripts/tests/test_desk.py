@@ -529,6 +529,16 @@ def test_unit_timeout():
     parts = [c for c in calls if c[0] and not c[1] and {Path(t.split("::")[0]).stem for t in c[0]} != whole]
     check("unit timeout, desk down: a red inside a part is red; the parts one per call; every test one verdict",
           out == [PAR[0]] and len(parts) == 2 and sorted(verdict_runs()) == sorted(set(T)), out, [len(c[0]) for c in calls])
+    now = time.time()
+    arm()
+    h.save(desk.RATES, {"here": {"par": [[now, 1e3]], "solo": [[now, 1e3]]}, "desk": {"par": [[now, 1.0]], "solo": [[now, 1.0]]}})
+    FakeDesk.script = {0: "error"}  # every unit planned on the desk; it errs: here runs every unit in one call
+    out = desk.run_desk(h, T, desk_cls=FakeDesk)
+    merged = [c for c in calls if c[1] and set(c[0]) - set(c[1])]
+    check("desk errs, the merged call here times out: each unit alone, the parallel one in halves, green, one verdict each",
+          out == [] and merged and all({Path(t.split("::")[0]).stem for t in set(c[0]) - set(c[1])} == whole for c in merged)
+          and sorted(verdict_runs()) == sorted(set(T)), out, [(len(c[0]), len(c[1])) for c in calls])
+    FakeDesk.script = {}
     one = {Path(PAR[0].split("::")[0]).stem}
     small = [t for t in PAR if Path(t.split("::")[0]).stem in one] + sorted(SOLO)
     arm(down=True, fixed=one)
