@@ -960,12 +960,13 @@ def main_unit_baseline() -> cf.CargoFailures:
     return cf.from_keys(cache["fails"])
 
 
-QUALITY_CMDS = [c.replace("{QS}", QS) if " " in c else f"py -3 {QS}/{c} {' '.join(P['src_dirs'])}" for c in P["qa"]]
+PY = "py -3" if os.name == "nt" else "python3"
+QUALITY_CMDS = [c.replace("{QS}", QS) if " " in c else f"{PY} {QS}/{c} {' '.join(P['src_dirs'])}" for c in P["qa"]]
 CLIPPY_STRICT = P["lint_strict"]  # the strict linter (name kept from the rust-only harness)
 FILE_LINES = int(os.environ.get("HARNESS_FILE_LINES", "500"))  # spec/STANDARDS.md S8 module-size cap
 TEST_FILE_LINES = int(os.environ.get("HARNESS_TEST_FILE_LINES", "600"))  # the same cap for test files
-RULES_CHECK = f"py -3 {Path(__file__).with_name('rules_gate.py').as_posix()} check --dir . --lang {STACK}"
-FIND_OWNER = f'py -3 {QS}/index_api.py --find "<purpose words>"'
+RULES_CHECK = f"{PY} {Path(__file__).with_name('rules_gate.py').as_posix()} check --dir . --lang {STACK}"
+FIND_OWNER = f'{PY} {QS}/index_api.py --find "<purpose words>"'
 RULES_BRIEF = (f"{RULES_CHECK} (must print RULES OK: no swallowed error or silent default, no expect/panic or silenced "
                "lint in product code, no type named like another owner's Forbidden types, no spec or CLAUDE.md text "
                "over its [text] caps, no new plan_validate problem)")
@@ -1099,6 +1100,11 @@ def cmd_clean_start(a):
     p = ensure_wt(a.slot, f"clean/{a.name}-s{a.slot}", "main")
     e = env_for(a.slot)
     print(json.dumps({"worktree": str(p).replace(chr(92), "/"), "env_prefix": " ".join(f"{k}={v}" for k, v in e.items()).replace(chr(92), "/")}))
+
+
+def cmd_review_prompt(a):
+    d = Path(a.dir) if a.dir else REPO
+    print(review_prompt(added_functions(d, a.base or "main")), end="")
 
 
 def cmd_self_review(a):
@@ -1322,7 +1328,7 @@ def finish_spec(ids):
         if (pruned := drop_items(text, ids, PACKET_RE)) != text:
             f.write_text(pruned, encoding="utf-8")
     # keep spec/INDEX.md + spec/index/* current: builders search them before writing any function (STANDARDS S6)
-    sh(["py", "-3", f"{QS}/index_api.py"], cwd=TRAIN, check=False, timeout=600)
+    sh([*PY.split(), f"{QS}/index_api.py"], cwd=TRAIN, check=False, timeout=600)
     git("add", "-A", "spec", cwd=TRAIN, check=False)
     git("commit", "-qam", f"train: proven {' '.join(ids)}", cwd=TRAIN, check=False)
 
@@ -1382,18 +1388,17 @@ REVIEW_PROMPT = (REVIEW_PROMPT.replace("@LANG@", P["lang"]).replace("@OWNERS@", 
                  .replace("@GREP@", " ".join(d.rstrip("/") + "/" for d in P["src_dirs"])))
 
 
-CLAUDE_BIN = (shutil.which("claude.exe")
+CLAUDE_BIN = (shutil.which("claude.exe") or shutil.which("claude")
               or str(Path.home() / "AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe"))
+REVIEW_MAX_FNS = 300
 
 
 class ReviewUnavailable(Exception):
     """The duplicate reviewer gave no usable answer twice: the batch waits, it never lands unreviewed (rule zero)."""
 
 
-def batch_review(merged, cwd=None, base="main") -> list:
-    """Headless reviewer over the functions this batch adds, fail-CLOSED: an empty or unparseable answer is retried
-    once, then ReviewUnavailable defers the batch. Builders run it before submit (`self-review --slot N`)."""
-    cwd = cwd or TRAIN
+def added_functions(cwd, base: str) -> list:
+    """`file: signature` of each function HEAD at `cwd` adds against `base` (review_skip_re files left out)."""
     diff = git("diff", "-U0", base, "HEAD", "--", *P["src_dirs"], cwd=cwd, check=False).stdout
     added, cur = [], ""
     for line in diff.splitlines():
@@ -1401,6 +1406,19 @@ def batch_review(merged, cwd=None, base="main") -> list:
             cur = line[6:]
         elif line.startswith("+") and re.match(P["fn_added_re"], line) and not re.search(P["review_skip_re"], cur):
             added.append(f"{cur}: {line[1:].strip()[:160]}")
+    return added
+
+
+def review_prompt(added: list) -> str:
+    """The one duplicate-review prompt for `added` (every reviewer gets this text); "" when nothing is added."""
+    return REVIEW_PROMPT.format(added=chr(10).join(added[:REVIEW_MAX_FNS])) if added else ""
+
+
+def batch_review(merged, cwd=None, base="main") -> list:
+    """Headless reviewer over the functions this batch adds, fail-CLOSED: an empty or unparseable answer is retried
+    once, then ReviewUnavailable defers the batch. Builders run it before submit (`self-review --slot N`)."""
+    cwd = cwd or TRAIN
+    added = added_functions(cwd, base)
     if not added:
         return []
     t0, last = now(), ""
@@ -1408,7 +1426,7 @@ def batch_review(merged, cwd=None, base="main") -> list:
         try:
             r = sh([CLAUDE_BIN, "-p", "--output-format", "json", "--model", "sonnet", "--max-turns", "60",
                     "--dangerously-skip-permissions"], cwd=cwd, check=False, timeout=1500,
-                   stdin=REVIEW_PROMPT.format(added=chr(10).join(added[:300])))
+                   stdin=review_prompt(added))
             res = json.loads(r.stdout).get("result", "")
             m = re.search(r"\{.*\}", res, re.S)
             if not m:
@@ -2129,7 +2147,7 @@ def train_once():
         for gen in ("dash.py",):  # dashboards are regenerated by the train, never by memory
             if (HOME / gen).exists():
                 # run detached: a slow dashboard (15 min timeout) inside the train lock blocked every next batch
-                subprocess.Popen(["py", "-3", str(HOME / gen)], cwd=HOME, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                subprocess.Popen([*PY.split(), str(HOME / gen)], cwd=HOME, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  creationflags=NO_WINDOW)
         print(f"{iso()} train: landed {len(landed)}/{len(batch)} in {round(now() - t0)}s", flush=True)
         quarantine.release(sys.modules[__name__])
@@ -2200,6 +2218,8 @@ def main():
     p = sp.add_parser("quality-check"); p.add_argument("--dir", default=""); p.add_argument("--base", default="")
     p = sp.add_parser("clean-start"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
     p = sp.add_parser("self-review"); p.add_argument("--slot", type=int, required=True)
+    p = sp.add_parser("review-prompt", help="print the duplicate reviewer's prompt for a tree's added functions")
+    p.add_argument("--dir", default=""); p.add_argument("--base", default="")
     p = sp.add_parser("clean-submit"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
     p.add_argument("--absorbs", default="", help="row ids this integration row lands with it, comma separated; each is "
                    "verified in the branch")
@@ -2210,7 +2230,8 @@ def main():
     a = ap.parse_args()
     {"frontier": cmd_frontier, "claim": cmd_claim, "submit": cmd_submit, "release": cmd_release,
      "train": cmd_train, "status": cmd_status, "note": cmd_note, "pick-accept": lambda a: print(pick_accept_queue()),
-     "clean-start": cmd_clean_start, "self-review": cmd_self_review, "quality-check": cmd_quality_check, "clean-submit": cmd_clean_submit}[a.cmd](a)
+     "clean-start": cmd_clean_start, "self-review": cmd_self_review, "review-prompt": cmd_review_prompt,
+     "quality-check": cmd_quality_check, "clean-submit": cmd_clean_submit}[a.cmd](a)
 
 
 if __name__ == "__main__":

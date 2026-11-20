@@ -21,6 +21,8 @@ fixes stubs): there is no needs-plan exit, and one gate run covers a whole batch
   `--absorbs a,b` for an integration row that lands other rows' commits on purpose: verified by git, never held for them,
   each absorbed spec row proven by its own tests in the same gate);
   `self-review --slot N` runs the train's own duplicate reviewer on a slot's branch (functions it adds vs main).
+  `review-prompt --dir D --base B` prints that reviewer's exact prompt for D's added functions, for a reviewer the
+  harness does not start itself (a cloud session's fresh subagent); nothing when D adds no function.
 - `workflows/builders.js`: Claude Code Workflow, N worker loops, each spawning a FRESH builder agent per row
   (args: {slots, max, idle, home, slot_list}). Builders run only their row's tests and clippy on touched crates, then
   `self-review` and fix every duplicate it lists before `submit` (a duplicate caught here costs minutes; at land it
