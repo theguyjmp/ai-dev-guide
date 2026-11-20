@@ -1737,6 +1737,61 @@ def fill_wait(queue: list, picks: list) -> bool:
     return True
 
 
+SKIP_PARENT = "pick-skip-parent.json"  # {row: sha}: queued rows whose pick_skip_parent is already logged
+
+
+def stacked_on(picks: list, blockers: dict, base: str = "main") -> list:
+    """[(q, parent sha)] for the picks whose sha carries the unlanded commit (base..q, git ancestry) of a blocker:
+    {sha: (row, rejected)}, rows the train rejected and rows queued outside the picks. Landing q would land the
+    parent's rejected or unjudged code through the child (pilot: a batch started with 5 rows stacked on 4 rows the
+    pick check and gate_rows had just rejected). Exempt: a blocker that is a pick, and one a pick re-lands on purpose:
+    a pick landing the blocker's row (lands_rows: q itself, the parent's fix on top of its rejected sha, a row it
+    absorbs) carries it, so the child rides with its parent's layer (pilot: skipping those landed one layer of each
+    stack a train). A skipped pick blocks its own descendants and no longer re-lands its row's shas (fixpoint).
+    Rejected parent named first."""
+    left, out = list(picks), []
+    carried = {q["sha"]: set(git("rev-list", f"{base}..{q['sha']}").stdout.split()) for q in picks}
+    while True:
+        picked = {q["sha"] for q in left}
+        relands = {s for p in left for s in carried[p["sha"]] & blockers.keys() if blockers[s][0] in lands_rows(p)}
+        hits = []
+        for q in left:
+            par = sorted((not blockers[s][1], blockers[s][0], s) for s in carried[q["sha"]] & blockers.keys()
+                         if s not in picked and s not in relands)
+            if par:
+                hits.append((q, par[0][2]))
+        if not hits:
+            return out
+        out += hits
+        left = [q for q in left if all(q is not x for x, _ in hits)]
+
+
+def pick_blockers(picks: list) -> dict:
+    """{sha: (row, rejected)} the picks must not carry: every sha the train rejected (rejects.json; reject() dequeues
+    it, so the next pick no longer sees it queued) and every row still queued (queue.json, not the pick's filtered
+    copy) outside the picks."""
+    picked = {q["sha"] for q in picks}
+    out = {r["sha"]: (row, True) for row, rs in load("rejects.json", {}).items() for r in rs if r.get("sha")}
+    out.update({q["sha"]: (q["row"], False) for q in load("queue.json", []) if q["sha"] not in picked})
+    return out
+
+
+def skip_stacked(picks: list) -> list:
+    """The picks stacked_on a blocker: not picked, they stay queued until the parent lands (or are restacked off a
+    rejected one). Each skipped (row, sha) is logged once as pick_skip_parent, not on every idle pick."""
+    blockers = pick_blockers(picks)
+    hits = stacked_on(picks, blockers)
+    with lock("state"):
+        seen, live = load(SKIP_PARENT, {}), {q["row"]: q["sha"] for q in load("queue.json", [])}
+        for q, p in hits:
+            if seen.get(q["row"]) != q["sha"]:
+                seen[q["row"]] = q["sha"]
+                event("pick_skip_parent", row=q["row"], sha=q["sha"][:12], parent=blockers[p][0], parent_sha=p[:12],
+                      rejected=blockers[p][1])
+        save(SKIP_PARENT, {r: sha for r, sha in seen.items() if sha == live.get(r)})
+    return [q for q, _ in hits]
+
+
 def disjoint(queue: list) -> list:
     """Oldest first, the rows that merge cleanly onto main plus every earlier pick (git merge-tree trial merges;
     file-disjoint before git 2.38); the rest wait. A row carrying another unproven row's commits waits until that row
@@ -2106,22 +2161,28 @@ def train_once():
         if not queue:
             return False
         batch = disjoint(queue)[:BATCH_CAP]
-        while batch:
-            bad = pick_screen(batch)
-            if not bad:
+        skipped = []
+        while batch:  # a pick carrying a rejected or unpicked row's sha is skipped (stays queued) before its screen
+            if stacked := skip_stacked(batch):
+                skipped += stacked
+                bad = {q["sha"] for q in stacked}
+            elif not (bad := pick_screen(batch)):
                 break
             queue = [q for q in queue if q["sha"] not in bad]
             batch = disjoint(queue)[:BATCH_CAP]
         if not batch:  # every queued row conflicts with main: normal conflict handling, then idle (never an empty train)
-            for q in queue:
+            for q in queue:  # skipped rows already left this list: they stay queued for their parents
                 reject(q, "merge conflict with main; merge main into your branch and resolve")
-            event("train_idle", queued=len(load("queue.json", [])), reason="no row merges cleanly with main")
+            ride = f"; {len(skipped)} ride on a rejected or queued parent" if skipped else ""
+            event("train_idle", queued=len(load("queue.json", [])), reason=f"no row merges cleanly with main{ride}")
             return False
         if fill_wait(queue, batch):
             return False
         for q, why in gate_rows(batch, rows):
             reject(q, why)
             batch = [x for x in batch if x is not q]
+        skipped = skip_stacked(batch)  # a gate_rows reject's children
+        batch = [x for x in batch if all(x is not q for q in skipped)]
         if not batch:
             return True
         t0 = now()
