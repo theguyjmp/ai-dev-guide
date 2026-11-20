@@ -1,7 +1,8 @@
 """The desk: a second Windows machine (ssh, cmd shell) running tests from a git bundle. Cargo: acceptance split (units
 on both machines for the earliest finish by measured throughput, state/unit-rates.json; cold start by CPU load; no
 verdict runs here; a unit that did not build runs there once more after `cargo clean -p` of what its build output
-names, then here).
+names, then here; a unit that times out here is no verdict, never a train error: split, the parts offered to the idle
+desk first; the smallest unit once more on the desk, else it raises).
 Other runners: every test run there (`job`); no verdict raises Unavailable.
 On with <state>/desk-on or [desk] host; HARNESS_DESK=0/1 overrides.
 
@@ -11,7 +12,7 @@ from __future__ import annotations
 
 import argparse, hashlib, json, os, re, statistics, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -312,8 +313,7 @@ def units(tests, solo: set, times: dict, alone: dict, n: int) -> list:
     seconds, longest first (pick()'s priority order)."""
     par = sorted(t for t in set(tests) if t not in solo)
     sol = {t: [t] for t in sorted(set(tests) & set(solo))}
-    pc = sum((times.get(s, 5.0) + LINK_SECS) / POOL for s in {Path(t.split("::")[0]).stem for t in par})
-    out = [{"cost": pc, "tests": par, "solo": []}] if par else []
+    out = [{"cost": par_cost(par, times), "tests": par, "solo": []}] if par else []
     if not sol:
         return out
     sc = {t: float(alone.get(t, SOLO_SECS)) for t in sol}
@@ -345,6 +345,28 @@ def cpu_load(secs: float = LOAD_SECS):
 def local_ok(load) -> bool:
     """Units may run here: load unknown or at most BUSY_LOAD."""
     return load is None or load <= BUSY_LOAD
+
+
+def par_cost(tests, times: dict) -> float:
+    """A parallel unit's cost: its binaries' recorded seconds (unknown 5.0) plus LINK_SECS each, over POOL."""
+    return sum((times.get(s, 5.0) + LINK_SECS) / POOL for s in {Path(t.split("::")[0]).stem for t in tests})
+
+
+def halve(u: dict, times: dict, alone: dict) -> list:
+    """A timed-out unit as two parts of about equal cost, each test in exactly one: a parallel unit by test binary,
+    a solo unit by test (alone seconds). [] for one binary or one test: the smallest unit."""
+    if u["solo"]:
+        groups, cost = {t: [t] for t in u["tests"]}, {t: float(alone.get(t, SOLO_SECS)) for t in u["tests"]}
+    else:
+        groups = {}
+        for t in u["tests"]:
+            groups.setdefault(Path(t.split("::")[0]).stem, []).append(t)
+        cost = {g: times.get(g, 5.0) + LINK_SECS for g in groups}
+    halves = balance(groups, cost, 2)
+    if len(halves) < 2:
+        return []
+    return [{"cost": c if u["solo"] else par_cost(ts, times), "tests": ts, "solo": ts if u["solo"] else [], "part": True}
+            for c, ts in halves]
 
 
 def kind(u: dict) -> str:
@@ -403,13 +425,15 @@ def place(us: list, rate: dict) -> Plan:
 
 def pick(us: list, todo: list, machine: str, desk_up: bool = True, here: bool = True, plan: Plan = None) -> list:
     """The unit indices `machine` ("here" | "desk") runs next as one run_tests() call; todo: unstarted indices;
-    plan default: the cold start. Own units first, then steal (here the desk's first, the desk here's last). Desk out of the gate (desk_up False): here every unit left in one call."""
+    plan default: the cold start. Own units first, then steal (here the desk's first, the desk here's last). Desk out of the gate (desk_up False): here every whole unit left in one call, then a timed-out unit's parts
+    (part True) one per call. The desk takes a timed-out unit's parts before its own units."""
     plan = plan or place(us, rates({}, here, 0.0))
     if machine == "here":
         if not desk_up:
-            return sorted(todo)
+            return [k for k in sorted(todo) if not us[k].get("part")] or sorted(todo)[:1]
         return ([k for k in sorted(todo) if k in plan.here] or [k for k in sorted(todo) if k in plan.steal])[:1]
-    return ([k for k in sorted(todo) if k not in plan.here] or [k for k in sorted(todo) if k in plan.back][-1:])[:1]
+    own = sorted((k for k in todo if k not in plan.here), key=lambda k: (not us[k].get("part"), k))  # parts first
+    return (own or [k for k in sorted(todo) if k in plan.back][-1:])[:1]
 
 
 PICK = "desk-pick.json"  # {"pid", "start", "rid"} of harness.pick_accept_queue's desk run
@@ -564,7 +588,8 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
     t0 = time.time()
     load = cpu_load()
     here = local_ok(load)
-    us = units(tests, h.solo_tests(tests), h.load(h.ACCEPT_TIMES, {}), h.load(h.ALONE_TIMES, {}), UNITS)
+    times, alone = h.load(h.ACCEPT_TIMES, {}), h.load(h.ALONE_TIMES, {})
+    us = units(tests, h.solo_tests(tests), times, alone, UNITS)
     hist = h.load(RATES, {})
     rate = rates(hist, here, t0)
     plan = place(us, rate)
@@ -572,52 +597,90 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
     gid = f"{sha[:12]}-{int(t0) % 1000000}"
     fails, logs, where, todo = {}, {}, {}, list(range(len(us)))
     busy, dtimes, dalone = {"here": 0.0, "desk": 0.0}, {}, {}
-    work = {m: {} for m in MACHINES}  # {machine: {kind: [wall secs, cost]}}
+    work = {m: {} for m in MACHINES}  # {machine: {kind: [wall secs, cost]}} of the verdicts it gave
     lg = h.ST / "last-gate.txt"
+    desk, skipped, opened = None, "every unit here", False
 
-    def local(ks):
+    def local(ks):  # (ks, fails or None when the call timed out: no verdict, h.sh killed its tree, log, wall secs)
         s0 = time.time()
         lg.unlink(missing_ok=True)
-        f = h.run_tests(sorted(t for k in ks for t in us[k]["tests"]), timeout=timeout,
-                        solo=sorted(t for k in ks for t in us[k]["solo"]))
+        try:
+            f = h.run_tests(sorted(t for k in ks for t in us[k]["tests"]), timeout=timeout,
+                            solo=sorted(t for k in ks for t in us[k]["solo"]))
+        except subprocess.TimeoutExpired:
+            return ks, None, "", time.time() - s0
         return ks, f, (lg.read_text(encoding="utf-8", errors="replace") if f and lg.exists() else ""), time.time() - s0
 
-    def take(k, f, log, machine, secs):  # a unit's first verdict wins
+    def open_desk():
+        nonlocal desk, skipped, opened
+        desk, opened = desk_cls(h, gid, sha), True
+        skipped = desk.why
+        if skipped:
+            h.event("desk_skip", gate=gid, reason=skipped[-300:])
+            desk = None
+
+    def take(k, f, log, machine, secs):  # first verdict of a unit wins
         if k not in fails:
             fails[k], where[k] = f, machine
             busy[machine] += secs
             if log:
                 logs[k] = log
 
-    def did(machine, ks, wall):  # a run of one kind of unit is a throughput sample
+    def did(machine, ks, wall):  # a run of one kind of unit is a throughput sample (a timed-out one: a lower bound)
         if len({kind(us[k]) for k in ks}) == 1:
             w = work[machine].setdefault(kind(us[ks[0]]), [0.0, 0.0])
             w[0], w[1] = w[0] + wall, w[1] + sum(us[k]["cost"] for k in ks)
 
-    def give(machine, desk_up):
+    def give(machine, desk_up):  # pick()'s next units for machine, taken off todo
         ks = pick(us, todo, machine, desk_up, plan=plan)
         todo[:] = [k for k in todo if k not in ks]
         return ks
 
+    def timed_out(ks, secs):  # no verdict: each unit retired for parts the desk is offered first
+        nonlocal plan
+        if not opened:
+            open_desk()
+        did("here", ks, secs)
+        busy["here"] += secs
+        for k in ks:
+            u = us[k]
+            parts = halve(u, times, alone) if len(ks) == 1 else [dict(u, part=True)]
+            h.event("unit_timeout", gate=gid, unit=k, machine="here", secs=round(secs), n=len(u["tests"]),
+                    binaries=len({Path(t.split("::")[0]).stem for t in u["tests"]}), tests=u["tests"][:20],
+                    parts=len(parts), desk=desk is not None)
+            shared = bool(parts)  # halves (or a merged call's units): this machine may take them while the desk is busy
+            if not parts and desk is not None:  # the smallest unit: once more, on the desk only
+                parts = [dict(u, part=True)]
+            if not parts:
+                raise TimeoutError(f"acceptance unit {k} ({len(u['tests'])} tests, {u['tests'][0]}) timed out here "
+                                   f"after {round(secs)} s and is the smallest unit; no desk: no verdict")
+            fails[k], where[k] = [], "split"
+            us.extend(parts)
+            new = frozenset(range(len(us) - len(parts), len(us)))
+            todo.extend(sorted(new))
+            plan = replace(plan, steal=plan.steal | new) if shared else plan
+
     with ThreadPoolExecutor(1) as pool:
         ks = give("here", True)
         fut = pool.submit(local, ks) if ks else None
-        desk, skipped = None, "every unit here"
         if len(plan.here) < len(us):
-            desk = desk_cls(h, gid, sha)
-            skipped = desk.why
-        if skipped:
-            h.event("desk_skip", gate=gid, reason=skipped[-300:])
-            desk = None
+            open_desk()
+        else:
+            h.event("desk_skip", gate=gid, reason=skipped)
         while len(fails) < len(us):
+            desk_first = False
             if fut is not None and fut.done():
                 ks, f, log, secs = fut.result()
-                mine = [{t for t in f if t in set(us[k]["tests"])} for k in ks]
-                mine[0] |= set(f) - set().union(*mine)  # a name of no unit ("build") counts too
-                for i, k in enumerate(ks):
-                    take(k, sorted(mine[i]), log if i == 0 else "", "here", secs if i == 0 else 0.0)
-                did("here", ks, secs)
                 fut = None
+                if f is None:
+                    timed_out(ks, secs)
+                    desk_first = True
+                else:
+                    mine = [{t for t in f if t in set(us[k]["tests"])} for k in ks]
+                    mine[0] |= set(f) - set().union(*mine)  # a name of no unit (run_tests' "build") counts too
+                    for i, k in enumerate(ks):
+                        take(k, sorted(mine[i]), log if i == 0 else "", "here", secs if i == 0 else 0.0)
+                    did("here", ks, secs)
             if desk is not None and desk.k is not None:
                 got = desk.poll(us[desk.k])
                 if got is not None and got[1] is None:
@@ -625,21 +688,24 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
                     desk = None
                     todo.append(got[0])
                 elif got is not None:
+                    res = got[1]
                     if got[0] not in fails:
                         did("desk", [got[0]], time.time() - dt0)
-                    take(got[0], got[1]["fails"], got[1].get("log", ""), "desk", got[1].get("secs", 0))
-                    dtimes.update(got[1].get("times", {}))
-                    dalone.update(got[1].get("alone", {}))
+                    take(got[0], res["fails"], res.get("log", ""), "desk", res.get("secs", 0))
+                    dtimes.update(res.get("times", {}))
+                    dalone.update(res.get("alone", {}))
             todo[:] = [k for k in todo if k not in fails]
-            if fut is None:
-                ks = give("here", desk is not None)
-                fut = pool.submit(local, ks) if ks else None
-            if desk is not None and desk.k is None:
-                ks, dt0 = give("desk", True), time.time()
-                if ks and not desk.start(ks[0], us[ks[0]]):
-                    h.event("desk_error", gate=gid, reason=desk.why)
-                    desk = None
-                    todo.append(ks[0])
+            for m in ("desk", "here") if desk_first else ("here", "desk"):  # a timeout's parts: the desk first
+                if m == "here" and fut is None:
+                    ks = give("here", desk is not None)
+                    fut = pool.submit(local, ks) if ks else None
+                if m == "desk" and desk is not None and desk.k is None:
+                    ks = give("desk", True)
+                    k, dt0 = (ks[0] if ks else None), time.time()
+                    if k is not None and not desk.start(k, us[k]):
+                        h.event("desk_error", gate=gid, reason=desk.why)
+                        desk = None
+                        todo.append(k)
             if len(fails) < len(us) and (fut is None or not fut.done()):
                 time.sleep(POLL_SECS)
     fill_times(h, dtimes, dalone)
@@ -652,6 +718,7 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
             desk=sum(1 for v in where.values() if v == "desk"), desk_skip=skipped[-200:],
             solo_units=sum(1 for u in us if u["solo"]),
             solo_here=sum(1 for k, v in where.items() if v == "here" and us[k]["solo"]),
+            timeouts=sum(1 for v in where.values() if v == "split"),
             here_secs=round(busy["here"]), desk_secs=round(busy["desk"]), secs=round(time.time() - t0),
             cpu_load=None if load is None else round(load), local_ok=here, n=len(set(tests)), fails=len(out),
             rates={f"{m}/{k}": round(r, 3) for (m, k), r in rate.items() if r != float("inf")},

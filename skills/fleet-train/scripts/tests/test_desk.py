@@ -4,7 +4,7 @@ desk unit with no verdict (error, other tests, other head, late, env fault) runs
 down sends everything here; this machine busy at gate start (cpu_load() above BUSY_LOAD) keeps no unit while the
 desk is up and still runs everything when the desk is down or errs (the cold start; with throughput history a
 unit goes here only when this machine is not slower and finishes no later; stale history: cold start); a unit the desk could not build runs there once
-more after its incremental clean, then here; state/desk-on turns it on, HARNESS_DESK=0/1 overrides; the desk side writes its result.
+more after its incremental clean, then here; state/desk-on turns it on, HARNESS_DESK=0/1 overrides; the desk side writes its result; a unit timing out here is split, never a train error.
 
   py -3 tests/test_desk.py
 """
@@ -480,10 +480,77 @@ def test_throughput():
           (gs["plan_here"], ran, len(calls)))
 
 
+def test_unit_timeout():
+    """A unit that times out here (its test build passed the timeout on a loaded machine) is no verdict, never a train
+    error: split, the parts offered to the idle desk first, each test one verdict; desk down: parts one per call; the
+    smallest unit once more on the desk, with no desk it raises (no verdict)."""
+    whole = {Path(t.split("::")[0]).stem for t in PAR}
+    calls = []
+
+    def arm(red=(), down=False, fixed=None):
+        calls.clear()
+        (h.ST / desk.RATES).unlink(missing_ok=True)
+        FakeDesk.script, FakeDesk.why0, FakeDesk.BUSY_POLLS = {}, ("unreachable" if down else ""), 0
+
+        def run_tests(ts, timeout=1800, solo=None):
+            par = {Path(t.split("::")[0]).stem for t in set(ts) - set(solo or [])}
+            calls.append((sorted(ts), sorted(solo or [])))
+            if par == whole or (fixed and par and par <= fixed):
+                raise subprocess.TimeoutExpired(["cargo", "test", "--no-run"], timeout)
+            return sorted(set(ts) & set(red))
+        h.run_tests = run_tests
+        h.git = lambda *a, **k: SimpleNamespace(stdout=SHA + "\n", returncode=0, stderr="")
+        h.solo_tests = lambda tests: SOLO & set(tests)
+
+    def events(name):
+        ev = [json.loads(l) for l in (h.ST / "events.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+        return [e for e in ev if e.get("event") == name or e.get("stage") == name]
+
+    def verdict_runs():
+        return [t for c in calls if {Path(t.split("::")[0]).stem for t in set(c[0]) - set(c[1])} != whole for t in c[0]]
+
+    old_load, desk.cpu_load = desk.cpu_load, (lambda secs=0: 5.0)  # history keeps the parallel unit here
+    arm()
+    h.save(desk.RATES, {"here": {"par": [[time.time(), 0.5]]}, "desk": {"par": [[time.time(), 2.0]]}})
+    n0 = len(events("unit_timeout"))
+    out = desk.run_desk(h, T, desk_cls=FakeDesk)
+    dk, to, gs = FakeDesk.last, events("unit_timeout")[n0:], events("acceptance-desk")[-1]
+    pk = [i for i, k in enumerate(dk.ran) if k >= gs["units"] - 2]
+    tail = dk.ran[pk[0]:] if pk else []
+    here = verdict_runs()
+    check("unit timeout: no raise, green, one unit_timeout event (size, binaries, secs), the parts on the desk first",
+          out == [] and len(to) == 1 and to[0]["n"] == len(PAR) and to[0]["binaries"] == len(whole)
+          and to[0]["parts"] == 2 and gs["timeouts"] == 1 and pk and tail == sorted(tail, key=lambda k: k < gs["units"] - 2),
+          out, to, dk.ran, gs.get("units"))
+    check("unit timeout: every test one verdict", sorted(here + sorted(dk.tests)) == sorted(set(T))
+          and not set(here) & dk.tests, len(here), len(dk.tests))
+    arm(red=[PAR[0]], down=True)
+    out = desk.run_desk(h, T, desk_cls=FakeDesk)
+    parts = [c for c in calls if c[0] and not c[1] and {Path(t.split("::")[0]).stem for t in c[0]} != whole]
+    check("unit timeout, desk down: a red inside a part is red; the parts one per call; every test one verdict",
+          out == [PAR[0]] and len(parts) == 2 and sorted(verdict_runs()) == sorted(set(T)), out, [len(c[0]) for c in calls])
+    one = {Path(PAR[0].split("::")[0]).stem}
+    small = [t for t in PAR if Path(t.split("::")[0]).stem in one] + sorted(SOLO)
+    arm(down=True, fixed=one)
+    try:
+        desk.run_desk(h, small, desk_cls=FakeDesk)
+        raised = ""
+    except TimeoutError as e:
+        raised = str(e)
+    check("one binary timing out, no desk: no verdict (raises), never a pass or a red",
+          "smallest unit" in raised and events("unit_timeout")[-1]["parts"] == 0, raised)
+    arm(fixed=one)
+    out = desk.run_desk(h, small, desk_cls=FakeDesk)
+    check("one binary timing out, desk up: once more on the desk, green",
+          out == [] and set(small) - SOLO <= FakeDesk.last.tests, out)
+    desk.cpu_load = old_load
+
+
 def main():
     us = test_units_and_pick()
     test_run_desk(us)
     test_throughput()
+    test_unit_timeout()
     test_desk_poll()
     test_desk_unit_env()
     test_switch_and_routing()
