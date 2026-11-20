@@ -17,7 +17,7 @@ with different units, is a conflict there, never two units. Exit 0 clean, 1 with
 
 A key a file holds twice (a row id listed twice) is keyed by its occurrence. Anything the units cannot express
 (another extension, conflict markers in an input, a keyed unit that moved, a result holding a key more often than
-an input, any error) falls back to git's text merge and exit 1 (lineset_merge.text_merge). Where the driver is not
+an input, any error) falls back to git's text merge and its status (lineset_merge.text_merge). Where the driver is not
 configured (a cloud clone) git uses its text merge by itself.
 """
 from __future__ import annotations
@@ -49,7 +49,7 @@ class Unmergeable(Exception):
 HEADING = re.compile(r"#{1,6}\s")
 SEPARATOR = re.compile(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
 BULLET = re.compile(r"([-*+]|\d+[.)])\s")
-MARKER = re.compile(r"(<{7}|={7}|>{7})( |$)")
+MARKER = re.compile(r"(<{7,}|>{7,})( |$)|={7,}$")  # an inner merge of a criss-cross writes longer ones
 TEST_NAME = re.compile(r'name\s*=\s*"([^"]+)"')
 
 
