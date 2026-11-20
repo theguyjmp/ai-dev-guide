@@ -1862,30 +1862,43 @@ def ensure_merge_drivers() -> None:
 
 
 def disjoint(queue: list) -> list:
-    """Oldest first, the rows that merge cleanly onto main plus every earlier pick (git merge-tree trial merges;
-    file-disjoint before git 2.38); the rest wait. A row carrying another unproven row's commits waits until that row
-    is landed by an earlier pick (its own or absorbed, lands_rows) or proven (state/pick-held.json)."""
+    """Oldest first, the rows that merge cleanly onto main plus every earlier pick (git merge-tree; file-disjoint
+    before git 2.38). A fixed point: a row is a candidate while a candidate anywhere in the queue lands (lands_rows)
+    each unproven row it carries, so a stack goes whole or waits (state/pick-held.json); a conflicting candidate
+    waits, and the fixed point is retaken without it."""
     ensure_merge_drivers()
-    acc, out, held, provided = git("rev-parse", "main").stdout.strip(), [], {}, set()
+    main = git("rev-parse", "main").stdout.strip()
     spec = main_spec()
     proven = {i for i, r in spec.items() if r["status"] == "proven"}
-    for q in queue:
-        dep = carried_rows(q, spec) - proven - provided
-        if dep:
-            held[q["row"]] = sorted(dep)
-            continue
-        r = git("merge-tree", "--write-tree", acc, q["sha"], check=False)
-        if r.returncode == 1:  # conflicts: next batch
-            continue
-        if r.returncode != 0 or not r.stdout.split():
-            return _disjoint_files(queue)
-        c = git("commit-tree", r.stdout.split()[0], "-p", acc, "-p", q["sha"], "-m", "train pick", check=False).stdout.strip()
-        if not c:
-            return _disjoint_files(queue)
-        acc = c
-        out.append(q)
-        provided |= set(lands_rows(q))
-    save("pick-held.json", held)
+    dep = [carried_rows(q, spec) - proven for q in queue]
+    dropped = set()
+
+    def stable(cand: set) -> set:
+        while bad := {i for i in cand if dep[i] - landing_ids(queue[j] for j in cand)}:
+            cand = cand - bad
+        return cand
+
+    while True:
+        cand = stable(set(range(len(queue))) - dropped)
+        acc, out, clashed = main, [], set()
+        for i in sorted(cand):
+            r = git("merge-tree", "--write-tree", acc, queue[i]["sha"], check=False)
+            if r.returncode == 1:  # conflicts: next batch
+                clashed.add(i)
+                continue
+            if r.returncode != 0 or not r.stdout.split():
+                return _disjoint_files(queue)
+            c = git("commit-tree", r.stdout.split()[0], "-p", acc, "-p", queue[i]["sha"], "-m", "train pick",
+                    check=False).stdout.strip()
+            if not c:
+                return _disjoint_files(queue)
+            acc = c
+            out.append(queue[i])
+        if stable(cand - clashed) == cand - clashed:
+            break
+        dropped |= clashed
+    provided = landing_ids(out)
+    save("pick-held.json", {queue[i]["row"]: sorted(dep[i] - provided) for i in range(len(queue)) if dep[i] - provided})
     return out
 
 
@@ -2215,6 +2228,14 @@ def pick_accept_queue(max_rows: int = 6, check=pick_accept_check) -> int:
         lock_f.unlink(missing_ok=True)
 
 
+def gate_reject(picks: list, rows: dict) -> set:
+    """Reject and dequeue the `picks` gate_rows refuses (a landed spec row with no acceptance tests); their shas."""
+    bad = gate_rows(picks, rows)
+    for q, why in bad:
+        reject(q, why)
+    return {q["sha"] for q, _ in bad}
+
+
 def pick_screen(picks: list, budget: float = float("inf")) -> set:
     """Reject and dequeue the `picks` failing the pick check; their shas. A row with no verdict goes on to the gate."""
     cache, t0, bad = load(PICK_CACHE, {}), now(), []
@@ -2276,11 +2297,11 @@ def train_once():
             return False
         batch = disjoint(queue)[:BATCH_CAP]
         skipped = []
-        while batch:  # a pick carrying a rejected or unpicked row's sha is skipped (stays queued) before its screen
+        while batch:  # skip a pick on a rejected or unpicked parent, screen, gate_rows; each drop re-picks
             if stacked := skip_stacked(batch):
                 skipped += stacked
                 bad = {q["sha"] for q in stacked}
-            elif not (bad := pick_screen(batch)):
+            elif not (bad := pick_screen(batch) or gate_reject(batch, rows)):
                 break
             queue = [q for q in queue if q["sha"] not in bad]
             batch = disjoint(queue)[:BATCH_CAP]
@@ -2292,13 +2313,6 @@ def train_once():
             return False
         if fill_wait(queue, batch):
             return False
-        for q, why in gate_rows(batch, rows):
-            reject(q, why)
-            batch = [x for x in batch if x is not q]
-        skipped = skip_stacked(batch)  # a gate_rows reject's children
-        batch = [x for x in batch if all(x is not q for q in skipped)]
-        if not batch:
-            return True
         t0 = now()
         event("train_start", rows=[q["row"] for q in batch])
         GREEN["head"] = ""
