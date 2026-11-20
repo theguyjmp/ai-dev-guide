@@ -1792,10 +1792,29 @@ def skip_stacked(picks: list) -> list:
     return [q for q, _ in hits]
 
 
+MERGE_DRIVERS = {  # name -> (description, command): the drivers the project's .gitattributes names for its data files
+    "lineset": ("three-way merge of a line-set data file (fleet-train harness)",
+                f"{PY} {(HOME / 'lineset_merge.py').as_posix()} %O %A %B %P"),
+    "keyed": ("three-way merge of a keyed spec file by row, bullet or [[test]] entry (fleet-train harness)",
+              f"{PY} {(HOME / 'keyed_merge.py').as_posix()} %O %A %B %L %P"),
+}
+
+
+def ensure_merge_drivers() -> None:
+    """Register every MERGE_DRIVERS driver in the repo config, so every local merge and merge-tree (train, picker,
+    conflict checks, slot worktrees, which share the repo config) merges those files the same way. Another clone
+    runs the same `git config` lines once (SKILL.md "Merge drivers")."""
+    for name, (description, command) in MERGE_DRIVERS.items():
+        if git("config", "--get", f"merge.{name}.driver", check=False).stdout.strip() != command:
+            git("config", f"merge.{name}.name", description)
+            git("config", f"merge.{name}.driver", command)
+
+
 def disjoint(queue: list) -> list:
     """Oldest first, the rows that merge cleanly onto main plus every earlier pick (git merge-tree trial merges;
     file-disjoint before git 2.38); the rest wait. A row carrying another unproven row's commits waits until that row
     is landed by an earlier pick (its own or absorbed, lands_rows) or proven (state/pick-held.json)."""
+    ensure_merge_drivers()
     acc, out, held, provided = git("rev-parse", "main").stdout.strip(), [], {}, set()
     spec = main_spec()
     proven = {i for i, r in spec.items() if r["status"] == "proven"}
