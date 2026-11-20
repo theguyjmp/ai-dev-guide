@@ -642,15 +642,16 @@ def run_tests(tests, timeout=1800, solo=None):
     return run_tests_cargo(tests, timeout, solo) if P["accept"] == "cargo" else run_tests_cmd(tests, timeout)
 
 
-def unit_runs(cmds, timeout=1800, first_fail=False) -> list:
-    """[CompletedProcess] of each unit command in the train tree (or the desk), in order."""
-    if desk.offload(sys.modules[__name__]):
+def unit_runs(cmds, timeout=1800, first_fail=False, cwd=None) -> list:
+    """[CompletedProcess] of each unit command in the train tree (or the desk), in order. cwd: run them in that tree,
+    here, instead (a tree the desk does not hold, such as a cloud builder's scratch merge for `unit-check`)."""
+    if cwd is None and desk.offload(sys.modules[__name__]):
         res = desk.job(sys.modules[__name__], "cmd", timeout * len(cmds), cmds=list(cmds), timeout=timeout,
                        first_fail=first_fail)
         return [subprocess.CompletedProcess(c, r["rc"], r["out"], "") for c, r in zip(cmds, res["runs"])]
     out = []
     for c in cmds:
-        out.append(sh(c, cwd=TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=timeout))
+        out.append(sh(c, cwd=cwd or TRAIN, check=False, env=run_env(TRAIN_ENV), timeout=timeout))
         if first_fail and out[-1].returncode != 0:
             break
     return out
@@ -918,20 +919,36 @@ def unit_red_log(out: str) -> str:
     return out[-6000:] + chr(10) + f"unit failures ({len(keys)}): " + "; ".join(keys[:8]) + lines
 
 
-def unit_flaky(failing: cf.CargoFailures) -> bool:
+def unit_flaky(failing: cf.CargoFailures, cwd=None) -> bool:
     """True when each failing test, and each target that crashed naming none, passes alone on one thread (load
-    flakiness). A cargo rerun must pass a test: `--exact` on a name matching nothing exits 0."""
+    flakiness). A cargo rerun must pass a test: `--exact` on a name matching nothing exits 0. cwd as unit_runs."""
     keys = failing.keys()
     if not keys or len(keys) > 5 or not P["unit_one"] or (failing.unnamed and not P["unit_target"]):
         return False
     cmds = [P["unit_target"].replace("{target}", k) if k in failing.unnamed else
             P["unit_one"].replace("{name}", re.escape(k).replace('"', ".") if P["name_escape"] else k) for k in keys]
-    for key, r in zip(keys, unit_runs(cmds, timeout=900, first_fail=True)):
+    for key, r in zip(keys, unit_runs(cmds, timeout=900, first_fail=True, cwd=cwd)):
         if r.returncode != 0 or (P["unit_parser"] == "cargo" and not cf.passed(r.stdout)):
             event("gate_stage", stage="unit-red-alone", failing=key, rc=r.returncode)
             return False
     event("gate_stage", stage="unit-flaky-passed-alone", failing=keys)
     return True
+
+
+def unit_verdict(r, base, cwd=None) -> tuple:
+    """(red, failing) of one unit run r, the gate's one rule: green when it passed, when every failure is main's own
+    (base() gives main's failures; called only after a failure), or when each other failure passes alone (unit_flaky).
+    A failed run whose output names no failure is red."""
+    if r.returncode == 0:
+        return False, cf.from_keys([])
+    failing = unit_failures(r.stdout + r.stderr)
+    left = failing.without(base())
+    if failing.found and not left.found:  # main is red on exactly these
+        event("gate_stage", stage="unit-baseline-red", failing=failing.keys()[:5])
+        return False, failing
+    if left.found and unit_flaky(left, cwd):
+        return False, failing
+    return True, failing
 
 
 @contextmanager
@@ -1107,6 +1124,34 @@ def cmd_review_prompt(a):
     print(review_prompt(added_functions(d, a.base or "main")), end="")
 
 
+def cmd_unit_baseline(a):
+    """Main's unit failures for the tree --dir (checked out at main), written to --out as {"sha", "fails"}: the baseline
+    `unit-check` compares a merged tree against. A builder outside the train (a cloud session) caches it per main sha."""
+    d = Path(a.dir)
+    r = unit_runs([P["unit"]], cwd=d)[0]
+    data = {"sha": git("rev-parse", "HEAD", cwd=d).stdout.strip(), "fails": unit_failures(r.stdout + r.stderr).keys()}
+    tmp = Path(f"{a.out}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    os.replace(tmp, a.out)
+    print(f"UNIT BASELINE {data['sha'][:12]}: {len(data['fails'])} failing on main")
+
+
+def cmd_unit_check(a):
+    """The train's unit stage and verdict (unit_verdict) on the tree --dir against --baseline (from `unit-baseline`).
+    Prints MAIN-RED <names> for main's own failures (never the tree's fault), then RED <names> and exit 1 when the tree
+    fails tests main passes and they do not pass alone, else UNIT OK."""
+    base = cf.from_keys(json.loads(Path(a.baseline).read_text(encoding="utf-8"))["fails"])
+    if base.found:
+        print("MAIN-RED " + "; ".join(base.keys()[:20]))
+    r = unit_runs([P["unit"]], cwd=Path(a.dir))[0]
+    red, failing = unit_verdict(r, lambda: base, cwd=Path(a.dir))
+    if red:
+        print(unit_red_log(r.stdout + r.stderr)[-4000:])
+        print("RED " + ("; ".join(failing.without(base).keys()[:20]) or "(the unit run failed and named no test)"))
+        sys.exit(1)
+    print("UNIT OK")
+
+
 def cmd_self_review(a):
     """Run the land train's duplicate-capability reviewer on a slot's branch (functions it adds vs main)."""
     wt = slot_wt(a.slot)
@@ -1145,8 +1190,10 @@ def queue_clean(name, sha, slot, front=False, absorbs=None, replace=False) -> No
                  "its own subject in main..sha and, when h/<row> exists, that tip as an ancestor)")
     rest = [q for q in queue if q["row"] != row]
     ts = min([now()] + [q["ts"] for q in rest]) - 1 if front else now()
-    extra = {"absorbs": absorbs} if absorbs else {}
-    save("queue.json", rest + [{"row": row, "sha": sha, "ts": ts, "slot": slot, **extra}])
+    entry = {"row": row, "sha": sha, "ts": ts, "slot": slot, **({"absorbs": absorbs} if absorbs else {})}
+    absorb_own_rows(entry, rest)  # the spec rows its own commits carry, so a lane never has to name them
+    extra = {"absorbs": entry["absorbs"]} if entry.get("absorbs") else {}
+    save("queue.json", rest + [entry])
     event("submit", slot=slot, row=row, sha=sha, **extra)
 
 
@@ -1184,12 +1231,8 @@ def gate(new_rows, rows, quick=False):
     if quick:  # retry after ejecting rows whose own tests failed: lint passed with them in; unit is re-run (cheap, and
         # removing a branch can break another that used it)
         r = unit_runs([P["unit"]])[0]
-        if r.returncode != 0:
-            o = r.stdout + r.stderr
-            failing = unit_failures(o)
-            left = failing.without(main_unit_baseline())
-            if not (failing.found and (not left.found or unit_flaky(left))):
-                return False, ["unit"], unit_red_log(o)
+        if unit_verdict(r, main_unit_baseline)[0]:
+            return False, ["unit"], unit_red_log(r.stdout + r.stderr)
         q = quality_problems(TRAIN, landing=new_rows, plan="always")
         if q:
             return False, ["quality"], q
@@ -1207,18 +1250,11 @@ def gate(new_rows, rows, quick=False):
     t0 = now()
     r = unit_runs([P["unit"]])[0]
     event("gate_stage", stage="unit", secs=round(now() - t0), rc=r.returncode)
-    if r.returncode != 0:
-        out = r.stdout + r.stderr
-        failing = unit_failures(out)
-        left = failing.without(main_unit_baseline())
-        if failing.found and not left.found:  # main is red on exactly these
-            event("gate_stage", stage="unit-baseline-red", failing=failing.keys()[:5])
-            r = None
-        elif left.found and unit_flaky(left):
-            r = None
-    if r is not None and r.returncode != 0 and not P["crate_blame"]:
+    red, failing = unit_verdict(r, main_unit_baseline)
+    out = r.stdout + r.stderr
+    if red and not P["crate_blame"]:
         return False, ["unit"], unit_red_log(out)
-    if r is not None and r.returncode != 0:
+    if red:
         pkgs = sorted({t.split()[1] for t in failing.targets if t.split()[1].startswith(CRATE)})
         dirs = " ".join("src/" if p == CRATE else "crates/" + p[len(CRATE) + 1:] + "/" for p in pkgs)
         # the description sits above `failing crates:`, which try_batch splits into blame paths
@@ -1899,8 +1935,45 @@ def carried_rows(q, spec: dict) -> set:
     """Rows other than the ones q lands (lands_rows) whose commits (not on main) q's branch carries: a commit subject starting `<row id>:`
     or `stack: <row id>` for a spec row or a CLEAN-* fix. A stacked row landing without them fails the plan check."""
     subj = git("log", "--no-merges", "--format=%s", f"main..{q['sha']}", check=False).stdout
-    ids = {m.group(1).rstrip(":") for m in re.finditer(r"^(?:stack: )?(\S+)", subj, re.M)}
-    return {i for i in ids if i in spec or i.startswith("CLEAN-")} - set(lands_rows(q))
+    return {i for i in subject_ids(subj) if i in spec or i.startswith("CLEAN-")} - set(lands_rows(q))
+
+
+def subject_ids(subj: str) -> list:
+    """The row ids commit subjects name (`<row id>: ...` or `stack: <row id>`), first seen first."""
+    return list(dict.fromkeys(m.group(1).rstrip(":") for m in re.finditer(r"^(?:stack: )?(\S+)", subj, re.M)))
+
+
+def own_spec_rows(q: dict, queue: list) -> list:
+    """The spec rows queue entry q's own commits carry that no other entry lands: q should absorb them. Own commits:
+    main..sha minus the commits of the other queued entries whose sha q's branch contains (the rows it stacks on).
+    None when they carry another CLEAN-* row's commits: q stacks on a parent queued under another sha or not at all,
+    whose rows are the parent's to absorb (a child taking them would hold the parent's resubmit for good). Kept: a
+    spec row (main's or the branch's spec) that main does not mark proven, that no other entry lands (landing_ids: an
+    id is never moved off the entry that absorbs it) and that absorbs_unverified passes. A lane that builds spec rows
+    inside a clean row and names none of them would otherwise hold every row stacked on it at pick."""
+    sha, others = q["sha"], [o for o in queue if o["row"] != q["row"]]
+    mine = set(git("rev-list", f"main..{sha}", check=False).stdout.split())
+    under = [o["sha"] for o in others if o["sha"] in mine]
+    found = subject_ids(git("log", "--reverse", "--no-merges", "--format=%s", sha, "--not", "main", *under, check=False).stdout)
+    taken = landing_ids(others) | set(lands_rows(q))
+    ids = [i for i in found if ROW_RE.match(i) and i not in taken]  # a spec row id (parse_spec's shape)
+    if not ids or any(i.startswith("CLEAN-") and i != q["row"] for i in found):
+        return []
+    main = main_spec()
+    spec = {**main, **parse_spec(git("show", f"{sha}:{SPEC}", check=False).stdout)}
+    ids = [i for i in ids if i in spec and main.get(i, {}).get("status") != "proven"]
+    bad = absorbs_unverified(sha, ids)
+    return [i for i in ids if i not in bad]
+
+
+def absorb_own_rows(q: dict, queue: list) -> list:
+    """Add own_spec_rows(q, queue) to q's absorbs in place and log absorbs_auto (caller holds the state lock and saves
+    the queue): the one writer of automatic absorbs. Returns the ids added."""
+    add = own_spec_rows(q, queue)
+    if add:
+        q["absorbs"] = [*q.get("absorbs", []), *add]
+        event("absorbs_auto", row=q["row"], ids=add)
+    return add
 
 
 def _disjoint_files(queue: list) -> list:
@@ -2300,6 +2373,10 @@ def main():
     p = sp.add_parser("self-review"); p.add_argument("--slot", type=int, required=True)
     p = sp.add_parser("review-prompt", help="print the duplicate reviewer's prompt for a tree's added functions")
     p.add_argument("--dir", default=""); p.add_argument("--base", default="")
+    p = sp.add_parser("unit-baseline", help="write main's unit failures for a tree checked out at main")
+    p.add_argument("--dir", required=True); p.add_argument("--out", required=True)
+    p = sp.add_parser("unit-check", help="the train's unit verdict on a tree against a unit-baseline file")
+    p.add_argument("--dir", required=True); p.add_argument("--baseline", required=True)
     p = sp.add_parser("clean-submit"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
     p.add_argument("--absorbs", default="", help="row ids this integration row lands with it, comma separated; each is "
                    "verified in the branch")
@@ -2311,6 +2388,7 @@ def main():
     {"frontier": cmd_frontier, "claim": cmd_claim, "submit": cmd_submit, "release": cmd_release,
      "train": cmd_train, "status": cmd_status, "note": cmd_note, "pick-accept": lambda a: print(pick_accept_queue()),
      "clean-start": cmd_clean_start, "self-review": cmd_self_review, "review-prompt": cmd_review_prompt,
+     "unit-baseline": cmd_unit_baseline, "unit-check": cmd_unit_check,
      "quality-check": cmd_quality_check, "clean-submit": cmd_clean_submit}[a.cmd](a)
 
 
