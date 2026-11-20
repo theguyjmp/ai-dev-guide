@@ -1945,16 +1945,23 @@ def subject_ids(subj: str) -> list:
 
 def own_spec_rows(q: dict, queue: list) -> list:
     """The spec rows queue entry q's own commits carry that no other entry lands: q should absorb them. Own commits:
-    main..sha minus the commits of the other queued entries whose sha q's branch contains (the rows it stacks on).
-    None when they carry another CLEAN-* row's commits: q stacks on a parent queued under another sha or not at all,
+    main..sha minus the commits of the queued entries it stacks on: those whose sha q's branch contains and those
+    whose row q's commits carry by subject (a parent resubmitted under a new sha that still holds the old parent
+    commits; a child stacked on q is never one, so a parent's resubmit keeps its rows). None when the own commits
+    still carry another CLEAN-* row: q stacks on a parent that is not queued,
     whose rows are the parent's to absorb (a child taking them would hold the parent's resubmit for good). Kept: a
     spec row (main's or the branch's spec) that main does not mark proven, that no other entry lands (landing_ids: an
     id is never moved off the entry that absorbs it) and that absorbs_unverified passes. A lane that builds spec rows
     inside a clean row and names none of them would otherwise hold every row stacked on it at pick."""
     sha, others = q["sha"], [o for o in queue if o["row"] != q["row"]]
     mine = set(git("rev-list", f"main..{sha}", check=False).stdout.split())
+    own = lambda under: subject_ids(git("log", "--reverse", "--no-merges", "--format=%s", sha, "--not", "main", *under,
+                                        check=False).stdout)
     under = [o["sha"] for o in others if o["sha"] in mine]
-    found = subject_ids(git("log", "--reverse", "--no-merges", "--format=%s", sha, "--not", "main", *under, check=False).stdout)
+    found = own(under)
+    parents = [o["sha"] for o in others if o["row"] in found and o["sha"] not in under]
+    if parents:
+        found = own(under + parents)
     taken = landing_ids(others) | set(lands_rows(q))
     ids = [i for i in found if ROW_RE.match(i) and i not in taken]  # a spec row id (parse_spec's shape)
     if not ids or any(i.startswith("CLEAN-") and i != q["row"] for i in found):

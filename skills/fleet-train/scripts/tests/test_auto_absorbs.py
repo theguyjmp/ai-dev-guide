@@ -70,6 +70,9 @@ check("a child carrying an unqueued clean parent never takes its rows",
       h.own_spec_rows({"row": "CLEAN-a2", "sha": a2}, h.load("queue.json", [])) == [])
 submit("a1", commit("a1", "a1", "CLEAN-a1: fix"))
 check("the parent's resubmit absorbs its row again", absorbs("CLEAN-a1") == ["R101"], absorbs("CLEAN-a1"))
+check("a child on the parent's old sha still finds its own rows once the parent resubmits",
+      h.own_spec_rows({"row": "CLEAN-a2", "sha": a2}, h.load("queue.json", [])) == ["R102"],
+      h.own_spec_rows({"row": "CLEAN-a2", "sha": a2}, h.load("queue.json", [])))
 submit("a3", commit("a3", "a2", "CLEAN-a3: more", "R103: built", "R104: built"), absorbs=["R102"])
 check("an explicit absorbs is kept beside the automatic ones", absorbs("CLEAN-a3") == ["R102", "R103", "R104"],
       absorbs("CLEAN-a3"))
