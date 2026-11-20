@@ -143,23 +143,27 @@ class Side:
 
 
 def align(base: list[Unit], side: list[Unit]) -> dict[int, int]:
-    """side index -> base index of every side unit that is a base unit (one key, or an equal or edited unkeyed unit)."""
+    """side index -> base index of every side unit that is a base unit: keyed units by key (they anchor the
+    alignment, linear in the file), then between each two anchors the unkeyed units by content (difflib on that
+    stretch only), an equal-length run of changed unkeyed units being an edit of each."""
+    at = {u.key: i for i, u in enumerate(base) if u.key is not None}
+    anchors = [(j, at[u.key]) for j, u in enumerate(side) if u.key in at]
+    if any(i1 >= i2 for (_, i1), (_, i2) in zip(anchors, anchors[1:])):
+        raise Unmergeable("a keyed unit moved")
+    match = dict(anchors)
+
     def sig(u: Unit) -> tuple:
         return ("k", u.key) if u.key is not None else ("u", u.lines)
 
-    sm = difflib.SequenceMatcher(None, [sig(u) for u in base], [sig(u) for u in side], autojunk=False)
-    match: dict[int, int] = {}
-    for op, i1, i2, j1, j2 in sm.get_opcodes():
-        unkeyed = all(u.key is None for u in base[i1:i2] + side[j1:j2])
-        if op == "equal" or (op == "replace" and i2 - i1 == j2 - j1 and unkeyed):
-            match.update(zip(range(j1, j2), range(i1, i2)))
-    at = {u.key: i for i, u in enumerate(base) if u.key is not None}
-    for j, u in enumerate(side):
-        if j not in match and u.key in at:
-            match[j] = at[u.key]
-    order = [match[j] for j in sorted(match)]
-    if any(a >= b for a, b in zip(order, order[1:])):
-        raise Unmergeable("a keyed unit moved")
+    for (j0, i0), (j1, i1) in zip([(-1, -1)] + anchors, anchors + [(len(side), len(base))]):
+        b, s_ = base[i0 + 1:i1], side[j0 + 1:j1]
+        if not b or not s_:
+            continue
+        sm = difflib.SequenceMatcher(None, [sig(u) for u in b], [sig(u) for u in s_], autojunk=False)
+        for op, b1, b2, s1, s2 in sm.get_opcodes():
+            unkeyed = all(u.key is None for u in b[b1:b2] + s_[s1:s2])
+            if op == "equal" or (op == "replace" and b2 - b1 == s2 - s1 and unkeyed):
+                match.update((j0 + 1 + j, i0 + 1 + i) for j, i in zip(range(s1, s2), range(b1, b2)))
     return match
 
 
@@ -236,7 +240,8 @@ def main(argv: list[str]) -> int:
         sides = [split(path, x) for x in (b, a, t)]
         out, conflicts = merge(*sides, int(size))
         held = ids(split(path, out)) if not conflicts else Counter()
-        if any(n > max(ids(u)[k] for u in sides) for k, n in held.items()):
+        most = [ids(u) for u in sides]
+        if any(n > max(c[k] for c in most) for k, n in held.items()):
             raise Unmergeable("the result holds a key more often than any input")
     except Unmergeable:
         return text_merge(base, ours, theirs)
