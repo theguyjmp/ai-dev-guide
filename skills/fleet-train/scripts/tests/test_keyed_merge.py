@@ -93,7 +93,15 @@ out, n = merged("Cargo.toml", CARGO, CARGO + '\n[[test]]\nname = "c"\npath = "c.
 check("one [[test]] name added on both sides with different paths is a conflict", n == 1 and out.count('name = "c"') == 2 and "<<<<<<<" in out, out)
 
 # fallbacks
-for what, path, text in (("another extension", "f.rs", "x\n"), ("conflict markers in an input", "f.md", "<<<<<<< ours\n")):
+for what, path, text in (("another extension", "f.rs", "x\n"), ("conflict markers in an input", "f.md", "<<<<<<< ours
+"),
+                         ("an inner merge's longer markers", "f.md", "- X
+<<<<<<<<< ours
+- Y
+=========
+- Z
+>>>>>>>>> theirs
+")):
     try:
         km.split(path, text.splitlines())
         check(f"{what} is unmergeable", False)

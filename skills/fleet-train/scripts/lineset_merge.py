@@ -48,19 +48,19 @@ def read(path: str) -> tuple[list[str], str, bool]:
 
 
 def text_merge(base: str, ours: str, theirs: str) -> int:
-    """git's own three-way text merge into ours (conflict markers); exit 1 so git records the conflict."""
-    subprocess.run(["git", "merge-file", "-L", "ours", "-L", "base", "-L", "theirs", ours, base, theirs], check=False)
-    return 1
+    """git's own three-way text merge into ours (conflict markers): 0 when clean, else 1."""
+    r = subprocess.run(["git", "merge-file", "-L", "ours", "-L", "base", "-L", "theirs", ours, base, theirs], check=False)
+    return 0 if r.returncode == 0 else 1
 
 
 def main(argv: list[str]) -> int:
     base, ours, theirs, path = argv[1:5]
     if not path.endswith(".txt"):
-        return text_merge(base, ours, theirs)
+        return text_merge(base, ours, theirs) or 1  # ambiguous: a conflict even when clean
     (b, _, _), (a, eol, tail), (t, _, _) = read(base), read(ours), read(theirs)
     out = merge(b, a, t)
     if out is None:
-        return text_merge(base, ours, theirs)
+        return text_merge(base, ours, theirs) or 1  # ambiguous: a conflict even when clean
     text = eol.join(out) + (eol if out and (tail or not a) else "")
     Path(ours).write_bytes(text.encode("utf-8"))
     return 0
