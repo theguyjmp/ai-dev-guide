@@ -1120,6 +1120,13 @@ def static_problems(cwd, base: str = "main", plan: str = "spec", landing=()) -> 
 def cmd_quality_check(a):
     """Used by <repo>/.git/hooks/pre-push: refuse to publish a tree with quality problems."""
     d = Path(a.dir) if a.dir else REPO
+    # --regen: regenerate generated files first, exactly as the train does before its quality stage (regen_tree), so
+    # a pre-push check of a row that changes a generator's input does not fail on drift the train itself would fix
+    if getattr(a, "regen", False):
+        bad = regen_tree(d)
+        if bad:
+            print(bad[-3000:])
+            sys.exit(1)
     # local main: origin/main lags when a push is refused
     q = quality_problems(d, a.base or "main")
     if q:
@@ -2405,6 +2412,7 @@ def main():
     p = sp.add_parser("train"); p.add_argument("--loop", action="store_true")
     sp.add_parser("status")
     p = sp.add_parser("quality-check"); p.add_argument("--dir", default=""); p.add_argument("--base", default="")
+    p.add_argument("--regen", action="store_true", help="run the profile's regen commands first, as the train does")
     p = sp.add_parser("clean-start"); p.add_argument("--slot", type=int, required=True); p.add_argument("--name", required=True)
     p = sp.add_parser("self-review"); p.add_argument("--slot", type=int, required=True)
     p = sp.add_parser("review-prompt", help="print the duplicate reviewer's prompt for a tree's added functions")
