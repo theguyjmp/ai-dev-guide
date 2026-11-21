@@ -1502,6 +1502,13 @@ def batch_review(merged, cwd=None, base="main") -> list:
 GREEN = {"head": ""}  # last gate-verified train head; a bisect's rejected right half stays in HEAD, so never land HEAD
 
 
+def train_spec(rows: dict) -> dict:
+    """`rows` (main's spec) with the merged train tree's spec rows over them: a batch that rewrites a row's acceptance is
+    gated on what it lands, not on main's old line (a spec regen was rejected for a test its row had moved and deleted)."""
+    p = TRAIN / SPEC
+    return {**rows, **parse_spec(p.read_text(encoding="utf-8", errors="replace"))} if p.is_file() else rows
+
+
 def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     """Land as much of batch as possible. Returns list of landed queue entries."""
     merged, conflicted = build_train(batch, rows)
@@ -1509,6 +1516,7 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
         reject(q, "merge conflict with main or another branch in the same train; merge main into your branch and resolve")
     if not merged:
         return []
+    rows = train_spec(rows)
     # review first (about a minute): a duplicate found after a 15-min gate would cost a whole second gate run
     if not quick and not reviewed:
         dups = batch_review(merged)

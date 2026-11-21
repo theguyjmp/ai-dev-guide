@@ -180,6 +180,27 @@ class Alarms(Fixture):
         self.assertTrue(beat_alarms.origin_behind(lambda *a: "3\n")[0].startswith("ORIGIN-BEHIND origin main is 3"))
 
 
+class MergedSpec(Fixture):
+    def test_the_gate_reads_the_acceptance_the_batch_lands(self):
+        """A batch that rewrites R1's acceptance (MINE -> OTHER) is gated with OTHER: main's old line names a test the
+        row may have moved and deleted."""
+        spec = h.TRAIN / h.SPEC
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text(f"| R1 | 1 | a | - | src/a.rs | {OTHER} | planned | src/a.rs |\n", encoding="utf-8")
+        self.addCleanup(spec.unlink)
+        seen = []
+        with mock.patch.object(h, "gate", lambda ids, rows, quick=False: (seen.append(rows["R1"]["tests"]), (True, [], ""))[1]), \
+                mock.patch.multiple(h, build_train=lambda batch, rows: (list(batch), []), batch_review=lambda m, **k: [],
+                                    finish_spec=lambda ids: None, reject=lambda q, why: None):
+            h.save("queue.json", list(BATCH))
+            h.try_batch(list(BATCH), dict(ROWS))
+        self.assertEqual(seen, [[OTHER]])
+        self.assertEqual(ROWS["R1"]["tests"], [MINE])  # main's rows are not mutated
+
+    def test_no_train_spec_keeps_main_rows(self):
+        self.assertIs(h.train_spec(ROWS), ROWS)
+
+
 class AloneRunner(unittest.TestCase):
     """run_tests and run_alone share one alone-runner: pass, failure tail, perf debt, timeout, missing binary."""
     OUT = {"t_ok": (0, "ok"), "t_red": (101, "assert left == right"), "t_perf": (101, "frame over budget: 12 ms"), "t_slow": None}
