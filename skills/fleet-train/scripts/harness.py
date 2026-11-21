@@ -2136,7 +2136,9 @@ def pick_verdict(q: dict, base: str, cache: dict) -> str:
     entry = cache.setdefault(q["sha"], {"row": q["row"]})
     pick_checkout(merged)
     if entry.get("checks") != PICK_CHECKS:
-        log = chr(10).join(x for x in (static_problems(PICK_WT, base, plan="off"),
+        # generated files come from the merged tree first, exactly as the train regenerates before its quality stage
+        # (a row that changes a generator's input was rejected for drift the train itself would have fixed)
+        log = chr(10).join(x for x in (regen_tree(PICK_WT), static_problems(PICK_WT, base, plan="off"),
                                        *rules_gate.row_plan_problems(PICK_WT, base, WT, (q["row"],))) if x)
         if log:
             return "pick check: gate red (['quality']): " + log[-1500:]

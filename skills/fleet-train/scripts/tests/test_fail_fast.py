@@ -150,8 +150,9 @@ def test_pick_plan_stubs():
     fn_row = lambda rid: f"| {rid} | 1 | a | - | cli: x {rid} | tests/acceptance/{rid}.rs::t | planned | {rid}.rs | stub |\n"  # noqa: E731
     body = lambda b: f"pub fn f() -> u32 {{\n    {b}\n}}\n"  # noqa: E731
     git("checkout", "-q", "main")
+    # overhaul.toml: the plan check applies only to a repo holding an overhaul plan (rules_gate.plan_applies)
     for rel, text in {"spec/FUNCTIONS.md": head + fn_row("S1") + fn_row("S2"), "S1.rs": body("todo!()"),
-                      "S2.rs": body("todo!()")}.items():
+                      "S2.rs": body("todo!()"), "overhaul.toml": ""}.items():
         (h.REPO / rel).parent.mkdir(parents=True, exist_ok=True)
         (h.REPO / rel).write_text(text, encoding="utf-8")
     git("add", "-A")
@@ -280,6 +281,46 @@ def test_pick_accept():
             killed = False
             child.kill()
         check(name, killed == want and not (h.ST / desk.PICK).exists(), killed)
+
+
+def test_pick_regen():
+    """The pick check regenerates generated files from the merged tree before its static checks, as the train does
+    before its quality stage: a row that changes a generator's input passes; a failing regen command rejects it."""
+    git("checkout", "-q", "main")
+    for rel in ("src.txt", "gen.txt"):
+        (h.REPO / rel).write_text("v1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "generator input + output")
+    rows = {}
+    for r, v in (("G1", "v2\n"), ("G2", "v3\n")):
+        git("checkout", "-q", "-B", r, "main")
+        (h.REPO / "src.txt").write_text(v, encoding="utf-8")  # the input changes; the generated file is left stale
+        git("add", "-A")
+        git("commit", "-q", "-m", r)
+        rows[r] = {"row": r, "sha": git("rev-parse", "HEAD"), "ts": 40}
+        git("checkout", "-q", "main")
+    gen = [sys.executable, "-c", "import shutil; shutil.copy('src.txt', 'gen.txt')"]
+    real_sh, saved = h.sh, (h.P.get("regen"), h.P.get("pick_build"))
+    h.sh = lambda c, **k: (real_sh(gen, **k) if c == "GEN" else
+                           subprocess.CompletedProcess(c, 3, "", "boom") if c == "FAIL" else real_sh(c, **k))
+    h.static_problems = lambda cwd, base="main", plan="spec", landing=(): (
+        "" if (Path(cwd) / "gen.txt").read_text() == (Path(cwd) / "src.txt").read_text() else "gen.txt: drift")
+    h.batch_review = lambda *a, **k: []
+    h.P["pick_build"] = ""
+    try:
+        h.P["regen"] = ["GEN"]
+        h.save("queue.json", [rows["G1"]])
+        h.save(h.PICK_CACHE, {})
+        check("regen: a row whose generated file the train would regenerate passes the pick check",
+              h.pick_screen([rows["G1"]]) == set(), h.load("rejects.json", {}).get("G1"))
+        h.P["regen"] = ["FAIL"]
+        h.save("queue.json", [rows["G2"]])
+        bad = h.pick_screen([rows["G2"]])
+        rej = h.load("rejects.json", {}).get("G2", [{}])[-1].get("reason", "")
+        check("regen: a failing regen command rejects the row with its text",
+              bad == {rows["G2"]["sha"]} and "exited 3" in rej, rej)
+    finally:
+        h.sh, (h.P["regen"], h.P["pick_build"]) = real_sh, saved
 
 
 if __name__ == "__main__":

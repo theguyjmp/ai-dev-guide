@@ -19,8 +19,7 @@ def qs_import(name):
 
 @dataclass(frozen=True)
 class TreeTests:
-    """Test code a language finds from the whole tree, beyond file names: `test(rel)`, its test-only packages (dirs)
-    and `error` when the package metadata could not be read (then no package is test-only)."""
+    """Test code found from the whole tree: `test(rel)`, test-only package dirs, and `error` if metadata failed."""
     test: Callable[[str], bool] = lambda rel: False
     packages: tuple = ()
     error: str = ""
@@ -38,7 +37,7 @@ class Lang:
     comment: dict = field(default_factory=dict)  # rule id -> regexes over comments
     keep_empty_braces: bool = False  # JS: an empty catch is one statement
     skip_spans: Callable[[list], list] = lambda toks: []  # test code inside a product file
-    tree: Callable[[Path], TreeTests] = lambda cwd: TreeTests()  # test code the tree shows (built once per gate call)
+    tree: Callable[[Path], TreeTests] = lambda cwd: TreeTests()  # built once per gate call
     manifests: tuple = ()  # file names whose change can move a package between test and product
 
 
@@ -95,9 +94,7 @@ def rust_product(rel: str) -> bool:
 
 
 def dev_only_crates(cwd) -> tuple:
-    """The crate dirs of the workspace at `cwd` used only as a [dev-dependencies] entry, from `cargo metadata
-    --no-deps` (computed, never a hand list; a crate no member depends on is product). No Cargo.toml: (). RuntimeError
-    when cargo gives no metadata."""
+    """Workspace crate dirs used only as [dev-dependencies], from `cargo metadata --no-deps`; RuntimeError if none."""
     root = Path(cwd).resolve()
     if not (root / "Cargo.toml").exists():
         return ()
@@ -134,8 +131,7 @@ class RustModules:
         self.cwd, self._mods, self._test = Path(cwd), {}, {}
 
     def test_module(self, rel: str) -> bool:
-        """Whether every declaration of module file `rel` (in the parent files that exist) is under `#[cfg(test)]`
-        or in a test module itself."""
+        """Whether every declaration of module file `rel` is under `#[cfg(test)]` or in a test module."""
         if rel not in self._test:
             self._test[rel] = False  # a cycle of declarations is no test module
             name, parents = module_parents(rel)
@@ -144,7 +140,7 @@ class RustModules:
         return self._test[rel]
 
     def decls(self, rel: str) -> dict:
-        """{module name: [under #[cfg(test)]]} of the out-of-line `mod x;` declarations in file `rel`."""
+        """{module name: [under #[cfg(test)]]} of the `mod x;` declarations in `rel`."""
         if rel not in self._mods:
             p, out = self.cwd / rel, {}
             if p.is_file():
@@ -166,7 +162,7 @@ class RustModules:
 
 
 def module_parents(rel: str) -> tuple:
-    """(module name, [files that may declare it]) of a .rs file under a src/ dir; ("", []) for a crate root."""
+    """(module name, [files that may declare it]) of a .rs file; ("", []) for a crate root."""
     parts = rel.split("/")
     src = parts.index("src") if "src" in parts else -1
     rest = parts[src + 1:]
@@ -179,7 +175,7 @@ def module_parents(rel: str) -> tuple:
 
 
 def rust_tree(cwd) -> TreeTests:
-    """Rust test code beyond file names: out-of-line `#[cfg(test)]` module files, crates only dev-dependencies use."""
+    """Rust test code: out-of-line `#[cfg(test)]` module files and dev-only crates."""
     try:
         dev, err = dev_only_crates(cwd), ""
     except RuntimeError as e:
