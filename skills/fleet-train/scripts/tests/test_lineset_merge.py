@@ -86,6 +86,15 @@ with tempfile.TemporaryDirectory() as d:
     up = commit(root, "up", base, {"list.txt": "2 a\n1 b\n1 c\n"}, "count up")
     down = commit(root, "down", base, {"list.txt": "3 a\n1 b\n1 c\n"}, "count other")
     check("both sides changing one count is a conflict", merge_tree(root, up, down)[0] == 1)
+    base3 = commit(root, "b3", base, {"list.txt": "3 a\n1 b\n"}, "three a")
+    d1 = commit(root, "d1", base3, {"list.txt": "2 a\n1 b\n"}, "one a typed")
+    d2 = commit(root, "d2", base3, {"list.txt": "1 a\n1 b\n"}, "two a typed")
+    rc3, tree3 = merge_tree(root, d1, d2)
+    got3 = git(root, "show", f"{tree3}:list.txt").stdout if rc3 == 0 else None
+    check("two sides lowering one count by different amounts add up (3-1-2 = 0: removed)",
+          got3 == "1 b\n", rc3, got3)
+    # Identical edits on both sides never reach a merge driver (git takes the common result), so two rows each lowering
+    # 'a 3' to 'a 2' merge to 'a 2' while the tree has 1: the ratchet test must allow <= and the train tightens.
     r1 = commit(root, "r1", base, {"code.rs": "X\ny\nz\n"}, "edit x")
     r2 = commit(root, "r2", base, {"code.rs": "x\nY\nz\n"}, "edit y")
     check("Rust source is never set-merged, even when attributes name it", merge_tree(root, r1, r2)[0] == 1)

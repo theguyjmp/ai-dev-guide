@@ -2,14 +2,14 @@
 each line is one entry and order carries no meaning.
 
   .gitattributes:  tools/cloud/held-rows.txt merge=lineset
-  .git/config:     merge.lineset.driver = py -3 <harness>/lineset_merge.py %O %A %B %P   (harness.ensure_lineset_driver)
+  .git/config:     merge.lineset.driver = py -3 <harness>/lineset_merge.py %O %A %B %P   (harness.ensure_merge_drivers)
 
 A line stays when both sides keep it or one side adds it; a line either side removed stays removed. git's text merge
 instead conflicts whenever two branches touch adjacent lines (two rows each shrinking a different line of a 3-line
-allowlist), and `merge=union` would resurrect the removed lines. Falls back to git's own text merge (conflict markers,
-exit 1) when the set merge would be ambiguous: the file is not a `.txt` data file (never Rust source), or the result
-holds two `<count> <key>` / `<key> <count>` lines for one key (both sides changed one entry's count). Where the driver
-is not configured (a cloud clone) git falls back to its text merge by itself.
+allowlist), and `merge=union` would resurrect the removed lines. Counted `<count> <key>` / `<key> <count>` entries
+merge three-way by count (merge). Falls back to git's own text merge (conflict markers, exit 1) when the merge would be
+ambiguous: the file is not a `.txt` data file (never source code), a count grows, or both sides add one key with
+different counts. Where the driver is not configured (a cloud clone) git falls back to its text merge by itself.
 """
 from __future__ import annotations
 
@@ -29,15 +29,56 @@ def count_key(line: str) -> str | None:
     return None
 
 
+def counts(lines: list[str]) -> dict[str, int]:
+    """{key: count} of the counted entries in lines."""
+    out = {}
+    for line in lines:
+        k = count_key(line)
+        if k is not None:
+            out[k] = int(next(t for t in line.split() if t.isdigit()))
+    return out
+
+
 def merge(base: list[str], ours: list[str], theirs: list[str]) -> list[str] | None:
-    """The merged lines (ours' order, then theirs' additions), or None when two entries would share a counted key."""
+    """The merged lines (ours' order, then theirs' additions), or None when the merge is ambiguous.
+
+    Counted entries (`<key> <count>`) merge by count, three-way: each side's change from base adds up
+    (base 3, ours 2, theirs 2 -> 1: both sides typed one key each). A key either side removed, or whose merged count
+    reaches 0, is removed. Identical changed lines used to collapse to one line and undercount the shrink (11-22)."""
+    cb, co, ct = counts(base), counts(ours), counts(theirs)
+    merged = {}
+    for k in set(cb) | set(co) | set(ct):
+        if k not in cb:  # added on a side: keep whichever side added it (both: must agree)
+            if k in co and k in ct and co[k] != ct[k]:
+                return None
+            merged[k] = co.get(k, ct.get(k))
+            continue
+        if k not in co or k not in ct:
+            continue  # removed on a side
+        if co[k] > cb[k] or ct[k] > cb[k]:
+            return None  # a count that grows is not a shrink-only change: let git conflict
+        n = cb[k] + (co[k] - cb[k]) + (ct[k] - cb[k])
+        if n > 0:
+            merged[k] = n
     o, b = set(base), set(theirs)
-    kept = [line for line in ours if not (line in o and line not in b)]
+    plain = lambda ls: [l for l in ls if count_key(l) is None]
+    kept = [line for line in plain(ours) if not (line in o and line not in b)]
     have = set(kept)
-    added = [line for line in theirs if line not in o and line not in have]
-    out = kept + added
-    keys = [k for k in map(count_key, out) if k is not None]
-    return None if len(keys) != len(set(keys)) else out
+    added = [line for line in plain(theirs) if line not in o and line not in have]
+    out, seen = [], set()
+    for line in ours + theirs:  # ours' order first, then theirs' new keys
+        k = count_key(line)
+        if k is None:
+            if line in kept or line in added:
+                if line not in seen or not line.strip():
+                    out.append(line)
+                seen.add(line)
+            continue
+        if k in merged and k not in seen:
+            tok = line.split()
+            out.append(f"{k} {merged[k]}" if not tok[0].isdigit() else f"{merged[k]} {k}")
+            seen.add(k)
+    return out
 
 
 def read(path: str) -> tuple[list[str], str, bool]:

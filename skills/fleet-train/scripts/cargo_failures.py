@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 QUIET = re.compile(r"^(\S+) --- FAILED$", re.M)
 VERBOSE = re.compile(r"^test (\S+)(?: - should panic)? \.\.\. FAILED$", re.M)
 CAPTURED = re.compile(r"^---- (\S+) stdout ----$", re.M)
+BLOCK_END = re.compile(r"^(?:---- \S+ stdout ----|failures:)$", re.M)
 LISTED = re.compile(r"^failures:\n((?:    \S+\n)+)\ntest result: FAILED\.", re.M)
 RESULT_FAILED = re.compile(r"^test result: FAILED\.", re.M)
 TARGET = re.compile(r"to rerun pass `(-p [\w-]+(?: --(?:lib|bins?|tests?|examples?|benches)(?: [\w-]+)?)*)`")
@@ -79,6 +80,16 @@ def parse(out: str) -> CargoFailures:
     unbuilt = tuple(dict.fromkeys((t or c).replace("-", "_") for c, t in unbuilt_at))
     libs = tuple(dict.fromkeys(LIB_UNBUILT.findall(out)))
     return CargoFailures(tuple(sorted(names)), targets, unnamed, crashes, unbuilt, libs, linked_crates(out))
+
+
+def captured(out: str) -> dict:
+    """{test: its captured output block}."""
+    out = (out or "").replace("\r\n", "\n")
+    blocks = {}
+    for m in CAPTURED.finditer(out):
+        end = BLOCK_END.search(out, m.end())
+        blocks.setdefault(m.group(1), out[m.end():end.start() if end else len(out)].strip("\n"))
+    return blocks
 
 
 def linked_crates(out: str) -> tuple:

@@ -32,6 +32,8 @@ fixes stubs): there is no needs-plan exit, and one gate run covers a whole batch
   fetches the branch back, submits).
 - `scripts/cloud.py` + `cloud/` (kit templates, copied to `<repo>/tools/cloud/`): the cloud fleet, below.
 - `scripts/dash.py`: static dashboard page from state/events.jsonl; publish it as an artifact.
+- `scripts/finish.py --slot N --name X [--front] [--tests ...]`: a fix lane's one pre-submit step (Lanes, below).
+- `scripts/priority_keeper.ps1`: on a Windows machine shared by the train and lanes, keeps the train ahead (Lanes).
 
 ## Train rules
 Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
@@ -40,13 +42,14 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
 |---|---|
 | A conflicted branch gets one short resolve pass; the rest go back to their builders with the reason | `resolve_conflict` (at most 4 files, no markers left, check clean), HARNESS_RESOLVE_MAX (12) |
 | Start at HARNESS_MIN_BATCH rows (8), waiting up to HARNESS_BATCH_WAIT_BUSY (25 min) while claims are in flight; with none in flight, start at once | `train` |
-| Rows that each add or edit their own spec table rows, bullets or Cargo `[[test]]` entries never conflict: those files merge unit by unit (rows by id, bullets with their continuation lines, `[[test]]` by name); one key changed differently on both sides stays a conflict for that key only and no key is ever held twice | `keyed_merge.py` (`merge=keyed` in .gitattributes; `lineset_merge.py` for line-set .txt files), registered by `ensure_merge_drivers`; another clone runs `git config merge.keyed.driver "py -3 <scripts>/keyed_merge.py %O %A %B %L %P"` once |
+| Rows that each add or edit their own spec table rows, bullets or Cargo `[[test]]` entries never conflict: those files merge unit by unit (rows by id, bullets with their continuation lines, `[[test]]` by name); one key changed differently on both sides stays a conflict for that key only and no key is ever held twice. Line-set .txt files merge as sets; their counted `<key> <count>` entries merge three-way by count (two sides each lowering one key add up; a count that grows conflicts) | `keyed_merge.py` (`merge=keyed` in .gitattributes; `lineset_merge.py`, `merge=lineset`, for line-set .txt files), registered by `ensure_merge_drivers`; another clone runs `git config merge.keyed.driver "py -3 <scripts>/keyed_merge.py %O %A %B %L %P"` once |
+| Shrink-only lists only shrink. The product owns them: `path count` lines in tracked .txt files (merge=lineset), one assert helper every such gate test calls (real count <= listed, unlisted 0; never `==`, which a merged tree breaks), each test named `*only_shrink*` and printing its list tightened to the real counts between `--- tightened <repo path> ---` and `--- end tightened ---`. Git takes two identical edits without the driver, so two rows lowering one line alike leave it stale-high: after each land the train runs `[profile] shrink_cmd` on the proven tree and lowers every printed tracked list, never raising a count or adding a line | `tighten_shrink_lists` in `finish_spec` (events shrink_lists_tightened / shrink_lists_error; off while `shrink_cmd` is ""; rust example `cargo test -q --workspace --lib --bins --no-fail-fast -- only_shrink --nocapture`) |
 | A batch holds at most HARNESS_BATCH_CAP rows (20), picked by trial merges so rows never conflict in the gate | `disjoint()` (git merge-tree, file-disjoint fallback) |
 | Under HARNESS_FILL_MIN clean picks (5) while queued rows are out for cloud rebase, hold up to HARNESS_FILL_WAIT (10 min, 0 = off) for them; a CLEAN-* pick never waits. Tuned for a ~25-min gate cycle; a ~45-min one wants about 8 and 20 min | `fill_wait()` (train_idle "filling: ...") |
 | Gate once per batch: format (auto-fixed in file batches), clippy -D warnings (skipped when the quality stage runs), unit, then acceptance of every proven row plus the batch, built once in release and run as parallel binaries | `gate()` |
 | Rerun before blaming: a failed test reruns alone; perf-budget failures go to state/perf-debt.jsonl; stale fixture locks are cleared and rerun once; unit failures main already has are not blamed; up to 5 new unit failures rerun single-threaded; one parser reads every cargo format and keeps a test binary that crashed naming no test by its selector (rerun alone, never an empty set) | `gate()`, state/unit-baseline.json, `unit_flaky`, scripts/cargo_failures.py |
 | Main-red tests are nobody's fault: a failing test no batch row owns runs alone on main first; red there, it is quarantined (state/accept-known-red.json + a fix request in notes/requests/), the gate skips it and the same batch is re-gated; over 3 at once the train pauses until main moves; it returns to the gate once it passes alone on main | `quarantine.py` (quarantine / quarantine_cap / unquarantine) |
-| Blame by file, then probe, then bisect: a branch's own files are what its train merge adds over the rows merged ahead of it (a stacked row never owns its parent's files); an assert diff names only its differing entries, else every file the failure names; exactly one suspect is ejected, more are bisected; an unowned failing test blames the branch touching a file its source names; an acceptance-only red bisects with only the failing tests first | `blame_by_file` (blame_by_file / blame_suspects), `probe_culprit` (probe_found / probe_none) |
+| Blame by entry, by file, then probe, then bisect. A branch's own change is what its train merge adds over the rows merged ahead of it (a stacked row never owns its parent's). The red unit log carries each failing test's whole captured block (its assert sides survive however far from the tail it printed). An assert diff's differing entries eject, in ONE step with one shared reason, every row whose own change includes one (the entry's file, or its line in a list the failing test includes: profile `include_re`); the rest gates as one run, rows lowering other lines of that list stay. Else file blame: an assert diff names only its entries, else every file the failure names; exactly one suspect is ejected, more are bisected; an unowned failing test blames the branch touching a file its source names; an acceptance-only red bisects with only the failing tests first | `blame_entries` (blame_entries), `unit_red_log` (`cargo_failures.captured`), `blame_by_file` (blame_by_file / blame_suspects), `probe_culprit` (probe_found / probe_none) |
 | Acceptance on two machines (cargo runner, opt-in with state/desk-on, HARNESS_DESK=0/1 overrides): units are placed by measured throughput (state/unit-rates.json: per machine and unit kind, the median of the last 3 wall-seconds-per-cost-second samples, learned from each gate; this machine's age out after 12 h): this one takes a unit only when it is not slower at it and its expected finish is no later than the desk's with every unit, else the desk (HARNESS_REMOTE_HOST) runs every unit in order; idle, this one steals an unstarted unit it is not slower at. No fresh history here: cold start, this one runs the parallel unit unless over 70% CPU at gate start (`BUSY_LOAD`). A desk unit with no verdict (error, late, other head or tests, `env_fail_re`) runs here and drops the desk for the gate; desk down: all here. Under 60 tests: all here | `desk.py` (`desk.run`, kit and bundle sent over ssh/scp, event `gate_stage` acceptance-desk) |
 | Every test run on the desk (any runner but cargo; on with `[desk] host` in harness.toml or state/desk-on, HARNESS_DESK=0/1 overrides): the gate's unit (full and quick), the main unit baseline, unit_flaky reruns, acceptance, probe and run_alone go to the desk at the train tree's HEAD as one job each; this machine keeps the review, regen, format, quality, every push and every credential. No verdict (down, late, an error, another head, `env_fail_re`) is never a pass, a fail or a run here: the train defers the batch, rows stay queued | `desk.job` (ops tests, alone, cmd), `unit_runs`, events `desk_job` / `desk_error` / `desk_deferred` |
 | No train without the stack's required env | `[profile] require_env` (rust on Windows: ProgramFiles(x86), which Git Bash drops) |
@@ -92,12 +95,31 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
   went stale under a landed row is rejected before it turns a gate red. Pick acceptance (`harness.py pick-accept`,
   scheduled; on with state/pick-accept-on): the desk runs each queued row's owner tests (proven rows owning a changed
   file) on the code the next pick sees, outside acceptance (the gate kills it); a red verdict is rejected at pick. Ratchet: no file may pass its count in state/rules-debt.json, which
-  only shrinks (`tighten` after each land). New project: `py -3 rules_gate.py init` on main once. Languages: rules_langs.py.
+  only shrinks (`tighten` after each land; the product's own shrink-only lists: `tighten_shrink_lists`). New project:
+  `py -3 rules_gate.py init` on main once. Languages: rules_langs.py.
 - `scripts/brevity_check.py` (fleet_beat BREVITY alarm): word caps on STATE.md, briefs, hand-backs, rulings, notes/,
   code comments; override in `<HARNESS_HOME>/brevity_budget.json`, never raise.
 - `harness.py note "<text>"` appends one line to notes/log/YYYY-MM.md without reading it; briefs end with it.
 - A proven row's bullet and spec/packets line are deleted at land. Ids in state/held-rows.txt are never handed out.
 - Builders find owners with `index_api.py --find "<words>"`, never a raw grep.
+
+## Lanes (fix lanes on the train's machine)
+- A lane finishes with `finish.py` and nothing else: the train's checks on its committed branch, cheapest first
+  (clean tree, merge-tree against a fresh origin/main, self-review twice, static checks, path and source-scan pins:
+  tests under `pin_dirs` quoting a file it changes or moves or a directory holding one, the shrink-only ratchets of
+  every crate, unit and strict lint scoped to the touched crates; FINISH_SCOPE=workspace for core and cross-cutting
+  lanes runs the full unit and quality stages), then waits while the running train gates the row (a resubmit
+  supersedes the whole run) and calls `clean-submit`. FINISH_NO_SUBMIT=1 gates only. A lane never copies the script to
+  change a step: the step goes into finish.py for every lane.
+- Every finish build waits while the train marks a compile stage (`train_stage`: clippy, unit, quality; at most
+  FINISH_TRAIN_WAIT, 2700 s) and holds one machine-wide build slot (`cargo_slots.py`, FLEET_CARGO_CAP). Run
+  `priority_keeper.ps1` (HARNESS_HOME, FLEET_LANE_PROC_RE): the state/train.pid tree AboveNormal, lane builds BelowNormal,
+  Idle during a compile stage. Pilot: with 8 lanes building, the gate's quality stage went from 6-9 to 19-28 min.
+- Lane scopes are exclusive (by crate or package): two lanes on one set of records each add a typed copy.
+- Briefs say: never `git stash` (all worktrees share one stash list; commit a red test alone instead); every wait is
+  one foreground until-loop at the tool's longest timeout (a default 2-min timeout spends a call per wait); temp dirs
+  come from one test-kit helper that hands back a new empty dir (never named by pid: Windows reuses pids); lock and
+  timing tests inject the clock and assert outcomes, never elapsed time.
 
 ## Cloud fleet (builders in the cloud, only the train local)
 - Never run local builders on the gate machine: they starve the gate. The local machine runs only the train and

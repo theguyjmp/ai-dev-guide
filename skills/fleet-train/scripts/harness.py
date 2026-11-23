@@ -496,6 +496,12 @@ STACKS = {
         "quoted_path_re": r"[\"'`]((?:crates|src|tests)/[\w/.-]+\.rs)[\"'`]",  # repo files a test reads
         "strip_root": False,
         "assert_sides_re": r"^\s*left: (.*)\n\s*right: (.*)$",
+        "shrink_cmd": "",  # e.g. "cargo test -q --workspace --lib --bins --no-fail-fast -- only_shrink --nocapture"
+        "scope_flag": "--workspace",  # finish.py's crates scope swaps in -p flags
+        "pin_dirs": ["tests"],
+        "test_file": "cargo test -q --test {stem}",
+        "include_re": r"include_(?:str|bytes)!\(\s*\"([^\"]+)\"\s*\)",
+        "include_const_re": r"(?:const|static)\s+(\w+)\s*:[^=;]*=\s*include_(?:str|bytes)!\(\s*\"([^\"]+)\"\s*\)",
         # env the toolchain needs: on Windows the MSVC linker and cc builds are found through ProgramFiles(x86),
         # which Git Bash drops. A profile can add its own (harness.toml [profile] require_env = [...]).
         "require_env": ["ProgramFiles(x86)"] if os.name == "nt" else [],
@@ -549,6 +555,12 @@ STACKS = {
         "quoted_path_re": r"[\"'`]((?:\.{1,2}/)*[\w./-]+\.(?:[mc]?js|jsx|[mc]?ts|tsx|json))[\"'`]",
         "strip_root": True,  # logs carry absolute paths: drop the train root so the names are repo-relative
         "assert_sides_re": "",
+        "shrink_cmd": "",
+        "include_re": "",
+        "include_const_re": "",
+        "scope_flag": "",
+        "pin_dirs": ["test", "tests"],
+        "test_file": "node --test {file}",
         "require_env": [],
         "env_fail_re": "",
         "crate_blame": False,
@@ -922,16 +934,29 @@ def unit_failures(out: str) -> cf.CargoFailures:
     return cf.CargoFailures(tuple(sorted(set().union(*(re.findall(p, out, re.M) for p in P["unit_fail_re"])))))
 
 
+UNIT_BLOCK_CAP = 12000  # chars of one failing test's captured output a red unit log carries, in whole lines
+
+
 def unit_red_log(out: str) -> str:
-    """Output tail plus each failing test's own lines, last: a reject reason (the last 1500 chars) names what failed."""
+    """Output tail, each failing test's own output (cargo: whole captured block), the names last (reject reasons)."""
     failing = unit_failures(out)
     if not failing.found:
         return out[-6000:]
-    hits = sorted((i, n) for n in failing.tests if (i := out.find(n)) >= 0)
-    per = max(200, 1400 // max(1, len(hits[:4])))
-    lines = "".join(chr(10) + out[i:i + per].rstrip() for i, _ in hits[:4])
+    blocks, shown = cf.captured(out) if P["unit_parser"] == "cargo" else {}, []
+    for t in [t for t in failing.tests if t in blocks][:5]:
+        lines, size = [], 0
+        for line in blocks[t].splitlines():  # whole lines: a cut assert side names nothing
+            if size + len(line) + 1 > UNIT_BLOCK_CAP:
+                break
+            lines.append(line)
+            size += len(line) + 1
+        shown.append(f"---- {t} stdout ----" + chr(10) + chr(10).join(lines))
+    if not shown:
+        hits = sorted((i, n) for n in failing.tests if (i := out.find(n)) >= 0)
+        per = max(200, 1400 // max(1, len(hits[:4])))
+        shown = [out[i:i + per].rstrip() for i, _ in hits[:4]]
     keys = failing.keys()
-    return out[-6000:] + chr(10) + f"unit failures ({len(keys)}): " + "; ".join(keys[:8]) + lines
+    return chr(10).join([out[-6000:], *shown, f"unit failures ({len(keys)}): " + "; ".join(keys[:8])])
 
 
 def unit_flaky(failing: cf.CargoFailures, cwd=None) -> bool:
@@ -1229,7 +1254,7 @@ TRAIN_STAGE = "train-stage.json"
 
 @contextmanager
 def train_stage(stage: str):
-    """Mark `stage` (alarm_dispatch holds cargo agents meanwhile)."""
+    """Mark `stage` (alarm_dispatch waits out acceptance; finish.py and priority_keeper.ps1 the compile stages)."""
     save(TRAIN_STAGE, {"stage": stage, "pid": os.getpid(), "t": iso()})
     try:
         yield
@@ -1265,12 +1290,14 @@ def gate(new_rows, rows, quick=False):
         return (not fails), fails, log
     if not quality_on():  # the quality stage's strict clippy is a superset; running both cost ~10 min a train (2026-11-12)
         t0 = now()
-        r = sh(P["lint"] or "exit 0", cwd=TRAIN, check=False, env=env, timeout=1800)
+        with train_stage("clippy"):
+            r = sh(P["lint"] or "exit 0", cwd=TRAIN, check=False, env=env, timeout=1800)
         event("gate_stage", stage="clippy", secs=round(now() - t0), rc=r.returncode)
         if r.returncode != 0:
             return False, ["clippy"], (r.stdout + r.stderr)[-6000:]
     t0 = now()
-    r = unit_runs([P["unit"]])[0]
+    with train_stage("unit"):
+        r = unit_runs([P["unit"]])[0]
     event("gate_stage", stage="unit", secs=round(now() - t0), rc=r.returncode)
     red, failing = unit_verdict(r, main_unit_baseline)
     out = r.stdout + r.stderr
@@ -1283,7 +1310,8 @@ def gate(new_rows, rows, quick=False):
         return False, ["unit"], failing.describe() + chr(10) + f"failing crates: {dirs}" + chr(10) + unit_red_log(out)
     if quality_on():
         t0 = now()
-        q = quality_problems(TRAIN, landing=new_rows, plan="always")
+        with train_stage("quality"):
+            q = quality_problems(TRAIN, landing=new_rows, plan="always")
         event("gate_stage", stage="quality", secs=round(now() - t0), rc=1 if q else 0)
         if q:
             return False, ["quality"], q
@@ -1387,8 +1415,79 @@ def finish_spec(ids):
             f.write_text(pruned, encoding="utf-8")
     # keep spec/INDEX.md + spec/index/* current: builders search them before writing any function (STANDARDS S6)
     sh([*PY.split(), f"{QS}/index_api.py"], cwd=TRAIN, check=False, timeout=600)
+    tighten_shrink_lists(TRAIN, "main")  # tracked product lists: `commit -a` takes them
     git("add", "-A", "spec", cwd=TRAIN, check=False)
     git("commit", "-qam", f"train: proven {' '.join(ids)}", cwd=TRAIN, check=False)
+
+
+# The product's shrink-only list tests print each list tightened between these marks (SKILL.md Train rules)
+SHRINK_BEGIN = re.compile(r"--- tightened (\S+) ---")  # unanchored: progress dots share the line
+SHRINK_END = "--- end tightened ---"
+
+
+def printed_lists(out: str) -> dict:
+    """{list path: tightened text} of every complete marked block in out."""
+    lists = {}
+    for m in SHRINK_BEGIN.finditer(out):
+        body, sep, _ = out[m.end():].partition(SHRINK_END)
+        if sep:
+            lists[m.group(1)] = body
+    return lists
+
+
+def lowered_list(old: str, printed: str) -> tuple:
+    """(text, changes): each `path count` line of old lowered to printed's count (absent 0, dropped at 0), never raised."""
+    def entry(line):
+        file, _, n = line.rpartition(" ")
+        return (file, int(n)) if file and not line.startswith("#") and n.isdigit() else None
+    now_ = dict(e for e in map(entry, printed.splitlines()) if e)
+    out, changes = [], []
+    for line in old.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if (e := entry(body)) is None:
+            out.append(line)
+            continue
+        file, n = e
+        if (m := min(n, now_.get(file, 0))) < n:
+            changes.append(f"{file} {n}->{m}")
+        if m:
+            out.append(f"{file} {m}{line[len(body):]}")
+    return "".join(out), changes
+
+
+def in_src(rel: str) -> bool:
+    return any(d in (".", "") or rel.startswith(d.rstrip("/") + "/") for d in P["src_dirs"])
+
+
+def tighten_shrink_lists(tree, base) -> list:
+    """When base..HEAD changed product files, lower each tracked .txt list shrink_cmd prints; anything else keeps them."""
+    if not P["shrink_cmd"]:
+        return []
+    changed = git("diff", "--name-only", "--no-renames", base, "HEAD", cwd=tree, check=False).stdout.split()
+    if not any(in_src(f) and f.endswith((*P["src_exts"], ".txt")) for f in changed):
+        return []
+    try:
+        r = sh(P["shrink_cmd"], cwd=tree, check=False, env=run_env(TRAIN_ENV), timeout=900)
+    except subprocess.TimeoutExpired:
+        event("shrink_lists_error", error="timeout")
+        return []
+    printed = printed_lists(r.stdout) if not r.returncode else {}
+    if not printed:
+        event("shrink_lists_error", rc=r.returncode, error=(r.stdout + r.stderr)[-300:])
+        return []
+    tracked = set(git("ls-files", "--", "*.txt", cwd=tree, check=False).stdout.split())
+    cut = []
+    for rel, text in printed.items():
+        if rel not in tracked:
+            continue
+        p = Path(tree) / rel
+        new, changes = lowered_list(p.read_bytes().decode("utf-8"), text)
+        if changes:
+            p.write_bytes(new.encode("utf-8"))
+            cut += [f"{rel}: {c}" for c in changes]
+    if cut:
+        event("shrink_lists_tightened", changes=cut[:20], n=len(cut))
+    return cut
 
 
 def reject(q, reason, locked=False):
@@ -1554,6 +1653,15 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
         for root in {str(TRAIN), TRAIN.as_posix()}:
             log = (log or "").replace(root + chr(92), "").replace(root + "/", "")
     if len(merged) > 1:
+        group, entries, lists = blame_entries(merged, fails, log)
+        if group and len(group) < len(merged):  # every row of one shared cause in one step, the rest gated as one run
+            why = (f"gate red ({fails[:3]}): your branch changes an entry the failing assert diff names "
+                   f"({sorted(entries)[:4]}), as does every row ejected with it: {[q['row'] for q in group]}; "
+                   f"lists read: {sorted(lists)[:3]} :: {log[-1200:]}")
+            for q in group:
+                reject(q, why)
+            event("blame_entries", ejected=[q["row"] for q in group], entries=sorted(entries)[:10], lists=sorted(lists)[:5])
+            return try_batch([q for q in merged if q not in group], rows, depth + 1, reviewed=True)
         guilty, named, own = blame_by_file(merged, rows, fails, log)
         if len(guilty) == 1:
             q = guilty[0]
@@ -1617,20 +1725,21 @@ def blame_named(rows, fails, log, tree=TRAIN) -> set:
     return named
 
 
-def own_files(merged, tree=TRAIN) -> dict:
-    """{row: files} its `train: land` merge adds over its first parent, so a stacked row never owns its parent's
-    files (main...sha, the fallback, named them all)."""
+def own_ranges(merged, tree=TRAIN) -> dict:
+    """{row: (range, cwd)}: its land merge over its first parent (a stacked row never owns its parent's change)."""
     land = {}
     for line in git("log", "--first-parent", "--format=%H%x09%s", "main..HEAD", cwd=tree, check=False).stdout.splitlines():
         c, _, subj = line.partition(chr(9))
         if (m := LAND_SUBJECT.match(subj)) and m.group(1) not in land:
             land[m.group(1)] = c
-    out = {}
-    for q in merged:
-        c = land.get(q["row"])
-        rng = [f"{c}^1", c] if c else [f"main...{q['sha']}"]
-        out[q["row"]] = set(git("diff", "--name-only", *rng, cwd=tree if c else REPO, check=False).stdout.split())
-    return out
+    return {q["row"]: (([f"{c}^1", c], tree) if (c := land.get(q["row"])) else ([f"main...{q['sha']}"], REPO))
+            for q in merged}
+
+
+def own_files(merged, tree=TRAIN) -> dict:
+    """{row: files} of own_ranges."""
+    return {row: set(git("diff", "--name-only", *rng, cwd=cwd, check=False).stdout.split())
+            for row, (rng, cwd) in own_ranges(merged, tree).items()}
 
 
 def touching(files, named) -> set:
@@ -1638,8 +1747,53 @@ def touching(files, named) -> set:
     return {f for f in files if f in named or any(d.endswith("/") and f.startswith(d) for d in named)}
 
 
+def test_lists(fails, log, tree=TRAIN) -> set:
+    """Files the failing tests include (include_re, include_const_re), e.g. a shrink-only list."""
+    import posixpath
+    if not P["include_re"]:
+        return set()
+    m = re.search(r"failing crates: ([^\n]*)", log or "")
+    crate_srcs = [p for d in (m.group(1).split() if m else []) for p in (tree / d).rglob(f"*{P['src_exts'][0]}")]
+    out = set()
+    for t in [*cf.captured(log), *(t for t in fails if "::" in t)]:
+        own, name = tree / t.split("::")[0], t.rsplit("::", 1)[-1]
+        for src in [own] if own.is_file() else crate_srcs:
+            text = src.read_text(encoding="utf-8", errors="replace")
+            fn = re.search(r"^([ \t]*)(?:\S.*?)?" + P["fn_def_re"].replace("{name}", re.escape(name)), text, re.M)
+            if not fn:
+                continue
+            end = re.compile(rf"^{fn.group(1)}\}}", re.M).search(text, fn.end())
+            body = text[fn.start():end.end() if end else len(text)]
+            paths = re.findall(P["include_re"], body) + [p for c, p in re.findall(P["include_const_re"], text)
+                                                         if re.search(rf"\b{c}\b", body)]
+            base = src.parent.relative_to(tree).as_posix()
+            out |= {posixpath.normpath(f"{base}/{p}") for p in paths}
+    return out
+
+
+def names_entry(diff: str, entries) -> bool:
+    """A changed line of diff names an entry as a whole path."""
+    return any(re.search(rf"(?<![\w/.-]){re.escape(e)}(?![\w/.-])", line[1:]) for line in diff.splitlines()
+               if line[:1] in "+-" and line[:3] not in ("+++", "---") for e in entries)
+
+
+def blame_entries(merged, fails, log, tree=TRAIN):
+    """(rows, entries, lists): every row whose own change includes an assert-diff entry: its file or its list line."""
+    entries = assert_diff_files(log)
+    if not entries:
+        return [], entries, set()
+    lists, ranges, out = test_lists(fails, log, tree), own_ranges(merged, tree), []
+    for q in merged:
+        rng, cwd = ranges[q["row"]]
+        files = set(git("diff", "--name-only", *rng, cwd=cwd, check=False).stdout.split())
+        if touching(files, entries) or any(names_entry(git("diff", "-U0", *rng, "--", f, cwd=cwd, check=False).stdout,
+                                                       entries) for f in sorted(files & lists)):
+            out.append(q)
+    return out, entries, lists
+
+
 def blame_by_file(merged, rows, fails, log, tree=TRAIN):
-    """The one blame owner: (entries whose own files touch a named file, named, own). One is ejected, more bisect."""
+    """(entries whose own files touch a named file, named, own), after blame_entries. One is ejected, more bisect."""
     named = blame_named(rows, fails, log, tree)
     if not named:
         return [], named, {}
