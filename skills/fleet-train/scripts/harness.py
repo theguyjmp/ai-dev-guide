@@ -937,13 +937,14 @@ def unit_failures(out: str) -> cf.CargoFailures:
 UNIT_BLOCK_CAP = 12000  # chars of one failing test's captured output a red unit log carries, in whole lines
 
 
-def unit_red_log(out: str) -> str:
-    """Output tail, each failing test's own output (cargo: whole captured block), the names last (reject reasons)."""
+def unit_red_log(out: str, new: "cf.CargoFailures | None" = None) -> str:
+    """Output tail, each new failing test's own output (cargo: whole captured block; main's own failures never feed
+    blame), the names last (reject reasons)."""
     failing = unit_failures(out)
     if not failing.found:
         return out[-6000:]
     blocks, shown = cf.captured(out) if P["unit_parser"] == "cargo" else {}, []
-    for t in [t for t in failing.tests if t in blocks][:5]:
+    for t in [t for t in (new or failing).tests if t in blocks][:5]:
         lines, size = [], 0
         for line in blocks[t].splitlines():  # whole lines: a cut assert side names nothing
             if size + len(line) + 1 > UNIT_BLOCK_CAP:
@@ -952,7 +953,7 @@ def unit_red_log(out: str) -> str:
             size += len(line) + 1
         shown.append(f"---- {t} stdout ----" + chr(10) + chr(10).join(lines))
     if not shown:
-        hits = sorted((i, n) for n in failing.tests if (i := out.find(n)) >= 0)
+        hits = sorted((i, n) for n in (new or failing).tests if (i := out.find(n)) >= 0)
         per = max(200, 1400 // max(1, len(hits[:4])))
         shown = [out[i:i + per].rstrip() for i, _ in hits[:4]]
     keys = failing.keys()
@@ -1193,7 +1194,7 @@ def cmd_unit_check(a):
     r = unit_runs([P["unit"]], cwd=Path(a.dir))[0]
     red, failing = unit_verdict(r, lambda: base, cwd=Path(a.dir))
     if red:
-        print(unit_red_log(r.stdout + r.stderr)[-4000:])
+        print(unit_red_log(r.stdout + r.stderr, failing.without(base))[-4000:])
         print("RED " + ("; ".join(failing.without(base).keys()[:20]) or "(the unit run failed and named no test)"))
         sys.exit(1)
     print("UNIT OK")
@@ -1277,10 +1278,13 @@ def gate(new_rows, rows, quick=False):
         return False, ["quality"], bad
     if quick:  # retry after ejecting rows whose own tests failed: lint passed with them in; unit is re-run (cheap, and
         # removing a branch can break another that used it)
-        r = unit_runs([P["unit"]])[0]
-        if unit_verdict(r, main_unit_baseline)[0]:
-            return False, ["unit"], unit_red_log(r.stdout + r.stderr)
-        q = quality_problems(TRAIN, landing=new_rows, plan="always")
+        with train_stage("unit"):
+            r = unit_runs([P["unit"]])[0]
+        red, failing = unit_verdict(r, main_unit_baseline)
+        if red:
+            return False, ["unit"], unit_red_log(r.stdout + r.stderr, failing.without(main_unit_baseline()))
+        with train_stage("quality"):
+            q = quality_problems(TRAIN, landing=new_rows, plan="always")
         if q:
             return False, ["quality"], q
         t0 = now()
@@ -1302,12 +1306,13 @@ def gate(new_rows, rows, quick=False):
     red, failing = unit_verdict(r, main_unit_baseline)
     out = r.stdout + r.stderr
     if red and not P["crate_blame"]:
-        return False, ["unit"], unit_red_log(out)
+        return False, ["unit"], unit_red_log(out, failing.without(main_unit_baseline()))
     if red:
         pkgs = sorted({t.split()[1] for t in failing.targets if t.split()[1].startswith(CRATE)})
         dirs = " ".join("src/" if p == CRATE else "crates/" + p[len(CRATE) + 1:] + "/" for p in pkgs)
         # the description sits above `failing crates:`, which try_batch splits into blame paths
-        return False, ["unit"], failing.describe() + chr(10) + f"failing crates: {dirs}" + chr(10) + unit_red_log(out)
+        return False, ["unit"], (failing.describe() + chr(10) + f"failing crates: {dirs}" + chr(10)
+                                 + unit_red_log(out, failing.without(main_unit_baseline())))
     if quality_on():
         t0 = now()
         with train_stage("quality"):

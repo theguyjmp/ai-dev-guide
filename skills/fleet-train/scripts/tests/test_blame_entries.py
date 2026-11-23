@@ -15,17 +15,17 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 FAILS: list[str] = []
-TEST = "ext::tests::raw_access_outside_the_registry_only_shrinks"
-LIST = "crates/doc/src/ext/raw_access.txt"
-LINES = ["crates/draw/src/layer_set.rs 1", "crates/draw/src/drafting.rs 2", "crates/script/src/bake.rs 2",
-         "crates/draw/src/records.rs 1", "crates/render/src/stage.rs 1", "crates/motion/src/data.rs 2",
-         "crates/draw/src/style_set.rs 1", "crates/part/src/strip.rs 1"]
-GATE_SRC = f"""/// The shrink-only list of raw accesses: `path count` per line.
-const RAW_ACCESS: &str = include_str!("raw_access.txt");
+TEST = "ext::tests::raw_uses_outside_the_registry_only_shrinks"
+LIST = "crates/store/src/ext/raw_uses.txt"
+LINES = ["crates/ui/src/panel_a.rs 1", "crates/ui/src/panel_c.rs 2", "crates/calc/src/eval.rs 2",
+         "crates/ui/src/panel_d.rs 1", "crates/view/src/pass.rs 1", "crates/anim/src/clip.rs 2",
+         "crates/ui/src/panel_b.rs 1", "crates/model/src/shape.rs 1"]
+GATE_SRC = f"""/// The shrink-only list of raw uses: `path count` per line.
+const RAW_USES: &str = include_str!("raw_uses.txt");
 
 #[test]
 fn {TEST.rsplit('::', 1)[1]}() {{
-    assert_eq!(scan(), app_core::source_scan::allow_list(RAW_ACCESS));
+    assert_eq!(scan(), app_core::source_scan::allow_list(RAW_USES));
 }}
 """
 
@@ -54,23 +54,23 @@ def listed(*drop):
 
 
 def cargo_red_output() -> str:
-    """`cargo test -q --workspace` red in doc's lib: the panic block first, then other crates' passing output well past
+    """`cargo test -q --workspace` red in the store lib: the panic block first, then other crates' passing output well past
     the 6000-char tail."""
     found = {line.split()[0]: int(line.split()[1]) for line in LINES}
-    for gone in ("crates/draw/src/layer_set.rs", "crates/draw/src/style_set.rs"):  # DRAW1/2 moved them off
+    for gone in ("crates/ui/src/panel_a.rs", "crates/ui/src/panel_b.rs"):  # UI1/2 moved them off
         del found[gone]
-    found["crates/render/src/appearance.rs"] = 3  # SRC's new raw access
-    allowed = {k: v for k, v in found.items() if k not in ("crates/render/src/appearance.rs",
-                                                           "crates/script/src/bake.rs", "crates/render/src/stage.rs")}
+    found["crates/view/src/paint.rs"] = 3  # SRC's new raw use
+    allowed = {k: v for k, v in found.items() if k not in ("crates/view/src/paint.rs",
+                                                           "crates/calc/src/eval.rs", "crates/view/src/pass.rs")}
     side = lambda m: "{" + ", ".join(f'"{k}": {v}' for k, v in sorted(m.items())) + "}"
     passing = "".join(f"\nrunning 40 tests\n{'.' * 40}\ntest result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; "
                       f"0 filtered out; finished in 0.{i:02}s\n" for i in range(60))
     return (f"\nrunning 3 tests\n.F.\nfailures:\n\n---- {TEST} stdout ----\n\nthread '{TEST}' panicked at "
-            f"crates\\doc\\src\\ext\\tests.rs:6:5:\nassertion `left == right` failed\n  left: {side(found)}\n"
+            f"crates\\store\\src\\ext\\tests.rs:6:5:\nassertion `left == right` failed\n  left: {side(found)}\n"
             f" right: {side(allowed)}\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\n"
             f"failures:\n    {TEST}\n\ntest result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; "
-            f"finished in 0.01s\n\nerror: test failed, to rerun pass `-p app-doc --lib`\n{passing}\n"
-            f"error: 1 target failed:\n    `-p app-doc --lib`\n")
+            f"finished in 0.01s\n\nerror: test failed, to rerun pass `-p app-store --lib`\n{passing}\n"
+            f"error: 1 target failed:\n    `-p app-store --lib`\n")
 
 
 with tempfile.TemporaryDirectory() as d:
@@ -82,16 +82,16 @@ with tempfile.TemporaryDirectory() as d:
     git(root, "init", "-q", "-b", "main")
     git(root, "config", "user.email", "t@t")
     git(root, "config", "user.name", "t")
-    commit(root, {LIST: listed(), "crates/doc/src/ext/tests.rs": GATE_SRC, "crates/doc/src/lib.rs": "lib",
-                  "crates/draw/src/layer_set.rs": "m.extra 1", "crates/draw/src/style_set.rs": "m.extra 1",
-                  "crates/render/src/stage.rs": "m.extra 1", "crates/output/src/a.rs": "a"}, "base")
+    commit(root, {LIST: listed(), "crates/store/src/ext/tests.rs": GATE_SRC, "crates/store/src/lib.rs": "lib",
+                  "crates/ui/src/panel_a.rs": "raw() 1", "crates/ui/src/panel_b.rs": "raw() 1",
+                  "crates/view/src/pass.rs": "raw() 1", "crates/output/src/a.rs": "a"}, "base")
     branches = {  # row: its own change, each on main
-        "LIST1": {LIST: listed("crates/script/src/bake.rs")},  # lowers a line whose access is still there
-        "DRAW1": {LIST: listed("crates/draw/src/layer_set.rs"), "crates/draw/src/layer_set.rs": "typed"},
-        "SRC": {"crates/render/src/appearance.rs": "m.extra m.extra m.extra"},  # a new raw access, list untouched
-        "CORE": {"crates/doc/src/lib.rs": "lib 2"},  # an unrelated file of the failing crate
-        "LIST2": {LIST: listed("crates/render/src/stage.rs")},  # the second wrong edit of the same list
-        "DRAW2": {LIST: listed("crates/draw/src/style_set.rs"), "crates/draw/src/style_set.rs": "typed"},
+        "LIST1": {LIST: listed("crates/calc/src/eval.rs")},  # lowers a line whose access is still there
+        "UI1": {LIST: listed("crates/ui/src/panel_a.rs"), "crates/ui/src/panel_a.rs": "typed"},
+        "SRC": {"crates/view/src/paint.rs": "raw() raw() raw()"},  # a new raw use, list untouched
+        "CORE": {"crates/store/src/lib.rs": "lib 2"},  # an unrelated file of the failing crate
+        "LIST2": {LIST: listed("crates/view/src/pass.rs")},  # the second wrong edit of the same list
+        "UI2": {LIST: listed("crates/ui/src/panel_b.rs"), "crates/ui/src/panel_b.rs": "typed"},
         "OUT": {"crates/output/src/a.rs": "a 2"},
     }
     batch = []
@@ -107,13 +107,14 @@ with tempfile.TemporaryDirectory() as d:
         git(h.TRAIN, "merge", "-q", "--no-ff", "--no-edit", "-m", f"train: land {q['row']}", q["sha"])
 
     out = cargo_red_output()
-    log = "failing crates: crates/doc/\n" + h.unit_red_log(out)  # gate(): the crate line sits above the red log
+    log = "failing crates: crates/store/\n" + h.unit_red_log(out)  # gate(): the crate line sits above the red log
     check("the old 6000-char tail lost the assert sides", "left:" not in out[-6000:])
     entries = h.assert_diff_files(log)
     check("the red unit log carries the failing test's assert diff", entries == {
-        "crates/render/src/appearance.rs", "crates/script/src/bake.rs", "crates/render/src/stage.rs"}, entries)
+        "crates/view/src/paint.rs", "crates/calc/src/eval.rs", "crates/view/src/pass.rs"}, entries)
     check("the failing test's list is what it include_str!s", h.test_lists(["unit"], log) == {LIST},
           h.test_lists(["unit"], log))
+    check("a main-red failure's block never reaches blame", "left:" not in h.unit_red_log(out, h.cf.from_keys(["x::y"])))
     check("the red unit log still ends with the failures' names", log.rstrip().endswith(TEST), log[-200:])
 
     gated, verdicts = [], []
@@ -134,11 +135,11 @@ with tempfile.TemporaryDirectory() as d:
           == ["LIST1", "LIST2", "SRC"] and [e["event"] for e in events][:4] == ["reject"] * 3 + ["blame_entries"],
           [(e["event"], e.get("row")) for e in events])
     check("one reject reason for the group, naming the cause and the other rows",
-          len({e["reason"] for e in rejects}) == 1 and all("bake.rs" in e["reason"] and "LIST2" in e["reason"]
+          len({e["reason"] for e in rejects}) == 1 and all("eval.rs" in e["reason"] and "LIST2" in e["reason"]
                                                            for e in rejects), rejects[:1])
-    check("the rest gated as ONE run, no split", gated[1:] == [["CORE", "DRAW1", "DRAW2", "OUT"]], gated)
-    check("the rest landed", sorted(q["row"] for q in landed) == ["CORE", "DRAW1", "DRAW2", "OUT"])
-    check("rejected rows leave the queue", sorted(q["row"] for q in h.load("queue.json", [])) == ["CORE", "DRAW1", "DRAW2", "OUT"])
+    check("the rest gated as ONE run, no split", gated[1:] == [["CORE", "OUT", "UI1", "UI2"]], gated)
+    check("the rest landed", sorted(q["row"] for q in landed) == ["CORE", "OUT", "UI1", "UI2"])
+    check("rejected rows leave the queue", sorted(q["row"] for q in h.load("queue.json", [])) == ["CORE", "OUT", "UI1", "UI2"])
 
     no_diff = chr(10).join(line for line in log.splitlines() if not line.lstrip().startswith(("left:", "right:")))
     check("no assert diff: no group", h.blame_entries(batch, ["unit"], no_diff)[0] == [])

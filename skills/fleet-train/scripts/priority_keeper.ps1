@@ -7,7 +7,7 @@
 # Run detached (Win32_Process Create 'powershell -NoProfile -File <this>' with HARNESS_HOME set); stop it by its PID.
 $ErrorActionPreference = 'SilentlyContinue'
 $state = Join-Path $env:HARNESS_HOME 'state'
-$laneRe = if ($env:FLEET_LANE_PROC_RE) { $env:FLEET_LANE_PROC_RE } else { '^(cargo|rustc|clippy-driver|link|cc1|node)\.exe$' }
+$laneRe = if ($env:FLEET_LANE_PROC_RE) { $env:FLEET_LANE_PROC_RE } else { '^(cargo|rustc|clippy-driver|link|cc1)\.exe$' }
 $secs = if ($env:FLEET_PRIORITY_SECS) { [int]$env:FLEET_PRIORITY_SECS } else { 20 }
 $compileStages = @('clippy', 'unit', 'quality')
 function Get-Tree([int]$id, $all) {
@@ -28,7 +28,9 @@ while ($true) {
   $lane = if ($compiling) { 'Idle' } else { 'BelowNormal' }
   foreach ($p in $all) {
     if ($tree -contains $p.ProcessId) { Set-Priority $p.ProcessId 'AboveNormal' }
-    elseif ($p.Name -match $laneRe) { Set-Priority $p.ProcessId $lane }
+    elseif ($p.Name -match $laneRe -and (Get-Process -Id $p.ProcessId).PriorityClass -ne 'AboveNormal') {
+      Set-Priority $p.ProcessId $lane  # never demote another fleet's train
+    }
   }
   Start-Sleep -Seconds $secs
 }

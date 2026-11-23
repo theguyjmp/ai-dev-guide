@@ -112,7 +112,8 @@ Each rule is enforced by the harness; the incident behind it is in CHANGELOG.md.
   supersedes the whole run) and calls `clean-submit`. FINISH_NO_SUBMIT=1 gates only. A lane never copies the script to
   change a step: the step goes into finish.py for every lane.
 - Every finish build waits while the train marks a compile stage (`train_stage`: clippy, unit, quality; at most
-  FINISH_TRAIN_WAIT, 2700 s) and holds one machine-wide build slot (`cargo_slots.py`, FLEET_CARGO_CAP). Run
+  FINISH_TRAIN_WAIT, 2700 s; the acceptance build sits inside the acceptance mark and is not waited out) and holds one
+  machine-wide build slot (`cargo_slots.py`, FLEET_CARGO_CAP). Run
   `priority_keeper.ps1` (HARNESS_HOME, FLEET_LANE_PROC_RE): the state/train.pid tree AboveNormal, lane builds BelowNormal,
   Idle during a compile stage. Pilot: with 8 lanes building, the gate's quality stage went from 6-9 to 19-28 min.
 - Lane scopes are exclusive (by crate or package): two lanes on one set of records each add a typed copy.
