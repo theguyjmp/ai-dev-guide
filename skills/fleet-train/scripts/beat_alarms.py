@@ -37,7 +37,7 @@ def open_requests(h, now: float, lane=lambda rel: "") -> list:
 def repeat_test(h, ev: list) -> list:
     gates = [e for e in ev if e.get("event") == "gate_stage" and str(e.get("stage", "")).startswith("acceptance")]
     failed = [t for e in gates[-REPEAT_WINDOW:] for t in set(e.get("failed", []))]
-    rep = sorted({t for t in failed if failed.count(t) >= 2} - set(h.known_red()))
+    rep = sorted({t for t in failed if failed.count(t) >= 2} - h.known_red_tests())
     if not rep:
         return []
     return [f"REPEAT-TEST {rep[0]} failed {failed.count(rep[0])} of the last {REPEAT_WINDOW} gates but is green alone on "

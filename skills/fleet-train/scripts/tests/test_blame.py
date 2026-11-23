@@ -92,7 +92,7 @@ if True:
     rejected, events, gated = [], [], []
     h.reject = lambda q, why, locked=False: rejected.append(q["row"])
     h.event = lambda name, **kw: events.append(name)
-    h.quarantine = type("Q", (), {"heal": staticmethod(lambda *a: False)})
+    h.quarantine = type("Q", (), {"heal": staticmethod(lambda *a: False), "KNOWN": "accept-known-red.json"})
     h.build_train = lambda batch, rows: (list(batch), [])
     red = []  # the next gate's log: red once, then green
 

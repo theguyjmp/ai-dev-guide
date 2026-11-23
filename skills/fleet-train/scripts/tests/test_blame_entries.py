@@ -118,7 +118,7 @@ with tempfile.TemporaryDirectory() as d:
     check("the red unit log still ends with the failures' names", log.rstrip().endswith(TEST), log[-200:])
 
     gated, verdicts = [], []
-    h.quarantine = type("Q", (), {"heal": staticmethod(lambda *a: False)})()
+    h.quarantine = type("Q", (), {"heal": staticmethod(lambda *a: False), "KNOWN": "accept-known-red.json"})()
     h.build_train = lambda b, rows: (list(b), [])
     h.train_spec = lambda rows: rows
     h.gate = lambda ids, rows, quick=False: (gated.append(sorted(ids)) or verdicts.pop(0))

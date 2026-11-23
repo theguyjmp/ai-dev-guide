@@ -54,6 +54,7 @@ def setup():
     h.MIN_BATCH = 1
     h.fill_wait = lambda queue, picks: False
     h.try_batch = lambda batch, rows, **k: STARTED.append([q["row"] for q in batch]) or []
+    h.prescreening = lambda batch: h.nullcontext()  # no gate-time pick work in this test
 
 
 def skips():

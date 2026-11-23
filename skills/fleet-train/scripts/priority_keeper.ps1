@@ -23,6 +23,10 @@ while ($true) {
   $all = Get-CimInstance Win32_Process
   $trainPid = [int](Get-Content (Join-Path $state 'train.pid') -TotalCount 1)
   $tree = if ($trainPid -and ($all | Where-Object { $_.ProcessId -eq $trainPid })) { Get-Tree $trainPid $all } else { @() }
+  # the pick's background compile (harness.prescreen, during the gate's acceptance stage) runs in the train's tree but
+  # must stay under the gate's tests: its subtree leaves the train tree and is treated as a lane build
+  $bgPid = [int](Get-Content (Join-Path $state 'pick-background.pid') -TotalCount 1)
+  if ($bgPid) { $bg = Get-Tree $bgPid $all; $tree = @($tree | Where-Object { $bg -notcontains $_ }) }
   $mark = Get-Content (Join-Path $state 'train-stage.json') -Raw | ConvertFrom-Json
   $compiling = $mark -and ($compileStages -contains $mark.stage) -and ($all | Where-Object { $_.ProcessId -eq $mark.pid })
   $lane = if ($compiling) { 'Idle' } else { 'BelowNormal' }

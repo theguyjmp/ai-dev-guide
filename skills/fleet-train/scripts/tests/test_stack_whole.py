@@ -84,6 +84,7 @@ h.MIN_BATCH = 1
 h.fill_wait = lambda queue, picks: False
 h.pick_screen = lambda picks, budget=0: set()
 h.try_batch = lambda batch, rows, **k: STARTED.append(rows_of(batch)) or []
+h.prescreening = lambda batch: h.nullcontext()  # no gate-time pick work in this test
 gate_bad: set = set()
 h.gate_rows = lambda entries, rows: [(x, "no tests") for x in entries if x["row"] in gate_bad]
 h.save("claims.json", {})

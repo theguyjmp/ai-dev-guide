@@ -38,15 +38,19 @@ class Fixture(unittest.TestCase):
         self.runs, self.log = [], []
         self.main("a" * 40, {})
 
-    def main(self, sha, red):
-        """main is `sha`; run_alone fails exactly the tests in `red` ({test: tail})."""
+    def main(self, sha, red, missing=(), moved=False):
+        """main is `sha`; run_alone fails exactly the tests in `red` ({test: tail}); the files in `missing` are not on
+        main; moved: main is no longer in the train tree."""
         self.sha, self.red = sha, red
 
         @contextmanager
         def at_main():
             yield sha
-        for name, fake in {"git": lambda *a, **k: SimpleNamespace(stdout=sha + "\n" if a[:2] == ("rev-parse", "main") else "",
-                                                                    returncode=0),
+
+        def git(*a, **k):
+            gone = a[:2] == ("cat-file", "-e") and a[2].split(":", 1)[1] in missing or moved and a[0] == "merge-base"
+            return SimpleNamespace(stdout=sha + "\n" if a[:2] == ("rev-parse", "main") else "", returncode=int(gone))
+        for name, fake in {"git": git,
                            "at_main": at_main,
                            "run_alone": lambda tests, timeout=1800: (self.runs.append(list(tests)),
                                                                      {t: red[t] for t in tests if t in red})[1]}.items():
@@ -54,32 +58,36 @@ class Fixture(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def batch(self, gate_results):
+    def batch(self, gate_results, batch=None, rows=None):
         it = iter(gate_results)
 
-        def gate(ids, rows, quick=False):
-            fails = [f for f in next(it) if f not in h.known_red()]  # the real gate skips quarantined tests
+        def gate(ids, rows, quick=False):  # verdicts as given: try_batch applies the known-red rule itself
+            fails = list(next(it))
             self.log.append(("gate", tuple(fails)))
             return not fails, fails, ""
         fakes = {"build_train": lambda batch, rows: (list(batch), []), "batch_review": lambda merged, **k: [],
                  "finish_spec": lambda ids: self.log.append(("land", tuple(ids))),
                  "reject": lambda q, why: self.log.append(("reject", q["row"])),
                  "probe_culprit": lambda merged, rows, fails: self.log.append(("probe", tuple(fails))), "gate": gate}
-        h.save("queue.json", list(BATCH))  # a row lands only while queued with its sha (harness.superseded)
+        batch = batch or BATCH
+        h.save("queue.json", list(batch))  # a row lands only while queued with its sha (harness.superseded)
         with mock.patch.multiple(h, **fakes):
-            return h.try_batch(list(BATCH), dict(ROWS))
+            return h.try_batch(list(batch), {**ROWS, **(rows or {})})
 
     def events(self):
         return [e["event"] for e in h.read_events()]
 
 
 class Heal(Fixture):
-    def test_red_on_main_is_quarantined_and_the_same_batch_regated(self):
+    def test_red_on_main_only_is_quarantined_and_the_batch_lands_on_that_verdict(self):
         self.main("a" * 40, {RED: "test_slow timed out after 900 seconds"})
-        landed = self.batch([[RED], []])
+        landed = self.batch([[RED]])
         self.assertEqual([q["row"] for q in landed], ["R1", "R2"])
+        self.assertIn(("land", ("R1", "R2")), self.log)
         self.assertFalse([e for e in self.log if e[0] in ("reject", "probe")])
-        self.assertEqual([e[0] for e in self.log].count("gate"), 2)
+        self.assertEqual([e[0] for e in self.log].count("gate"), 1, "the run's verdict stands: no re-gate")
+        only = [e for e in h.read_events() if e["event"] == "accept_main_red_only"]
+        self.assertEqual([(e["tests"], e["rows"]) for e in only], [([RED], ["R1", "R2"])])
         entry = h.known_red()[RED]
         self.assertIn("timed out", entry["evidence"])
         self.assertTrue(entry["reason"].startswith("red alone on main"))
@@ -89,6 +97,55 @@ class Heal(Fixture):
         n = len(self.runs)
         Q.main_red(h, [RED])
         self.assertEqual(len(self.runs), n, "verdicts are cached per main sha")
+
+    def regated(self, red, gates, **main):
+        self.main("a" * 40, red, **main)
+        landed = self.batch(gates)
+        self.assertGreaterEqual([e[0] for e in self.log].count("gate"), 2)
+        self.assertNotIn("accept_main_red_only", self.events())
+        return landed
+
+    def test_main_red_plus_a_branch_failure_regates_then_probes(self):
+        landed = self.regated({RED: "red on main"}, [[RED, OTHER]] * 6)
+        self.assertIn(RED, h.known_red())
+        self.assertNotIn(OTHER, h.known_red())
+        self.assertIn(("probe", (OTHER,)), self.log)
+        self.assertFalse(landed)
+
+    def test_unbuilt_on_main_is_no_proof_and_regates(self):
+        landed = self.regated({RED: h.BUILD_FAILED + "extern location missing"}, [[RED], []])
+        self.assertIn(RED, h.known_red())
+        self.assertEqual(len(landed), 2)
+
+    def test_main_moved_past_the_gated_tree_regates(self):
+        self.assertEqual(len(self.regated({RED: "red on main"}, [[RED], []], moved=True)), 2)
+
+    def test_one_known_red_rule_filters_every_gate_selection_and_verdict(self):
+        h.save(Q.KNOWN, {RED: "manager entry", MINE: "quarantined"})
+        self.assertEqual(h.gate_tests(["R1"], dict(ROWS)), [OTHER], "a landing row's known-red test is skipped too")
+        landed = self.batch([[MINE, RED]])  # a verdict gated elsewhere may still name known-red tests
+        self.assertEqual(len(landed), 2)
+        self.assertFalse(self.runs, "a known-red failure is never run on main, blamed or probed")
+        self.assertFalse([e for e in self.log if e[0] in ("reject", "probe")])
+
+    def test_a_failing_test_not_on_main_is_the_batch_own(self):
+        new = "tests/acceptance/added.rs::test_added"  # a test file only the batch adds, listed by no row
+        self.main("a" * 40, {new: h.BUILD_FAILED + "no test target"}, missing=(new.split("::")[0],))
+        landed = self.batch([[new]] * 6)
+        self.assertFalse(self.runs)
+        self.assertNotIn(new, h.known_red())
+        self.assertIn(("probe", (new,)), self.log)
+        self.assertFalse(landed)
+
+    def test_an_absorbed_row_owns_its_test(self):
+        absorbed = "tests/acceptance/abs.rs::test_abs"
+        self.main("a" * 40, {RED: "red on main", absorbed: "red on main too"})
+        batch = [dict(BATCH[0], absorbs=["A1"]), BATCH[1]]
+        rows = {"A1": {"id": "A1", "tests": [absorbed], "status": "planned", "file_list": ["src/abs.rs"]}}
+        self.batch([[absorbed, RED], [absorbed], []], batch=batch, rows=rows)
+        self.assertNotIn(absorbed, h.known_red(), "a landing row's test is never main-red")
+        self.assertNotIn("accept_main_red_only", self.events())
+        self.assertIn(("reject", "R1"), self.log)
 
     def test_build_failure_is_not_cached(self):
         self.main("b" * 40, {OTHER: h.BUILD_FAILED + "extern location for sha2 does not exist"})

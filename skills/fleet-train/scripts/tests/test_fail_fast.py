@@ -5,7 +5,7 @@ Temp state, worktrees and a fixture git repo; the static checks, reviewer and la
 """
 from __future__ import annotations
 
-import json, os, subprocess, sys, tempfile, threading
+import json, os, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
@@ -321,6 +321,116 @@ def test_pick_regen():
               bad == {rows["G2"]["sha"]} and "exited 3" in rej, rej)
     finally:
         h.sh, (h.P["regen"], h.P["pick_build"]) = real_sh, saved
+
+
+def branches(names, file_of=lambda r: f"{r}.txt", ts=50) -> dict:
+    """{row: queue entry} of one commit per row on main, each writing file_of(row)."""
+    git("checkout", "-q", "-f", "main")
+    out = {}
+    for i, r in enumerate(names):
+        git("checkout", "-q", "-B", r, "main")
+        (h.REPO / file_of(r)).write_text(r, encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", r)
+        out[r] = {"row": r, "sha": git("rev-parse", "HEAD"), "ts": ts + i}
+        git("checkout", "-q", "main")
+    return out
+
+
+def pick_compiles(n0: int) -> list:
+    return [e for e in h.read_events()[n0:] if e["event"] == "pick_compile"]
+
+
+def test_pick_parallel():
+    """3 pick slots give the rejects, cache and pick_check verdicts of 1 slot, with rows really checked side by side;
+    the compile stays one at a time on its one worktree."""
+    rows = list(branches([f"PP{i}" for i in range(6)]).values())
+    live, peak, lk = [0], [0], threading.Lock()
+
+    def static(cwd, base="main", plan="spec", landing=()):
+        with lk:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        time.sleep(0.3)
+        with lk:
+            live[0] -= 1
+        return "PP2.txt: 1 x S25 expect" if (Path(cwd) / "PP2.txt").exists() else ""
+    h.static_problems = static
+    h.batch_review = lambda merged, cwd=None, base="main": (
+        [{"file": "PP4.txt", "fn": "f", "existing": "a.txt:1"}] if merged[0]["row"] == "PP4" else [])
+    h.adds_fn = lambda q, d: q["row"] in ("R3", "PP4")
+    mark, clash = TMP / "compiling", TMP / "clash"
+    (TMP / "pb.py").write_text(chr(10).join((
+        "import pathlib, time", f"m, c = pathlib.Path(r'{mark}'), pathlib.Path(r'{clash}')",
+        "if m.exists():", "    c.write_text('x')", "m.write_text('x')", "time.sleep(0.3)", "m.unlink()", "")),
+                               encoding="utf-8")
+    h.P.update({"pick_build": f'"{sys.executable}" "{TMP / "pb.py"}"', "pick_env": {}, "pick_err_re": r"^error"})
+    h.save(h.TRAIN_STAGE, {})
+
+    def run(workers):
+        h.save(h.PICK_CACHE, {})
+        h.save("rejects.json", {})
+        h.save("queue.json", [dict(q) for q in rows])
+        n0, peak[0] = len(h.read_events()), 0
+        bad = h.pick_screen([dict(q) for q in rows], workers=workers)
+        ev = h.read_events()[n0:]
+        rej = {r: v[-1]["reason"] for r, v in h.load("rejects.json", {}).items()}
+        verdicts = sorted((e["row"], e["ok"]) for e in ev if e["event"] == "pick_check")
+        return bad, rej, h.load(h.PICK_CACHE, {}), verdicts, peak[0], len(pick_compiles(n0))
+    one, three = run(1), run(3)
+    check("parallel: 3 slots reject, cache and judge exactly as 1 slot", one[:4] == three[:4]
+          and sorted(one[1]) == ["PP2", "PP4"] and len(one[2]) == 5, (one[:4], three[:4]))
+    check("parallel: 1 slot checks one row at a time, 3 slots side by side", one[4] == 1 and three[4] >= 2,
+          (one[4], three[4]))
+    check("parallel: one compile at a time, each row past its static checks compiled once", not clash.exists()
+          and one[5] == three[5] == 5, (clash.exists(), one[5], three[5]))
+
+
+def test_prescreen_compile():
+    """While the gate is in acceptance, prescreen compiles a queued row on the batch head in the background and never
+    rejects; once the batch lands whole (main = head + a spec-only commit) the pick reuses that compile; once main's
+    code moves the row compiles again."""
+    rows = branches(["PX", "PB", "PR"], file_of=lambda r: "RED.txt" if r == "PR" else f"{r}.txt", ts=60)
+    (TMP / "pb_ok.py").write_text("print('ok')" + chr(10), encoding="utf-8")
+    h.P.update({"pick_build": f'"{sys.executable}" "{TMP / "pb_ok.py"}"', "pick_env": {}, "pick_err_re": r"^error"})
+    h.static_problems = lambda cwd, base="main", plan="spec", landing=(): "red" if (Path(cwd) / "RED.txt").exists() else ""
+    h.batch_review = lambda *a, **k: []
+    head = rows["PB"]["sha"]  # the batch head: the code main has once the batch (PB) lands whole
+    h.save(h.PICK_CACHE, {})
+    h.save("rejects.json", {})
+    h.save("queue.json", [rows["PX"], rows["PR"]])
+    n0, stop = len(h.read_events()), threading.Event()
+    t = threading.Thread(target=h.prescreen, args=({head}, stop),
+                         kwargs={"poll": 0.05, "accepting": lambda: True, "head": lambda: head})
+    t.start()
+    for _ in range(400):
+        if len([e for e in h.read_events()[n0:] if e["event"] == "pick_prescreen"]) >= 2:
+            break
+        time.sleep(0.05)
+    stop.set()
+    t.join(60)
+    built = pick_compiles(n0)
+    check("prescreen: one background compile, on the batch head, its pid file gone",
+          [e.get("background") for e in built] == [True]
+          and h.load(h.PICK_CACHE, {}).get(rows["PX"]["sha"], {}).get("built") == head
+          and not (h.ST / h.PICK_BACKGROUND_PID).exists(), (built, h.load(h.PICK_CACHE, {})))
+    check("prescreen: a red row is never rejected, it stays queued for the pick",
+          "PR" not in h.load("rejects.json", {}) and rows["PR"]["sha"] in {q["sha"] for q in h.load("queue.json", [])})
+    git("merge", "-q", "--ff-only", head)
+    (h.REPO / h.SPEC).parent.mkdir(parents=True, exist_ok=True)
+    (h.REPO / h.SPEC).write_text("PB proven" + chr(10), encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "finish_spec: PB proven")
+    h.save("queue.json", [rows["PX"]])
+    n1 = len(h.read_events())
+    check("prescreen: after a whole land the pick reuses the head's compile",
+          h.pick_screen([rows["PX"]]) == set() and not pick_compiles(n1), pick_compiles(n1))
+    (h.REPO / "moved.txt").write_text("code" + chr(10), encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "main's code moves (a partial land)")
+    n2 = len(h.read_events())
+    check("prescreen: main's code moved -> the row is compiled again",
+          h.pick_screen([rows["PX"]]) == set() and len(pick_compiles(n2)) == 1, pick_compiles(n2))
 
 
 if __name__ == "__main__":

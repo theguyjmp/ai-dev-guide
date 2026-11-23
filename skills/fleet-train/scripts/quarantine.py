@@ -1,9 +1,10 @@
-"""Main-red acceptance tests: an unowned failing test red alone on main is quarantined with a fix request and the
-batch re-gated; past CAP, MainBroken pauses the train. Functions take the harness module `h` (tests pass a fake).
+"""Main-red acceptance tests: an unowned failing test red alone on main is quarantined with a fix request (Healed);
+past CAP, MainBroken pauses the train. Functions take the harness module `h` (tests pass a fake).
 """
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 CAP = 3
@@ -47,8 +48,19 @@ def unowned(fails, rows: dict, ids) -> list:
     return sorted({t for t in fails if "::" in t and t not in own})
 
 
+def on_main(h, test: str) -> bool:
+    """A test file only the batch adds is its own test, never quarantined."""
+    return h.git("cat-file", "-e", f"main:{test.split('::')[0]}", check=False).returncode == 0
+
+
 def main_red(h, tests) -> dict:
     """{test: failure tail} of the tests red alone on main, cached per main sha."""
+    proven, unbuilt = main_baseline(h, tests)
+    return {**proven, **unbuilt}
+
+
+def main_baseline(h, tests) -> tuple:
+    """({test: tail} red alone on main, unbuilt there: never cached)."""
     sha = h.git("rev-parse", "main").stdout.strip()
     cache = h.load(BASELINE, {})
     if cache.get("sha") != sha:
@@ -65,16 +77,31 @@ def main_red(h, tests) -> dict:
         h.event("main_baseline", sha=sha, tests=todo[:10], red=sorted(t for t in todo if t in red)[:10], unbuilt=len(unbuilt))
     else:
         unbuilt = {}
-    return {**{t: cache["red"][t] for t in tests if t in cache["red"]}, **unbuilt}
+    return {t: cache["red"][t] for t in tests if t in cache["red"]}, unbuilt
 
 
-def heal(h, merged: list, rows: dict, fails) -> bool:
-    """True when tests red alone on main were quarantined (the caller re-gates). MainBroken past CAP."""
-    cand = unowned(fails, rows, [q["row"] for q in merged])
+@dataclass(frozen=True)
+class Healed:
+    """What one heal quarantined; falsy: nothing."""
+    proven: frozenset = frozenset()
+    unbuilt: frozenset = frozenset()
+
+    def __bool__(self) -> bool:
+        return bool(self.proven or self.unbuilt)
+
+    def covers(self, fails) -> bool:
+        """All failures proven main-red."""
+        return bool(fails) and set(fails) <= self.proven
+
+
+def heal(h, merged: list, rows: dict, fails, ids) -> Healed:
+    """Quarantine unowned failing tests (`ids`: landing rows) red alone on main. MainBroken past CAP."""
+    cand = [t for t in unowned(fails, rows, ids) if on_main(h, t)]
     known = h.known_red()
-    red = main_red(h, [t for t in cand if t not in known])
+    proven, unbuilt = main_baseline(h, [t for t in cand if t not in known])
+    red = {**proven, **unbuilt}
     if not red:
-        return False
+        return Healed()
     if len(known) + len(red) > CAP:
         sha = h.git("rev-parse", "main").stdout.strip()
         h.save(BROKEN, {"t": h.iso(), "sha": sha, "quarantined": sorted(known), "red": sorted(red)})
@@ -91,7 +118,7 @@ def heal(h, merged: list, rows: dict, fails) -> bool:
     for t, tail in red.items():
         write_request(h, t, tail, sha)
         h.event("quarantine", test=t, sha=sha, request=request_path(h, t).name)
-    return True
+    return Healed(frozenset(proven), frozenset(unbuilt))
 
 
 REQUEST = """# Fix request: {test}

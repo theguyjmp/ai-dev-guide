@@ -17,11 +17,14 @@ whose [profile] table overrides any command or pattern in STACKS below.
 """
 from __future__ import annotations
 
-import argparse, json, os, re, shutil, subprocess, sys, time
+import argparse, json, os, re, shutil, subprocess, sys, threading, time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from queue import SimpleQueue
 
 import cargo_failures as cf, desk, quarantine, rules_gate, rules_langs
 
@@ -62,11 +65,20 @@ def kill_tree(pid: int, sig: int = 9) -> None:
         pass
 
 
-def sh(cmd, cwd=REPO, check=True, env=None, timeout=None, stdin=None) -> subprocess.CompletedProcess:
+def sh(cmd, cwd=REPO, check=True, env=None, timeout=None, stdin=None, low=False, on_start=None) -> subprocess.CompletedProcess:
+    """Run cmd; a timeout kills its tree. low: below-normal priority; on_start(pid) once it runs."""
+    flags = NO_WINDOW | (getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0) if low else 0)
     p = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
                          errors="replace", env=env, shell=isinstance(cmd, str),
-                         stdin=subprocess.PIPE if stdin is not None else None, creationflags=NO_WINDOW,
+                         stdin=subprocess.PIPE if stdin is not None else None, creationflags=flags,
                          start_new_session=os.name != "nt")
+    if low and os.name != "nt":
+        try:
+            os.setpriority(os.PRIO_PGRP, p.pid, 10)
+        except OSError:
+            pass
+    if on_start:
+        on_start(p.pid)
     try:
         out, err = p.communicate(input=stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -149,8 +161,11 @@ def save(name, obj):
     os.replace(tmp, p)
 
 
+EVENT_LOCK = threading.Lock()  # pick threads log too
+
+
 def event(kind, **kw):
-    with open(ST / "events.jsonl", "a", encoding="utf-8") as f:
+    with EVENT_LOCK, open(ST / "events.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps({"t": iso(), "ts": now(), "event": kind, **kw}) + "\n")
 
 
@@ -1246,8 +1261,13 @@ def queue_clean(name, sha, slot, front=False, absorbs=None, replace=False) -> No
 
 
 def known_red() -> dict:
-    """Proven tests red on main itself (quarantine.py): the gate skips them."""
+    """Known-red entries (quarantine.py); the rule is known_red_tests()."""
     return load(quarantine.KNOWN, {})
+
+
+def known_red_tests() -> set:
+    """The one known-red rule: never gated, never a failure, blame input, probe target or pick red."""
+    return set(known_red())
 
 
 TRAIN_STAGE = "train-stage.json"
@@ -1264,9 +1284,12 @@ def train_stage(stage: str):
 
 
 def gate_tests(new_rows, rows) -> list:
-    kr = known_red()
-    tests = [t for i in new_rows for t in rows[i]["tests"]]
-    return sorted(set(tests + [t for r_ in rows.values() if r_["status"] == "proven" for t in r_["tests"] if t not in kr]))
+    """Both gate paths' acceptance tests: landing and proven rows', less known_red_tests()."""
+    tests = {t for i in new_rows for t in rows[i]["tests"]}
+    tests |= {t for r_ in rows.values() if r_["status"] == "proven" for t in r_["tests"]}
+    if skipped := sorted(tests & known_red_tests()):
+        event("gate_stage", stage="known-red-skipped", tests=skipped[:5], n=len(skipped))
+    return sorted(tests - set(skipped))
 
 
 def gate(new_rows, rows, quick=False):
@@ -1634,14 +1657,11 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
             return try_batch(rest, rows, depth + 1, quick=False, reviewed=True) if rest else []
     ids = sorted(landing_ids(merged))
     ok, fails, log = gate(ids, rows, quick)
+    if not ok and fails:  # the one known-red rule
+        kept = [t for t in fails if t not in known_red_tests()]
+        ok, fails = (True, []) if not kept else (False, kept)
     if ok:
-        if stale := superseded(merged):  # requeued in place while gated: the verdict is for code nobody queues now
-            event("train_superseded", rows=[q["row"] for q in stale], shas=[q["sha"][:12] for q in stale], at="green")
-            rest = [q for q in merged if q not in stale]
-            return try_batch(rest, rows, depth + 1, reviewed=True) if rest else []
-        finish_spec(ids)
-        GREEN["head"] = git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip()
-        return merged
+        return land_verdict(merged, ids, rows, depth)
     own = {i for i in ids for t in rows[i]["tests"] if t in fails}
     if fails not in (["clippy"], ["unit"], ["quality"]) and own and all(any(t in rows[i]["tests"] for i in own) for t in fails):
         # only the batch's own tests failed: eject those rows, retry the rest
@@ -1651,7 +1671,11 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
         rest = [q for q in merged if not own & set(lands_rows(q))]
         return try_batch(rest, rows, depth + 1, quick=True) if rest else []
     # before blame and probe, which pin a main-red test on an innocent row
-    if quarantine.heal(sys.modules[__name__], merged, rows, fails):
+    head = git("rev-parse", "HEAD", cwd=TRAIN, check=False).stdout.strip()  # gated_tree_intact compares it
+    if healed := quarantine.heal(sys.modules[__name__], merged, rows, fails, ids):
+        if healed.covers(fails) and gated_tree_intact(head):  # the verdict stands
+            event("accept_main_red_only", tests=sorted(fails)[:10], rows=[q["row"] for q in merged])
+            return land_verdict(merged, ids, rows, depth)
         return try_batch(merged, rows, depth + 1, reviewed=True)
     # blame by file
     if P["strip_root"]:  # absolute paths in the log -> repo-relative
@@ -1688,6 +1712,23 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
     if left:
         promote(left)
     return left + try_batch(merged[mid:], rows, depth + 1)
+
+
+def land_verdict(merged, ids, rows, depth) -> list:
+    """The one landing of a verdict that holds for the train tree."""
+    if stale := superseded(merged):  # requeued in place while gated: the verdict is for code nobody queues now
+        event("train_superseded", rows=[q["row"] for q in stale], shas=[q["sha"][:12] for q in stale], at="green")
+        rest = [q for q in merged if q not in stale]
+        return try_batch(rest, rows, depth + 1, reviewed=True) if rest else []
+    finish_spec(ids)
+    GREEN["head"] = git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip()
+    return merged
+
+
+def gated_tree_intact(head) -> bool:
+    """The train tree still sits at the gated `head` and main is in it."""
+    return (git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip() == head
+            and git("merge-base", "--is-ancestor", "main", head, check=False).returncode == 0)
 
 
 LAND_SUBJECT = re.compile(r"^train: land (\S+)")  # build_train's merge subject
@@ -2198,24 +2239,38 @@ def _disjoint_files(queue: list) -> list:
 
 
 # ---------------------------------------------------------------- pick check: no-build checks before a row enters a batch
-PICK_WT = WT / "pick"
+PICK_WT = WT / "pick"  # the one compile worktree (warm target)
 PICK_CACHE = "pick-verdicts.json"  # {sha: {row, base, checks, built, reviewed}}: static pass per sha, compile per main
 PICK_CHECKS = 2  # bump when the static pick checks change: older passes run again
 PICK_IDLE_SECS = 120
 PICK_BUILD_TIMEOUT = int(os.environ.get("HARNESS_PICK_BUILD_TIMEOUT", "600"))
 PICK_BUILD_RED = "pick check: gate red (['unit']): the unit stage's compile fails on main + this row: "
+PICK_PARALLEL = int(os.environ.get("HARNESS_PICK_PARALLEL", "3"))  # rows pick_screen checks at once
+PICK_BUILD_BASE = "pick-build-base.json"  # {base sha: compiles}
+PICK_BACKGROUND_PID = "pick-background.pid"  # priority_keeper.ps1 reads it
+PICK_BUILD_LOCK = threading.Lock()
 
 
 class NoVerdict(Exception):
     pass
 
 
-def pick_checkout(commit: str) -> None:
-    if not (PICK_WT / ".git").exists():
-        git("worktree", "add", "-q", "--detach", str(PICK_WT), commit)
+@dataclass(frozen=True)
+class PickSlot:
+    """One row's worktree for regen, static checks and review; the compile stays on PICK_WT (one warm target)."""
+    wt: Path
+
+
+def pick_slot(i: int) -> PickSlot:
+    return PickSlot(WT / f"pick-static-{i}")
+
+
+def pick_checkout(commit: str, wt: Path = PICK_WT) -> None:
+    if not (wt / ".git").exists():
+        git("worktree", "add", "-q", "--detach", str(wt), commit)
     else:
-        git("checkout", "-q", "-f", "--detach", commit, cwd=PICK_WT)
-        git("clean", "-q", "-f", "-d", cwd=PICK_WT)
+        git("checkout", "-q", "-f", "--detach", commit, cwd=wt)
+        git("clean", "-q", "-f", "-d", cwd=wt)
 
 
 def merged_commit(base: str, sha: str) -> str | None:
@@ -2228,8 +2283,9 @@ def merged_commit(base: str, sha: str) -> str | None:
 def main_static_clean(base: str, cache: dict) -> bool:
     """A main that fails the static checks itself rejects no row (its problems are not the row's)."""
     if cache.get("_main", {}).get("sha") != base:
-        pick_checkout(base)
-        cache["_main"] = {"sha": base, "clean": not static_problems(PICK_WT, base, plan="off")}
+        wt = pick_slot(0).wt
+        pick_checkout(base, wt)
+        cache["_main"] = {"sha": base, "clean": not static_problems(wt, base, plan="off")}
     return cache["_main"]["clean"]
 
 
@@ -2258,16 +2314,21 @@ def in_acceptance() -> bool:
     return mark.get("stage") == "acceptance" and bool(mark.get("pid")) and pid_alive(mark["pid"])
 
 
-def pick_compile(commit: str) -> tuple:
-    """(ok, error lines) of P["pick_build"] at `commit` in PICK_WT; NoVerdict in the train's acceptance stage or on a
-    timeout (the row goes on to the gate)."""
-    if in_acceptance():
+def pick_compile(commit: str, background: bool = False) -> tuple:
+    """(ok, error lines) of P["pick_build"] at `commit` in PICK_WT; NoVerdict on a timeout and, unless
+    background (below normal, pid in PICK_BACKGROUND_PID), in acceptance."""
+    if not background and in_acceptance():
         raise NoVerdict("the train is in its acceptance stage")
     pick_checkout(commit)
+    mark = ST / PICK_BACKGROUND_PID
     try:
-        r = sh(P["pick_build"], cwd=PICK_WT, check=False, env=run_env(stack_env(P["pick_env"])), timeout=PICK_BUILD_TIMEOUT)
+        r = sh(P["pick_build"], cwd=PICK_WT, check=False, env=run_env(stack_env(P["pick_env"])), timeout=PICK_BUILD_TIMEOUT,
+               low=background, on_start=(lambda pid: mark.write_text(str(pid), encoding="utf-8")) if background else None)
     except subprocess.TimeoutExpired:
         raise NoVerdict(f"pick build over {PICK_BUILD_TIMEOUT} s") from None
+    finally:
+        if background:
+            mark.unlink(missing_ok=True)
     out, blocks, cur = r.stdout + r.stderr, [], None
     for line in out.splitlines():
         if P["pick_err_re"] and re.match(P["pick_err_re"], line):
@@ -2280,44 +2341,63 @@ def pick_compile(commit: str) -> tuple:
     return r.returncode == 0, chr(10).join(chr(10).join(b) for b in blocks) or out[-1500:]
 
 
-def pick_build(base: str, merged: str, cache: dict) -> str:
-    """'' or the compile errors of `merged` (main + a row); a main that fails the same compile rejects no row."""
+def pick_build(base: str, merged: str, background: bool = False) -> str:
+    """'' or the compile errors of `merged` that `base` lacks; one compile at a time."""
     if not P["pick_build"]:
         return ""
-    t0 = now()
-    ok, errs = pick_compile(merged)
-    event("pick_compile", ok=ok, secs=round(now() - t0, 1))
-    if ok:
-        return ""
-    main = cache.setdefault("_main", {})
-    if main.get("built_sha") != base:
-        main["built_sha"], main["built"] = base, pick_compile(base)[0]
-    return PICK_BUILD_RED + errs[-3000:] if main["built"] else ""
+    with PICK_BUILD_LOCK:
+        t0 = now()
+        ok, errs = pick_compile(merged, background)
+        event("pick_compile", ok=ok, secs=round(now() - t0, 1), **({"background": True} if background else {}))
+        if ok:
+            return ""
+        built = load(PICK_BUILD_BASE, {})
+        if base not in built:
+            built = {**dict(list(built.items())[-3:]), base: pick_compile(base, background)[0]}
+            save(PICK_BUILD_BASE, built)
+    return PICK_BUILD_RED + errs[-3000:] if built[base] else ""
 
 
-def pick_verdict(q: dict, base: str, cache: dict) -> str:
-    """'' or the reject reason of queued row q on commit `base` (a conflict is ''); raises ReviewUnavailable."""
+def compiled_for(entry: dict, base: str) -> bool:
+    """The cached compile holds on `base` (code_same)."""
+    built = entry.get("built")
+    return bool(built) and (built == base or code_same(built, base))
+
+
+def prescreened(entry: dict) -> bool:
+    """The static pass and review are cached."""
+    return entry.get("checks") == PICK_CHECKS and bool(entry.get("reviewed"))
+
+
+def passed(entry: dict, base: str) -> bool:
+    """The whole pick check is cached for `base`."""
+    return prescreened(entry) and compiled_for(entry, base)
+
+
+def pick_verdict(q: dict, base: str, cache: dict, slot: PickSlot | None = None, build: bool = True,
+                 background: bool = False) -> str:
+    """'' or the reject reason of queued row q on commit `base` (a conflict is ''); raises ReviewUnavailable.
+    Checks run in `slot`; build=False: no compile."""
     merged = merged_commit(base, q["sha"])
     if merged is None:
         return ""
-    entry = cache.setdefault(q["sha"], {"row": q["row"]})
-    pick_checkout(merged)
+    entry, wt = cache.setdefault(q["sha"], {"row": q["row"]}), (slot or pick_slot(0)).wt
+    pick_checkout(merged, wt)
     if entry.get("checks") != PICK_CHECKS:
         # generated files come from the merged tree first, exactly as the train regenerates before its quality stage
         # (a row that changes a generator's input was rejected for drift the train itself would have fixed)
-        log = chr(10).join(x for x in (regen_tree(PICK_WT), static_problems(PICK_WT, base, plan="off"),
-                                       *rules_gate.row_plan_problems(PICK_WT, base, WT, (q["row"],))) if x)
+        log = chr(10).join(x for x in (regen_tree(wt), static_problems(wt, base, plan="off"),
+                                       *rules_gate.row_plan_problems(wt, base, WT, (q["row"],))) if x)
         if log:
             return "pick check: gate red (['quality']): " + log[-1500:]
         entry["base"], entry["checks"] = base, PICK_CHECKS
-    if entry.get("built") != base:  # main moving under a row is what breaks its compile: one verdict per main
-        why = pick_build(base, merged, cache)
+    if build and not compiled_for(entry, base):
+        why = pick_build(base, merged, background)
         if why:
             return why
         entry["built"] = base
-        pick_checkout(merged)
     if not entry.get("reviewed"):
-        why = dup_reason(q, batch_review([q], cwd=PICK_WT, base=base))
+        why = dup_reason(q, batch_review([q], cwd=wt, base=base))
         if why:
             return "pick check: " + why
         entry["reviewed"] = True
@@ -2361,7 +2441,8 @@ def pick_accept_check(q: dict, base: str, run=None) -> dict | None:
     if merged is None or git("merge-base", "--is-ancestor", q["sha"], base, check=False).returncode == 0:
         return None
     files = git("diff", "--name-only", "--no-renames", base, merged).stdout.split()
-    tests = [t for t in owner_tests(parse_spec(git("show", f"{base}:{SPEC}").stdout), files) if t not in known_red()]
+    kr = known_red_tests()
+    tests = [t for t in owner_tests(parse_spec(git("show", f"{base}:{SPEC}").stdout), files) if t not in kr]
     v, t0 = {"row": q["row"], "base": base, "ok": True, "fails": [], "tests": tests, "log": "", "secs": 0,
              "send_secs": 0}, now()
     if tests:
@@ -2370,7 +2451,7 @@ def pick_accept_check(q: dict, base: str, run=None) -> dict | None:
         except NoVerdict as e:
             event("pick_accept", row=q["row"], ok=None, why=str(e)[-200:], tests=len(tests))
             return None
-        fails = sorted(set(res.get("fails") or []) - set(known_red()))
+        fails = sorted(set(res.get("fails") or []) - kr)
         v.update(ok=not fails, fails=fails, log=res.get("log", "") if fails else "", send_secs=res["send_secs"],
                  secs=round(now() - t0))
     event("pick_accept", row=q["row"], ok=v["ok"], tests=len(tests), fails=v["fails"][:5], secs=v["secs"],
@@ -2412,35 +2493,118 @@ def gate_reject(picks: list, rows: dict) -> set:
     return {q["sha"] for q, _ in bad}
 
 
-def pick_screen(picks: list, budget: float = float("inf")) -> set:
-    """Reject and dequeue the `picks` failing the pick check; their shas. A row with no verdict goes on to the gate."""
-    cache, t0, bad = load(PICK_CACHE, {}), now(), []
+def pick_screen(picks: list, budget: float = float("inf"), workers: int = PICK_PARALLEL) -> set:
+    """Reject and dequeue, in pick order, the `picks` failing the pick check; their shas."""
+    cache = load(PICK_CACHE, {})
     base = git("rev-parse", "main").stdout.strip()
-    bad = [(q, why) for q in picks if (why := pick_accept_red(q["sha"], base))]  # before the cached-pass skip
-    picks = [q for q in picks if q not in [b[0] for b in bad]]
-    todo = [q for q in picks if not (cache.get(q["sha"], {}).get("checks") == PICK_CHECKS
-                                     and cache[q["sha"]].get("built") == base and cache[q["sha"]].get("reviewed"))]
-    if todo and not main_static_clean(base, cache):
-        todo = []
-    for q in todo:
-        if now() - t0 > budget:
-            break
-        try:
-            why = pick_verdict(q, base, cache)
-        except Exception as e:  # noqa: BLE001 - no verdict
-            event("pick_error", row=q["row"], error=f"{type(e).__name__}: {str(e)[-300:]}")
-            continue
-        event("pick_check", row=q["row"], ok=not why)
-        if why:
-            bad.append((q, why))
-    shas = {q["sha"] for q, _ in bad}
+    bad = {q["sha"]: why for q in picks if (why := pick_accept_red(q["sha"], base))}  # before the cached-pass skip
+    todo = [q for q in picks if q["sha"] not in bad and not passed(cache.get(q["sha"], {}), base)]
+    if todo and main_static_clean(base, cache):
+        bad.update(pick_rows(todo, base, cache, now() + budget, workers))
     with lock("state"):
-        for q, why in bad:
-            reject(q, why, locked=True)
+        for q in picks:
+            if q["sha"] in bad:
+                reject(q, bad[q["sha"]], locked=True)
         queue = load("queue.json", [])
     live = {q["sha"] for q in queue} | {"_main"}
     save(PICK_CACHE, {k: v for k, v in cache.items() if k in live})
-    return shas
+    return set(bad)
+
+
+def pick_rows(todo: list, base: str, cache: dict, deadline: float, workers: int) -> dict:
+    """{sha: reason} of the failing `todo` rows, up to `workers` at once, each in its own PickSlot on a copy of
+    its cache entry; this thread alone writes `cache`, saved per verdict."""
+    slots = [pick_slot(i) for i in range(max(1, min(workers, len(todo))))]
+    for s in slots:  # serially: parallel worktree adds race
+        if not (s.wt / ".git").exists():
+            pick_checkout(base, s.wt)
+    free = SimpleQueue()
+    for s in slots:
+        free.put(s)
+    own = {q["sha"]: ({q["sha"]: dict(cache[q["sha"]])} if q["sha"] in cache else {}) for q in todo}
+
+    def check(q: dict) -> tuple:
+        """(started, reason) of row q in a free slot; an error is no verdict."""
+        if now() > deadline:
+            return False, ""
+        slot = free.get()
+        try:
+            return True, pick_verdict(q, base, own[q["sha"]], slot)
+        except Exception as e:  # noqa: BLE001 - no verdict
+            event("pick_error", row=q["row"], error=f"{type(e).__name__}: {str(e)[-300:]}")
+            return False, ""
+        finally:
+            free.put(slot)
+
+    bad = {}
+    with ThreadPoolExecutor(len(slots), thread_name_prefix="pick") as ex:
+        futures = {ex.submit(check, q): q for q in todo}
+        for f in as_completed(futures):
+            q = futures[f]
+            started, why = f.result()
+            if why:
+                bad[q["sha"]] = why
+                cache.pop(q["sha"], None)
+            if q["sha"] in own[q["sha"]] and not why:
+                cache[q["sha"]] = own[q["sha"]][q["sha"]]
+            if started:
+                event("pick_check", row=q["row"], ok=not why)
+            save(PICK_CACHE, cache)
+    return bad
+
+
+PRESCREEN_POLL = 60  # s between queue looks
+
+
+def owes_prescreen(entry: dict, head: str) -> bool:
+    """Static checks and review owed, or (head set) the compile on head."""
+    return not prescreened(entry) or bool(head) and not compiled_for(entry, head)
+
+
+def prescreen(skip, stop, poll: float = PRESCREEN_POLL, accepting=None, head=None) -> int:
+    """Warm the pick cache while a batch gates: queued rows outside `skip` that owe it, oldest first, until
+    `stop`. Static checks and review on main; in acceptance also the compile on the batch head, in the
+    background. Never a reject or a lock. Rows passed."""
+    accepting, head = accepting or in_acceptance, head or pick_accept_base
+    tried, red, n = set(), set(skip), 0  # tried: (sha, compile base)
+    while not stop.is_set():
+        try:
+            build = accepting()
+            base = head() if build else git("rev-parse", "main").stdout.strip()
+            at = base if build else ""
+            cache = load(PICK_CACHE, {})
+            q = next((x for x in sorted(load("queue.json", []), key=lambda x: x["ts"]) if x["sha"] not in red
+                      and (x["sha"], at) not in tried and owes_prescreen(cache.get(x["sha"], {}), at)), None)
+            if q is None:
+                stop.wait(poll)
+                continue
+            tried.add((q["sha"], at))
+            t0 = now()
+            why = pick_verdict(q, base, cache, pick_slot(0), build=build, background=True)
+            if why:
+                cache.pop(q["sha"], None)
+                red.add(q["sha"])
+            n += not why
+            event("pick_prescreen", row=q["row"], ok=not why, secs=round(now() - t0, 1), **({"built": at[:12]} if at else {}))
+            live = {x["sha"] for x in load("queue.json", [])} | {"_main"}
+            save(PICK_CACHE, {k: v for k, v in cache.items() if k in live})
+        except Exception as e:  # noqa: BLE001 - no verdict
+            event("pick_prescreen", ok=None, error=f"{type(e).__name__}: {str(e)[-300:]}")
+            stop.wait(poll)
+    return n
+
+
+@contextmanager
+def prescreening(batch: list):
+    """prescreen in a thread while `batch` gates; joined after the land."""
+    stop = threading.Event()
+    t = threading.Thread(target=prescreen, args=({q["sha"] for q in batch}, stop), name="prescreen", daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join()
 
 
 def train_once():
@@ -2492,31 +2656,37 @@ def train_once():
         t0 = now()
         event("train_start", rows=[q["row"] for q in batch])
         GREEN["head"] = ""
-        try:
-            landed = try_batch(batch, rows)
-        except ReviewUnavailable as e:  # never land unreviewed: keep every row queued, retry the batch later
-            event("review_deferred", rows=[q["row"] for q in batch], error=str(e)[-300:])
-            print(f"{iso()} train: reviewer unavailable, batch deferred", flush=True)
-            time.sleep(300)  # the loop calls train_once again; nothing was removed from the queue
-            return True
-        except quarantine.MainBroken as e:  # rows stay queued
-            print(f"{iso()} train: {e}", flush=True)
-            return True
-        if landed:
-            promote(landed)
-        with lock("state"):
-            queue = load("queue.json", [])
-            done = {q["sha"] for q in batch}
-            save("queue.json", [q for q in queue if q["sha"] not in done])
-        event("train_end", landed=sorted(landing_ids(landed)), tried=len(batch), secs=round(now() - t0))
-        for gen in ("dash.py",):  # dashboards are regenerated by the train, never by memory
-            if (HOME / gen).exists():
-                # run detached: a slow dashboard (15 min timeout) inside the train lock blocked every next batch
-                subprocess.Popen([*PY.split(), str(HOME / gen)], cwd=HOME, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 creationflags=NO_WINDOW)
-        print(f"{iso()} train: landed {len(landed)}/{len(batch)} in {round(now() - t0)}s", flush=True)
-        quarantine.release(sys.modules[__name__])
+        with prescreening(batch):
+            return land_batch(batch, rows, t0)
+
+
+def land_batch(batch: list, rows: dict, t0: float) -> bool:
+    """Gate, promote and dequeue the picked batch (the train lock is held)."""
+    try:
+        landed = try_batch(batch, rows)
+    except ReviewUnavailable as e:  # never land unreviewed: keep every row queued, retry the batch later
+        event("review_deferred", rows=[q["row"] for q in batch], error=str(e)[-300:])
+        print(f"{iso()} train: reviewer unavailable, batch deferred", flush=True)
+        time.sleep(300)  # the loop calls train_once again; nothing was removed from the queue
         return True
+    except quarantine.MainBroken as e:  # rows stay queued
+        print(f"{iso()} train: {e}", flush=True)
+        return True
+    if landed:
+        promote(landed)
+    with lock("state"):
+        queue = load("queue.json", [])
+        done = {q["sha"] for q in batch}
+        save("queue.json", [q for q in queue if q["sha"] not in done])
+    event("train_end", landed=sorted(landing_ids(landed)), tried=len(batch), secs=round(now() - t0))
+    for gen in ("dash.py",):  # dashboards are regenerated by the train, never by memory
+        if (HOME / gen).exists():
+            # run detached: a slow dashboard (15 min timeout) inside the train lock blocked every next batch
+            subprocess.Popen([*PY.split(), str(HOME / gen)], cwd=HOME, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=NO_WINDOW)
+    print(f"{iso()} train: landed {len(landed)}/{len(batch)} in {round(now() - t0)}s", flush=True)
+    quarantine.release(sys.modules[__name__])
+    return True
 
 
 def read_events() -> list:
