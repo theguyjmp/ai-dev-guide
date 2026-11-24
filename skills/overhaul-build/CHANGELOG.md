@@ -1,5 +1,12 @@
 # overhaul-build changelog
 
+## Per-file test targets move into their group target, 2026-11-24
+`rust_test_groups.py <repo>` moves every test file a branch still adds as its own `[[test]]` target (or no target builds)
+into its folder's group target: the root by the longest `<lead><area>` prefix its stem starts with, `mod <stem>;` in
+sorted place, its helper `mod x;` turned into `use crate::x;` (or dropped when unused), its `[[test]]` block gone, and a
+renamed file's old `mod` dropped. All or nothing, idempotent, line endings kept; it reuses rust_tests.targets/problem.
+Run it after merging a branch made before the grouping, before the checks. Tests: test_rust RustTestGroupsTest (4).
+
 ## Ranked owner search and per-phase packets, 2026-11-15
 `index_api.py --find "<purpose words>"` ranks the committed index lines for a search (builders use it instead of a raw grep; purpose tokens are computed, no longer stored in the index files, where they were 36% of the words). plan_validate reads work packets from ARCHITECTURE plus `[paths] packets` (default spec/packets/*.md) and no longer checks proven rows, whose packets the land deletes.
 

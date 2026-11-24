@@ -22,6 +22,7 @@ import entry_match  # noqa: E402
 import land  # noqa: E402
 import plan_validate as pv  # noqa: E402
 import rust_src  # noqa: E402
+import rust_test_groups  # noqa: E402
 import rust_tests  # noqa: E402
 
 HAVE_CARGO = shutil.which("cargo") is not None
@@ -284,6 +285,103 @@ class GroupedTargetsTest(unittest.TestCase):
             with self.subTest(what):
                 out = self.check(self.make(**files))
                 self.assertTrue(any("does not run the built binary" in p for p in out), out)
+
+
+class RustTestGroupsTest(unittest.TestCase):
+    """rust_test_groups: a per-file [[test]] target (or an untargeted test file) of a grouped folder moves into its
+    area's group root; all or nothing; idempotent; line endings kept."""
+
+    TOML = ROOT_TOML + ('\n[[test]]\nname = "acceptance_a"\npath = "tests/acceptance/group_a.rs"\n'
+                        '\n[[test]]\nname = "acceptance_b1"\npath = "tests/acceptance/group_b1.rs"\n'
+                        '\n[[test]]\nname = "property_a"\npath = "tests/property/group_a.rs"\n')
+    ROOT_A = "//! a\n\nmod entry;\n\nmod a01_one;\nmod a03_three;\n"
+    PROP_A = '//! a\n\n#[path = "../acceptance/entry/mod.rs"]\nmod entry;\n\nmod test_a01;\n'
+    USES = "//! doc\n\nmod entry;\n\n#[test]\nfn runs() {\n    entry::shop(&[]);\n}\n"
+    UNUSED = "//! doc\n\nmod entry;\n\n#[test]\nfn plain() {}\n"
+
+    def make(self, toml_extra="", **files):
+        d = Path(tempfile.mkdtemp(prefix="rs_groups_"))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        base = {"Cargo.toml": self.TOML + toml_extra, "tests/acceptance/entry/mod.rs": ENTRY,
+                "tests/acceptance/group_a.rs": self.ROOT_A, "tests/acceptance/group_b1.rs": "mod entry;\n\nmod b101_x;\n",
+                "tests/acceptance/a01_one.rs": "use crate::entry;\n", "tests/acceptance/a03_three.rs": "\n",
+                "tests/acceptance/b101_x.rs": "\n", "tests/property/group_a.rs": self.PROP_A,
+                "tests/property/test_a01.rs": "\n"}
+        base.update({k.replace("__", "/").replace("_DOT_", "."): v for k, v in files.items()})
+        for rel, text in base.items():  # bytes: LF on every platform, so the line-ending checks mean something
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_bytes(text.encode("utf-8"))
+        return d
+
+    @staticmethod
+    def own(rel):
+        return f'\n[[test]]\nname = "{Path(rel).stem}"\npath = "{rel}"\n'
+
+    def snapshot(self, d):
+        return {p.relative_to(d).as_posix(): p.read_bytes() for p in d.rglob("*") if p.is_file()}
+
+    def test_moves_into_the_longest_matching_group_and_is_idempotent(self):
+        d = self.make(self.own("tests/acceptance/a02_two.rs") + self.own("tests/acceptance/b102_y.rs"),
+                      tests__acceptance__a02_two_DOT_rs=self.USES, tests__acceptance__b102_y_DOT_rs=self.UNUSED)
+        res = rust_test_groups.convert(d)
+        self.assertEqual(res.refused, [])
+        self.assertEqual(res.lines(), ["moved tests/acceptance/a02_two.rs into tests/acceptance/group_a.rs (acceptance_a)",
+                                       "moved tests/acceptance/b102_y.rs into tests/acceptance/group_b1.rs (acceptance_b1)"])
+        self.assertEqual((d / "Cargo.toml").read_bytes().decode(), self.TOML)
+        self.assertEqual((d / "tests/acceptance/group_a.rs").read_bytes().decode(),
+                         "//! a\n\nmod entry;\n\nmod a01_one;\nmod a02_two;\nmod a03_three;\n")
+        self.assertEqual((d / "tests/acceptance/a02_two.rs").read_bytes().decode(),
+                         self.USES.replace("mod entry;", "use crate::entry;"))
+        self.assertEqual((d / "tests/acceptance/b102_y.rs").read_bytes().decode(), "//! doc\n\n#[test]\nfn plain() {}\n")
+        table = rust_tests.targets(d)
+        self.assertEqual(table["tests/acceptance/b102_y.rs"], rust_tests.Target("acceptance_b1", "b102_y"))
+        before = self.snapshot(d)
+        again = rust_test_groups.convert(d)
+        self.assertEqual((again.lines(), again.changed), ([], []))
+        self.assertEqual(self.snapshot(d), before)
+
+    def test_path_helper_lead_rename_and_untargeted_file(self):
+        prop = '#[path = "../acceptance/entry/mod.rs"]\nmod entry;\n\n#[test]\nfn p() {\n    entry::shop(&[]);\n}\n'
+        d = self.make(self.own("tests/property/test_a02.rs"), tests__property__test_a02_DOT_rs=prop,
+                      tests__acceptance__a05_new_DOT_rs="#[test]\nfn n() {}\n")
+        (d / "tests/acceptance/a03_three.rs").unlink()  # renamed to a05_new: its file is gone, the new one untargeted
+        res = rust_test_groups.convert(d)
+        self.assertEqual(res.refused, [])
+        self.assertIn("dropped mod a03_three; from tests/acceptance/group_a.rs (its file is gone)", res.lines())
+        self.assertEqual((d / "tests/property/test_a02.rs").read_bytes().decode(), prop.replace(
+            '#[path = "../acceptance/entry/mod.rs"]\nmod entry;', "use crate::entry;"))
+        self.assertEqual((d / "tests/property/group_a.rs").read_bytes().decode(), self.PROP_A + "mod test_a02;\n")
+        self.assertEqual((d / "tests/acceptance/group_a.rs").read_bytes().decode(),
+                         "//! a\n\nmod entry;\n\nmod a01_one;\nmod a05_new;\n")
+        self.assertEqual([rust_tests.problem(r, rust_tests.targets(d)) for r in
+                          ("tests/acceptance/a05_new.rs", "tests/property/test_a02.rs")], ["", ""])
+
+    def test_refusals_write_nothing(self):
+        cases = {"no group root matches its name": (self.own("tests/acceptance/c01_z.rs"),
+                                                    {"tests__acceptance__c01_z_DOT_rs": "\n"}),
+                 "its [[test]] block sets harness": (self.own("tests/acceptance/a02_two.rs") + "harness = false\n",
+                                                     {"tests__acceptance__a02_two_DOT_rs": "\n"}),
+                 "declares `mod util;`": (self.own("tests/acceptance/a02_two.rs"),
+                                          {"tests__acceptance__a02_two_DOT_rs": "mod util;\n"})}
+        for why, (extra, files) in cases.items():
+            with self.subTest(why):
+                d = self.make(extra, tests__acceptance__a09_ok_DOT_rs="\n", **files)
+                before = self.snapshot(d)
+                res = rust_test_groups.convert(d)
+                self.assertTrue(any(why in r for r in res.refused), res.refused)
+                self.assertEqual((res.moved, res.changed), ([], []))
+                self.assertEqual(self.snapshot(d), before)
+
+    def test_line_endings_kept(self):
+        d = self.make(self.own("tests/acceptance/a02_two.rs"), tests__acceptance__a02_two_DOT_rs=self.USES)
+        for rel in ("Cargo.toml", "tests/acceptance/group_a.rs", "tests/acceptance/a02_two.rs"):
+            (d / rel).write_bytes((d / rel).read_bytes().replace(b"\n", b"\r\n"))
+        rust_test_groups.convert(d)
+        root = (d / "tests/acceptance/group_a.rs").read_bytes().decode()
+        self.assertIn("mod a02_two;\r\n", root)
+        self.assertEqual(root.count("\n"), root.count("\r\n"))
+        self.assertIn(b"use crate::entry;\r\n", (d / "tests/acceptance/a02_two.rs").read_bytes())
+        self.assertEqual((d / "Cargo.toml").read_bytes().decode(), self.TOML.replace("\n", "\r\n"))
 
 
 class ProbeTestsTest(unittest.TestCase):
