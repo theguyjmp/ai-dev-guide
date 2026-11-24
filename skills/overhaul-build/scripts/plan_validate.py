@@ -86,6 +86,7 @@ from pathlib import Path
 
 import anchors  # beside this script
 import drive  # beside this script: parse_needs, the one reading of the needs cell
+import rust_tests  # beside this script: the one map of Rust test files to cargo test targets
 import entry_match  # beside this script
 import rust_src  # beside this script
 os.environ.setdefault("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")  # no .proptest-regressions files (vc1)
@@ -332,26 +333,17 @@ def proptest_tests(path):
 
 
 def cargo_test_targets(repo):
-    """{path: name} of the root Cargo.toml `[[test]]` targets."""
-    import tomllib
-    try:
-        conf = tomllib.loads((Path(repo) / "Cargo.toml").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return {str(t.get("path", "")).replace("\\", "/").removeprefix("./"): str(t.get("name", ""))
-            for t in conf.get("test") or [] if isinstance(t, dict)}
+    """{path: rust_tests.Target} of the Rust test files the root Cargo.toml builds (own [[test]] or group module)."""
+    return rust_tests.targets(repo)
 
 
 def cargo_target_problem(rel, targets):
-    """A problem line when the Rust test file `rel` is not a [[test]] named after its stem, else ''."""
-    stem = Path(rel).stem
-    if targets.get(rel) == stem:
-        return ""
-    return f'{rel} is not a cargo test target: add [[test]] name = "{stem}" path = "{rel}" to the root Cargo.toml'
+    """A problem line when the Rust test file `rel` is built by no test target, else ''."""
+    return rust_tests.problem(rel, targets)
 
 
 def check_cargo_targets(rows, repo, problems, flabel):
-    """Every .rs acceptance file is a root Cargo.toml [[test]] named after its stem (the `{stem}` placeholder)."""
+    """Every .rs acceptance file is built by a test target: its own [[test]] or a group root's module (rust_tests)."""
     targets, seen = cargo_test_targets(repo), set()
     for r in rows:
         for item in (bare(x) for x in r["acceptance"].split(";")):

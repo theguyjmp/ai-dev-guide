@@ -12,7 +12,8 @@ Rust acceptance tests (`tests/acceptance/<f>.rs::<fn>`, read by rust_src.py, bes
 call or array literal in the named `fn`s, and a `.arg(..)`/`.args([..])` chain counts as one argument list, so
 `run_cli(&dir, &["cart", "add", "MUG1", "2"])` and `Command::new(bin).arg("cart").arg("add")` both match. A CLI row's
 test file, or a `mod x;` helper beside it, must also run the built binary: `env!("CARGO_BIN_EXE_<bin>")` (or
-assert_cmd's `cargo_bin(`). Library entry `lib: <crate>::<path>::<fn>` (Rust only): some call's path must be a
+assert_cmd's `cargo_bin(`). A test file that is a module of a group target (rust_tests.py) reaches its helper through
+`use crate::x;` instead, which counts only when its own group root declares `mod x;`. Library entry `lib: <crate>::<path>::<fn>` (Rust only): some call's path must be a
 suffix of it by whole `::` segments, and a call shorter than the full path needs a `use` of the crate in the file.
 """
 import ast
@@ -20,6 +21,7 @@ import functools
 import re
 
 import rust_src  # beside this script
+import rust_tests  # beside this script: which group root builds a grouped test file
 
 HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
 ANY = object()  # a call argument that is not a string literal
@@ -159,9 +161,9 @@ def rust_uses(toks):
 
 
 def read_calls(repo, r):
-    """(every call inside a row's acceptance tests, crates the Rust files `use`, the text of each Rust test file
-    and of the `mod x;` helpers beside it)."""
-    calls, uses, rust_text = [], set(), []
+    """(every call inside a row's acceptance tests, crates the Rust files `use`, [(path, tokens, text)] of each Rust
+    test file read)."""
+    calls, uses, rust_files = [], set(), []
     names = {name for _, name in r.get("tests") or []}
     for path in sorted({item.split("::")[0] for item, _ in r.get("tests") or []}):
         try:
@@ -174,19 +176,38 @@ def read_calls(repo, r):
                 if f["name"] in names and f["body"]:
                     calls += rust_src.calls(toks, *f["body"])
             uses |= rust_uses(toks)
-            rust_text.append(text)
-            here = (repo / path).parent
-            for mod in rust_src.mod_decls(toks):
-                for helper in (here / f"{mod}.rs", here / mod / "mod.rs"):
-                    if helper.is_file():
-                        rust_text.append(helper.read_text(encoding="utf-8", errors="replace"))
+            rust_files.append((path, toks, text))
             continue
         try:
             tree = ast.parse(text)
         except (SyntaxError, ValueError):
             continue
         calls += list(test_calls(tree, names))
-    return calls, uses, rust_text
+    return calls, uses, rust_files
+
+
+def helper_files(repo, rel, toks, table):
+    """The helper module files the Rust test file `rel` (its tokens `toks`) reaches: a `mod x;` it declares (x.rs or
+    x/mod.rs beside it), and, when it is a module of a group target (rust_tests `table`), each `use crate::x` that its
+    own group root declares as `mod x;` (beside the root). A `use crate::x` the root does not declare reaches nothing."""
+    found = [((repo / rel).parent, m) for m in rust_src.mod_decls(toks)]
+    root = rust_tests.root_of(table, rel)
+    if root:
+        try:
+            declared = set(rust_src.mod_decls(rust_src.tokens((repo / root).read_text(encoding="utf-8", errors="replace"))))
+        except OSError:
+            declared = set()
+        found += [((repo / root).parent, m) for m in rust_src.crate_uses(toks) if m in declared]
+    return [p for here, m in found for p in (here / f"{m}.rs", here / m / "mod.rs") if p.is_file()]
+
+
+def binary_texts(repo, rust_files, table):
+    """The text of each Rust test file and of every helper module it reaches (helper_files)."""
+    out = []
+    for rel, toks, text in rust_files:
+        out.append(text)
+        out += [p.read_text(encoding="utf-8", errors="replace") for p in helper_files(repo, rel, toks, table)]
+    return out
 
 
 RUNS_BINARY = re.compile(r"CARGO_BIN_EXE_|cargo_bin\s*\(")
@@ -195,21 +216,23 @@ RUNS_BINARY = re.compile(r"CARGO_BIN_EXE_|cargo_bin\s*\(")
 def entry_problems(repo, rows, flabel):
     """Rows whose acceptance tests never invoke the row's entry, as plan_validate problem lines."""
     problems = []
+    table = rust_tests.targets(repo)  # once per plan: every grouped test file's group root
     for r in rows:
         kind, parts = tokens(r.get("entry", ""))
         if not kind or not parts or not r.get("tests"):
             continue
-        calls, uses, rust_text = read_calls(repo, r)
-        if kind == "lib" and not rust_text:
+        calls, uses, rust_files = read_calls(repo, r)
+        if kind == "lib" and not rust_files:
             continue  # a library entry is checked in Rust tests only
         where = f"{flabel}:{r.get('line', '?')}: {r.get('id', '?')}"
         ok, hint = matches(kind, calls, parts, uses)
         if not ok:
             problems.append(f"{where} acceptance never invokes its entry "
                             f"`{r['entry'].strip().strip('`')}`{hint}: drive the exact entry, or fix the row")
-        if kind == "cli" and rust_text and not any(RUNS_BINARY.search(t) for t in rust_text):
+        if kind == "cli" and rust_files and not any(RUNS_BINARY.search(t) for t in binary_texts(repo, rust_files, table)):
             problems.append(f"{where} acceptance does not run the built binary: drive the CLI through "
-                            'env!("CARGO_BIN_EXE_<bin>") in the test file or its `mod` helper')
+                            'env!("CARGO_BIN_EXE_<bin>") in the test file or its `mod` helper (in a group target: '
+                            "a `use crate::<helper>;` its group root declares as `mod <helper>;`)")
     return problems
 
 

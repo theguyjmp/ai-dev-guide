@@ -22,6 +22,7 @@ import entry_match  # noqa: E402
 import land  # noqa: E402
 import plan_validate as pv  # noqa: E402
 import rust_src  # noqa: E402
+import rust_tests  # noqa: E402
 
 HAVE_CARGO = shutil.which("cargo") is not None
 FAST = "exit 0"
@@ -208,6 +209,81 @@ class RustPathsTest(unittest.TestCase):
         out = entry_match.entry_problems(d, bad, "F")
         self.assertTrue(any("does not run the built binary" in p for p in out), out)
         self.assertEqual(len(out), 2, out)
+
+
+GROUP_ROOT = '//! Acceptance tests: one target, one module per test file.\n\nmod entry;\n\nmod sum;\nmod sub;\n'
+GROUPED_SUM = SUM.replace("mod entry;", "use crate::entry;")
+GROUPED_TOML = ROOT_TOML + ('\n[[test]]\nname = "acceptance"\npath = "tests/acceptance/group.rs"\n'
+                            '\n[[test]]\nname = "add"\npath = "tests/acceptance/add.rs"\n')
+
+
+class GroupedTargetsTest(unittest.TestCase):
+    """rust_tests (a test file is its own [[test]] or a module of a group root) and the built-binary check through
+    a group root's helper module."""
+
+    def make(self, **files):
+        d = Path(tempfile.mkdtemp(prefix="rs_group_"))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        base = {"Cargo.toml": GROUPED_TOML, "tests/acceptance/group.rs": GROUP_ROOT,
+                "tests/acceptance/entry/mod.rs": ENTRY, "tests/acceptance/sum.rs": GROUPED_SUM,
+                "tests/acceptance/sub.rs": "#[test]\nfn subs() {}\n", "tests/acceptance/add.rs": ADD}
+        base.update({k.replace("__", "/").replace("_DOT_", "."): v for k, v in files.items()})
+        write(d, base)
+        return d
+
+    def test_targets_map_both_layouts(self):
+        table = rust_tests.targets(self.make())
+        self.assertEqual(table["tests/acceptance/add.rs"], rust_tests.Target("add"))
+        self.assertEqual(table["tests/acceptance/group.rs"], rust_tests.Target("acceptance"))
+        self.assertEqual(table["tests/acceptance/sum.rs"], rust_tests.Target("acceptance", "sum"))
+        self.assertNotIn("tests/acceptance/entry/mod.rs", table)  # a helper directory module is no test file
+        self.assertEqual(rust_tests.root_of(table, "tests/acceptance/sum.rs"), "tests/acceptance/group.rs")
+        self.assertEqual(rust_tests.root_of(table, "tests/acceptance/add.rs"), "")
+        self.assertEqual(rust_tests.root_of(table, "tests/acceptance/none.rs"), "")
+
+    def test_target_names_and_filters(self):
+        own, mod = rust_tests.Target("add"), rust_tests.Target("acceptance", "sum")
+        self.assertEqual((own.test("adds_two"), own.filter, own.fn("adds_two")), ("adds_two", "", "adds_two"))
+        self.assertEqual((mod.test("sums_two"), mod.filter, mod.fn("sum::sums_two")),
+                         ("sum::sums_two", "sum::", "sums_two"))
+        self.assertEqual(rust_tests.target_of({}, "./tests/acceptance/x.rs"), rust_tests.Target("x"))
+
+    def test_problem_names_the_group_root_or_the_missing_target(self):
+        table = rust_tests.targets(self.make())
+        self.assertEqual(rust_tests.problem("tests/acceptance/sum.rs", table), "")
+        self.assertEqual(rust_tests.problem("tests/acceptance/mul.rs", table),
+                         "tests/acceptance/mul.rs is not a cargo test module: declare `mod mul;` in its area's "
+                         "group root (tests/acceptance/group.rs)")
+        self.assertEqual(rust_tests.problem("tests/other/mul.rs", table),
+                         'tests/other/mul.rs is not a cargo test target: add [[test]] name = "mul" '
+                         'path = "tests/other/mul.rs" to the root Cargo.toml')
+
+    def test_crate_uses(self):
+        toks = rust_src.tokens('use crate::entry;\nuse crate::{fixtures::load, entry};\nuse std::fs;\n'
+                               'let s = "use crate::fake";\n')
+        self.assertEqual(rust_src.crate_uses(toks), ["entry", "fixtures"])
+
+    def check(self, d):
+        row = {"line": 3, "id": "F02", "entry": "`cli: shop sum A B`",
+               "tests": [("tests/acceptance/sum.rs::sums_two", "sums_two")]}
+        return entry_match.entry_problems(d, [row], "F")
+
+    def test_grouped_file_runs_the_binary_through_its_group_roots_helper(self):
+        self.assertEqual(self.check(self.make()), [])
+
+    def test_grouped_binary_check_stays_strict(self):
+        cases = {"the root does not declare the helper": {"tests__acceptance__group_DOT_rs": GROUP_ROOT.replace(
+                     "mod entry;\n", "")},
+                 "the file does not use the helper": {"tests__acceptance__sum_DOT_rs": GROUPED_SUM.replace(
+                     "use crate::entry;", "use crate::sub;")},
+                 "the helper does not run the binary": {"tests__acceptance__entry__mod_DOT_rs": ENTRY.replace(
+                     'env!("CARGO_BIN_EXE_shop")', '"shop"')},
+                 "the file is no module of the root": {"tests__acceptance__group_DOT_rs": GROUP_ROOT.replace(
+                     "mod sum;\n", "")}}
+        for what, files in cases.items():
+            with self.subTest(what):
+                out = self.check(self.make(**files))
+                self.assertTrue(any("does not run the built binary" in p for p in out), out)
 
 
 class ProbeTestsTest(unittest.TestCase):

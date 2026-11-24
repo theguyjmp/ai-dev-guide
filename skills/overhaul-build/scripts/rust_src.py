@@ -237,3 +237,27 @@ def mod_decls(toks):
     """Names of `mod x;` declarations (out-of-line modules)."""
     return [toks[i + 1][1] for i in range(len(toks) - 2)
             if toks[i][1] == "mod" and toks[i + 1][0] == "ident" and toks[i + 2][1] == ";"]
+
+
+def crate_uses(toks):
+    """First path segments a `use crate::` names, in order, once each: `use crate::entry;`,
+    `use crate::entry::run;` and `use crate::{entry, fixtures::load};` name entry (and fixtures)."""
+    out = {}
+    for i in range(len(toks) - 3):
+        if not (toks[i][:2] == ("ident", "use") and toks[i + 1][:2] == ("ident", "crate") and toks[i + 2][1] == "::"):
+            continue
+        if toks[i + 3][0] == "ident":
+            out[toks[i + 3][1]] = None
+        elif toks[i + 3][1] == "{":
+            depth = 0
+            for k in range(i + 3, len(toks)):
+                kind, text = toks[k][:2]
+                if text == "{":
+                    depth += 1
+                elif text == "}":
+                    depth -= 1
+                    if not depth:
+                        break
+                elif depth == 1 and kind == "ident" and toks[k - 1][1] in ("{", ","):
+                    out[text] = None
+    return list(out)
