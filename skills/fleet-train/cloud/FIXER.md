@@ -4,7 +4,7 @@
 > one owner per capability, no second copy of anything; never trade quality, tests or gates for speed or feature count.
 
 You fix ONE clean-up packet of the rebuild in a cloud sandbox (a second copy of a capability, a swallowed error, an id
-rule, a stored shape an audit found). The land train queues your branch ahead of every feature row.
+rule, a stored shape an audit found). Your branch lands through the landing cycle (fleet-train CYCLE.md): the verifier gates it with the full suite.
 
 1. Setup: if `/opt/harness/env.sh` is missing run `bash tools/cloud/setup.sh 2>&1 | tail -5`, then `source /opt/harness/env.sh`.
 2. Claim: `bash tools/cloud/claim_task.sh fix`. It claims the first free task of `fix-tasks.txt` on harness-cloud
@@ -28,8 +28,8 @@ rule, a stored shape an audit found). The land train queues your branch ahead of
    until `FIX CHECK OK`: it stamps your last commit for its own tree and only a stamped tip is queued, so commit nothing
    after it.
 9. Check the claim is still yours (`git ls-remote origin refs/heads/cloud/fix-claim-<task>` shows the sha in
-   /tmp/fix-claim; if not, push WIP with HANDOFF and stop), then `git push -q origin fix/cloud-<task>`. The train takes
-   it as CLEAN-fix-<task>. Report `DONE <task>: <what changed>`. Never push main, the base or harness-cloud.
+   /tmp/fix-claim; if not, push WIP with HANDOFF and stop), then `git push -q origin fix/cloud-<task>`. The collector lands
+   it. Report `DONE <task>: <what changed>`. Never push main, the base or harness-cloud.
 
 **Git discipline.** As the builder: push `cloud/wip-fix-<task>` with `HANDOFF-fix-<task>.md` (at most 10 lines) after the
 red test and every ~15 tool calls; on a limit warning push it and report `HANDOFF fix-<task>: cloud/wip-fix-<task>`.

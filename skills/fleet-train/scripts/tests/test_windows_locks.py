@@ -1,14 +1,15 @@
 """Windows lock and reject-reason fixes from a node pilot: a lock is released only by the process that holds it (a
-train_error cleanup had deleted another process's live state lock), a PermissionError on a lock file being deleted is
-contention, not a crash, a lock timeout names the holder, CargoSlots retries os.replace while a reader holds the file,
-and a unit-red reject reason ends with the failing tests' names (a 6000-char tail had cut them off).
+train_error cleanup had deleted another process's live state lock) and is broken at once when its holder process is
+gone (a waiter once sat hours behind a killed holder), a PermissionError on a lock file being deleted is contention,
+not a crash, a lock timeout names the holder, CargoSlots retries os.replace while a reader holds the file, and a
+unit-red reject reason ends with the failing tests' names (a 6000-char tail had cut them off).
 Temp state only.
 
   py -3 tests/test_windows_locks.py
 """
 from __future__ import annotations
 
-import os, sys, tempfile
+import os, subprocess, sys, tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -43,14 +44,42 @@ def test_release_only_own():
     check("lock() releases on exit", not p.exists())
 
 
+def dead_pid() -> int:
+    """The pid of a process that has exited."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
 def test_timeout_names_holder():
     p = h.ST / "train.lock"
-    p.write_text("4242", encoding="utf-8")
+    live = os.getppid()  # a running process that is not this one
+    p.write_text(str(live), encoding="utf-8")
     try:
         with h.lock("train", wait=0):
             check("held lock times out", False)
     except TimeoutError as e:
-        check("timeout names the holder pid", "4242" in str(e), str(e))
+        check("timeout names the holder pid", str(live) in str(e), str(e))
+    p.unlink()
+
+
+def test_dead_holder_breaks_at_once():
+    p = h.ST / "train.lock"
+    p.write_text(str(dead_pid()), encoding="utf-8")  # fresh mtime: only the dead holder can free it
+    with h.lock("train", wait=0):
+        check("a lock whose holder is gone is taken at once", h.lock_holder("train") == str(os.getpid()))
+    check("no aside file is left", not list(h.ST.glob("train.lock.dead-*")))
+
+
+def test_unknown_holder_stays_held():
+    p = h.ST / "train.lock"
+    p.write_text(str(dead_pid()), encoding="utf-8")
+    with mock.patch.object(h, "pid_state", lambda pid: None):  # the probe failed: no evidence the holder is gone
+        try:
+            with h.lock("train", wait=0):
+                check("a lock is broken only on evidence its holder is gone", False)
+        except TimeoutError:
+            check("a failed probe leaves the lock held", p.exists())
     p.unlink()
 
 
@@ -90,8 +119,8 @@ def test_unit_red_log_names_tests():
     check("no failures: plain tail", h.unit_red_log("plain output") == "plain output")
 
 
-for t in (test_release_only_own, test_timeout_names_holder, test_permission_error_is_contention,
-          test_cargo_replace_retry, test_unit_red_log_names_tests):
+for t in (test_release_only_own, test_timeout_names_holder, test_dead_holder_breaks_at_once, test_unknown_holder_stays_held,
+          test_permission_error_is_contention, test_cargo_replace_retry, test_unit_red_log_names_tests):
     t()
 print(f"{len(FAILS)} failed" if FAILS else "all passed")
 sys.exit(1 if FAILS else 0)

@@ -1,8 +1,8 @@
 # Cloud builder brief (one session, one row)
 
 You are a builder for the rebuild (Rust workspace), running in a cloud sandbox. One row, end to end, then stop.
-The train machine hands out rows on branch `harness-cloud` and collects your pushed branch every 5 minutes; its land
-train is the only thing that touches `main`. This mirrors the local builder brief (fleet-train `builders.js`); same rules.
+The harness machine hands out rows on branch `harness-cloud` and collects your pushed branch every 5 minutes; only
+the verifier of the landing cycle (fleet-train CYCLE.md) ever moves `main`. This mirrors the local builder brief (fleet-train `builders.js`); same rules.
 
 Every Bash call: `cd <repo root> && source /opt/harness/env.sh && ...` (the shell keeps neither cwd nor env).
 
@@ -23,7 +23,7 @@ Every Bash call: `cd <repo root> && source /opt/harness/env.sh && ...` (the shel
 5. **Done** = the row's acceptance tests pass: `cargo test -q --test <stem> -- --exact <test_name>` for each test in
    `tests` (add `--release` if a debug run takes over 3 min). Then strict clippy for each crate you touched:
    `cargo clippy -q -p <crate> --all-targets -- -D warnings -D clippy::too_many_lines -D clippy::unwrap_used -D clippy::cognitive_complexity`.
-   Do NOT run the whole workspace test suite: the land train does that once per batch.
+   Do NOT run the whole workspace test suite: the verifier's sharded full gate does that.
 6. **Rules.** Never edit the status column of spec/FUNCTIONS.md; never edit or weaken acceptance tests of other rows;
    edit this row's own test only if it contradicts the row's spec text, and say why in the commit message. No new
    `[[test]]` entries for other rows. No sleeping or polling.
@@ -34,7 +34,7 @@ Every Bash call: `cd <repo root> && source /opt/harness/env.sh && ...` (the shel
    lists the functions you added. If it lists any, run the duplicate review in `tools/cloud/review_prompt.md` with
    `{added}` replaced by that list: start ONE subagent with that text (or do it yourself if you cannot), fix every
    duplicate it reports (call the owner instead, delete your copy), re-run the tests, commit, and review again until
-   it reports none (at most 2 rounds). The land train runs the same reviewer and rejects anything it lists.
+   it reports none (at most 2 rounds). The verifier runs the same reviewer and reverts anything it lists.
 7b. **Rebase before push.** `git fetch -q origin cloud-base && git rebase origin/cloud-base`; resolve conflicts keeping both
    sides' behaviour, re-run the row's tests if anything changed. A row that merges clean never waits on a rebaser.
 8. **Push.** Re-run the `rules_gate.py check` command from `must_also_before_commit` (it must print RULES OK), then

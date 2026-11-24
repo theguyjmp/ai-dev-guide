@@ -1,5 +1,8 @@
 # Cloud rebaser brief (one session, up to 4 rows)
 
+RETIRED with the land train: under the landing cycle (fleet-train CYCLE.md) a push that conflicts goes back to its
+writer with the reason, so nothing waits in a queue to be rebased. Do not schedule this routine; kept for old queues.
+
 The land train merges queued rows onto `main` in batches. A queued row that no longer merges cleanly is pushed as
 `cloud/rebase-<row>`. Rebase it onto the current `cloud-base` (= the train's main) so the train merges it clean.
 A CLEAN-* row is never yours: its fix lane owns and restacks it. Skip any `cloud/rebase-CLEAN-*` ref.

@@ -119,10 +119,68 @@ def release_lock(name: str) -> None:
     event("lock_release_failed", lock=name)
 
 
+LOCK_PROBE_SECS = 5.0  # a waiter asks whether the holder still runs at most this often
+
+
+def pid_state(pid: int) -> bool | None:
+    """The one process probe: True runs, False gone (positive evidence only), None unknown (the probe failed)."""
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return None
+        return True
+    try:
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"], capture_output=True, text=True,
+                           timeout=30, creationflags=NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode or not r.stdout.strip():
+        return None
+    return f'"{pid}"' in r.stdout
+
+
+def pid_alive(pid: int) -> bool:
+    return pid_state(pid) is True
+
+
+def _break_dead(p: Path, stale: float, probe: bool = True) -> bool:
+    """Take a dead lock out of the way: its holder pid is gone (probe: dead at once, not after the age limit), or it
+    is older than `stale` (a hung holder). The file moves aside and goes back if it changed since it was read, so two
+    waiters never both break it. True when p is gone."""
+    try:
+        seen, age = p.read_text(encoding="utf-8").strip(), now() - p.stat().st_mtime
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if age <= stale and not (probe and seen.isdigit() and pid_state(int(seen)) is False):
+        return False
+    aside = p.with_name(f"{p.name}.dead-{os.getpid()}-{threading.get_ident()}")
+    try:
+        os.replace(p, aside)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    try:
+        if aside.read_text(encoding="utf-8").strip() != seen:  # replaced since read: a live holder's lock
+            os.rename(aside, p)
+            return False
+    except OSError:
+        pass
+    aside.unlink(missing_ok=True)
+    return True
+
+
 @contextmanager
 def lock(name: str, wait: float = 600):
     p = ST / f"{name}.lock"
-    t0 = now()
+    t0, probed = now(), None
     while True:
         try:
             fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -130,14 +188,10 @@ def lock(name: str, wait: float = 600):
             os.close(fd)
             break
         except (FileExistsError, PermissionError):  # Windows: the holder's unlink is pending
-            try:
-                if now() - p.stat().st_mtime > (120 if name == "state" else 3600):  # stale (state sections are short)
-                    p.unlink(missing_ok=True)
-                    continue
-            except FileNotFoundError:
+            probe = probed is None or now() - probed >= LOCK_PROBE_SECS
+            probed = now() if probe else probed
+            if _break_dead(p, 120 if name == "state" else 3600, probe):  # stale (state sections are short)
                 continue
-            except PermissionError:
-                pass
             if now() - t0 > wait:
                 raise TimeoutError(f"{name} lock held by pid {lock_holder(name) or '?'} for over {wait:.0f}s")
             time.sleep(0.5)
@@ -2295,18 +2349,6 @@ def proc_start(pid: int) -> str:
         sys.path.insert(0, QS)
     import drivelock
     return drivelock.proc_start(pid) or ""
-
-
-def pid_alive(pid: int) -> bool:
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
-    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"], capture_output=True, text=True,
-                         creationflags=NO_WINDOW).stdout
-    return f'"{pid}"' in out
 
 
 def in_acceptance() -> bool:

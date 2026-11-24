@@ -1,7 +1,7 @@
 # Continue the cloud fleet on another account
 
 ## What keeps running with no cloud usage
-- On the train machine: the land train, `cloud.py collect` every 5 minutes (refreshes `cloud-base`, collects cloud
+- On the harness machine: the verifier (fleet-train CYCLE.md), `cloud.py collect` every 5 minutes (refreshes `cloud-base`, collects cloud
   branches, releases stale claims, keeps HARNESS_CLOUD_TARGET rows assigned), and any notifier.
 - On the git host: every session's work is on `cloud/<row>` (done), `cloud/wip-<row>` (in progress, with
   `HANDOFF-<row>.md`) or `plan/cloud-<phase>` (planner output); assignments are on branch `harness-cloud`
@@ -16,4 +16,4 @@
    For planners use the same first line and `PLANNER.md` (claims a phase from plan-tasks.txt, pushes `plan/cloud-<phase>`).
 3. Stale claims: `cloud.py collect` releases a claim silent for HARNESS_CLOUD_TTL (default 2 h). To free one at once:
    `git push origin :refs/heads/cloud/claim-<row>`. The next session resumes from `cloud/wip-<row>` (claim.sh prints RESUMED).
-4. Nothing changes on the train machine: collect picks up pushes from any account.
+4. Nothing changes on the harness machine: collect picks up pushes from any account.
