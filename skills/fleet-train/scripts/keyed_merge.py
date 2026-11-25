@@ -1,24 +1,14 @@
-"""The `keyed` git merge driver: a three-way merge of a structured spec file unit by unit (a table row, a bullet, a
-Cargo `[[test]]` entry), so two branches that each add or edit their own units never conflict.
+"""`keyed` git merge driver: three-way merge of a spec file unit by unit, so branches editing their own units never
+conflict.
 
   .gitattributes:  spec/FUNCTIONS.md merge=keyed
-  .git/config:     merge.keyed.driver = py -3 <harness>/keyed_merge.py %O %A %B %L %P   (harness.ensure_merge_drivers)
+  .git/config:     merge.keyed.driver = py -3 <harness>/keyed_merge.py %O %A %B %L %P
 
-A file splits into ordered units (SPLITTERS, by extension):
-  .md    a table row is one unit keyed by its first cell within its table (heading and header line); a table's header
-         and separator line are one unit; a bullet with its indented continuation lines is one unit; any other line is
-         one unit.
-  .toml  a `[[test]]` block through its trailing blank lines is one unit keyed by its `name`; any other line is one.
-Keyed units match the base by key, the others align by content between them (an equal-length run of changed unkeyed
-units is an edit of each). Per base unit, a change on one side wins; both sides changing it differently (edit vs edit,
-edit vs delete) leaves conflict markers around that unit only. An added unit goes after the unit before it on its
-side, ours before theirs at one spot; a key both sides add with different text, or both sides replacing the same spot
-with different units, is a conflict there, never two units. Exit 0 clean, 1 with conflicts.
-
-A key a file holds twice (a row id listed twice) is keyed by its occurrence. Anything the units cannot express
-(another extension, conflict markers in an input, a keyed unit that moved, a result holding a key more often than
-an input, any error) falls back to git's text merge and its status (lineset_merge.text_merge). Where the driver is not
-configured (a cloud clone) git uses its text merge by itself.
+Units (SPLITTERS): a .md table row keyed by its first cell within its table, a bullet with its continuation lines, any
+other line; a .toml `[[test]]` block keyed by `name`. Per base unit one side's change wins; differing changes
+conflict on that unit only. Added units follow their predecessor, ours first; a key both sides add differently
+conflicts. Exit 0 clean, 1 with conflicts. A moved key, input markers, a duplicated key or an error falls back to
+git's text merge.
 """
 from __future__ import annotations
 
@@ -38,18 +28,18 @@ Lines = tuple[str, ...]
 
 @dataclass(frozen=True)
 class Unit:
-    key: Key | None  # None: an unkeyed unit, aligned by its content
+    key: Key | None  # None: aligned by content
     lines: Lines
 
 
 class Unmergeable(Exception):
-    """The input does not split into units with unique keys; git's text merge decides."""
+    """git's text merge decides."""
 
 
 HEADING = re.compile(r"#{1,6}\s")
 SEPARATOR = re.compile(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
 BULLET = re.compile(r"([-*+]|\d+[.)])\s")
-MARKER = re.compile(r"(<{7,}|>{7,})( |$)|={7,}$")  # an inner merge of a criss-cross writes longer ones
+MARKER = re.compile(r"(<{7,}|>{7,})( |$)|={7,}$")  # criss-cross merges nest longer ones
 TEST_NAME = re.compile(r'name\s*=\s*"([^"]+)"')
 
 
@@ -112,8 +102,7 @@ SPLITTERS = {".md": split_markdown, ".toml": split_toml}
 
 
 def split(path: str, lines: list[str]) -> list[Unit]:
-    """The units of a file, or Unmergeable when its format has no splitter or it holds conflict markers. A key the
-    file holds more than once (a row id listed twice) carries its occurrence, so every key is unique."""
+    """The units of a file; a repeated key carries its occurrence, so every key is unique."""
     splitter = SPLITTERS.get(Path(path).suffix)
     if splitter is None:
         raise Unmergeable(f"no splitter for {path}")
@@ -130,22 +119,20 @@ def split(path: str, lines: list[str]) -> list[Unit]:
 
 
 def ids(units: list[Unit]) -> Counter:
-    """How often each key (without its occurrence) is held."""
+    """{key without occurrence: count}."""
     return Counter(u.key[:-1] for u in units if u.key is not None)
 
 
 @dataclass
 class Side:
-    """One side's change against the base."""
-    state: list[Lines | None]  # per base unit: its lines on this side, None when this side deleted it
-    added: dict[int, list[Unit]] = field(default_factory=dict)  # gap g (after base unit g; -1 = first): units added
-    replaces: set[int] = field(default_factory=set)  # gaps whose additions stand where this side deleted base units
+    state: list[Lines | None]  # per base unit; None: deleted
+    added: dict[int, list[Unit]] = field(default_factory=dict)  # gap (after base unit g; -1 = first) -> units
+    replaces: set[int] = field(default_factory=set)  # gaps whose additions replace deleted units
 
 
 def align(base: list[Unit], side: list[Unit]) -> dict[int, int]:
-    """side index -> base index of every side unit that is a base unit: keyed units by key (they anchor the
-    alignment, linear in the file), then between each two anchors the unkeyed units by content (difflib on that
-    stretch only), an equal-length run of changed unkeyed units being an edit of each."""
+    """side index -> base index: keyed units by key as anchors, then unkeyed units between anchors by content; an
+    equal-length changed unkeyed run is an edit of each."""
     at = {u.key: i for i, u in enumerate(base) if u.key is not None}
     anchors = [(j, at[u.key]) for j, u in enumerate(side) if u.key in at]
     if any(i1 >= i2 for (_, i1), (_, i2) in zip(anchors, anchors[1:])):
@@ -182,7 +169,7 @@ def view(base: list[Unit], side: list[Unit]) -> Side:
 
 
 def merge(base: list[Unit], ours: list[Unit], theirs: list[Unit], marker: int = 7) -> tuple[list[str], int]:
-    """The merged lines and the number of conflicts left in them as markers."""
+    """(merged lines, conflict count)."""
     o, t = view(base, ours), view(base, theirs)
     out: list[str] = []
     conflicts = 0
@@ -193,11 +180,11 @@ def merge(base: list[Unit], ours: list[Unit], theirs: list[Unit], marker: int = 
         out.extend(["<" * marker + " ours", *a, "=" * marker, *b, ">" * marker + " theirs"])
 
     ours_added = {u.key: u for us in o.added.values() for u in us if u.key is not None}
-    clash: dict[Key, Unit] = {}  # a key both sides added with different text: the conflict stands at ours' place
+    clash: dict[Key, Unit] = {}  # key added differently: conflict at ours' place
     theirs_added: dict[int, list[Unit]] = {}
     for g, us in t.added.items():
         if [u.lines for u in us] == [u.lines for u in o.added.get(g, [])]:
-            continue  # both sides added the same units at one spot
+            continue  # same additions on both sides
         keep = []
         for u in us:
             if u.key in ours_added:
@@ -245,7 +232,7 @@ def main(argv: list[str]) -> int:
             raise Unmergeable("the result holds a key more often than any input")
     except Unmergeable:
         return text_merge(base, ours, theirs)
-    except Exception:  # noqa: BLE001 - a driver that dies leaves ours unmerged without markers; git's merge decides
+    except Exception:  # noqa: BLE001 - a dead driver leaves ours unmarked; git decides
         traceback.print_exc()
         return text_merge(base, ours, theirs)
     text = eol.join(out) + (eol if out and (tail or not a) else "")

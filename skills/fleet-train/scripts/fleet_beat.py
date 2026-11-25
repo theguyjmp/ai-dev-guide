@@ -67,9 +67,11 @@ plans = run(["git", "ls-remote", "origin", "refs/heads/plan/cloud-*"], cwd=str(h
 landed2 = sum(len(e.get("rows", [])) for e in ev if e.get("event") == "land" and now - e.get("ts", 0) < 7200)
 queue = h.load("queue.json", [])
 alarms = []
-if not train and not (h.ST / "train.pid").exists():  # a train older than train.pid: no safe way to tell it is ours
+if (h.ST / "train.off").exists():  # retired train
+    pass
+elif not train and not (h.ST / "train.pid").exists():  # a train older than train.pid: no safe way to tell it is ours
     alarms.append("TRAIN-PID no state/train.pid: stop this project's train once (its own pid only) and let this beat start it")
-elif not train and not (h.ST / "train.off").exists():  # state/train.off = stopped on purpose
+elif not train:
     pid = start_train() if os.name == "nt" else ""
     alarms.append(f"TRAIN-DOWN no train process: restarted detached (pid {pid})" if pid else
                   "TRAIN-DOWN no train process: start it detached (Win32_Process Create, never Start-Process from an agent shell)")
@@ -168,7 +170,7 @@ h.save("health.json", {"ts": now, "alarms": [("ESCALATE " if st.startswith("ESCA
                                              for a, st in _disp], "detail": alarms})
 _esc = [f"{a} [{st}]" for a, st in _disp if st.startswith("ESCALATE")]
 _handled = [f"{alarm_handlers.alarm_id(a)} [{st}]" for a, st in _disp if not st.startswith("ESCALATE")]
-ping = Path.home() / ".claude/devping/devping.py"  # optional owner notification: ESCALATE items only
+ping = Path.home() / ".claude/skills/devping/scripts/devping.py"  # optional owner card: ESCALATE items only
 project = os.environ.get("HARNESS_PROJECT", "")
 if _esc and ping.exists() and project:
     run([sys.executable, str(ping), "alert", project, "ESCALATE: " + "; ".join(a.split(" (")[0] for a in _esc)], timeout=60)

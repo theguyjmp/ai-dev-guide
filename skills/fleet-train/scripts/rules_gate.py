@@ -1,14 +1,11 @@
-"""Ratcheted rule checks for the land train: rules no lint config holds, counted per file. No build, no LLM (rust
-reads `cargo metadata --no-deps` to find test-only crates).
+"""Ratcheted rule checks for the land train: rules no lint config holds. No build, no LLM.
 
-Run by harness.quality_problems (train, pre-push) and by cloud sessions (`check --state <qa dir>`). Per product file
-(rules_langs.LANGS; test code out, TreeCode): swallow (dropped error or silent default; a `// default: <why>` or
-`// best-effort: <why>` comment exempts), expect, panic, allow (a silenced lint), owner (a public type named like
-another module's ARCHITECTURE `Forbidden types:` stem; `Overlaps: <path>::<Name>` exempts one), text (spec and
-CLAUDE.md over the overhaul.toml [text] caps, which may only be tightened). A file fails above its count in
-<state>/rules-debt.json (absent = 0; a new project runs `init` on main once); `tighten` after each land, never growth.
-Debt is per file and never moves: code moved to a new file must be clean.
-Plan check (PLAN_MODES): a tree adds no plan_validate problem line; the pick check runs its row-local part.
+Run by harness.quality_problems (train, pre-push) and cloud sessions. Per product file (test code out): swallow (a
+`// default: <why>` or `// best-effort: <why>` comment exempts), expect, panic, allow, owner (a public type named like
+another module's `Forbidden types:` stem; `Overlaps: <path>::<Name>` exempts), text (overhaul.toml [text] caps). A file
+fails above its count in <state>/rules-debt.json; debt is per file and never moves. Duplicates: an exported name
+another module declares, a function grown into a near copy of a sibling (debt `dups`; overhaul.toml [rules]
+name_conventions exempts names). The plan check adds no plan_validate line.
 
     py -3 rules_gate.py check   [--dir D] [--base main] [--state S] [--lang L]   exit 1 on any problem
     py -3 rules_gate.py count   [--dir D] [--files] [--lang L]
@@ -17,13 +14,14 @@ Plan check (PLAN_MODES): a tree adds no plan_validate problem line; the pick che
 """
 from __future__ import annotations
 
-import json, os, re, subprocess, sys, threading
+import difflib, functools, json, os, re, subprocess, sys, threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 import rules_langs as rl
 
@@ -44,6 +42,8 @@ DECISION_LINE = re.compile(r"^D\d+[a-z]?:")
 LINE_NO = re.compile(r"(\.(?:md|rs|toml|py|[mc]?[jt]sx?)):\d+(?::\d+)?")
 STUB_LINE = re.compile(r"^\S+ (\S+): no stub in ")
 PLAN_MODES = ("off", "spec", "always")  # the gate: always
+CLONE_MIN_TOKENS = 40
+CLONE_COVER = 0.8
 
 
 @dataclass(frozen=True)
@@ -102,12 +102,7 @@ class TextCaps:
 
     @classmethod
     def parse(cls, toml_text: str) -> "TextCaps":
-        if tomllib is None or not toml_text.strip():
-            return cls()
-        try:
-            t = tomllib.loads(toml_text).get("text") or {}
-        except tomllib.TOMLDecodeError:
-            return cls()  # plan_validate reports a broken overhaul.toml; the caps are then off
+        t = toml_table(toml_text, "text")
         return cls(**{f.name: int(t.get(f.name) or 0) for f in fields(cls)})
 
     @classmethod
@@ -124,9 +119,77 @@ class TextCaps:
                 and not 0 < getattr(self, f.name) <= getattr(base, f.name)]
 
 
+def toml_table(toml_text: str | None, name: str) -> dict:
+    """Table `name` of overhaul.toml; {} when absent or unreadable (plan_validate reports a broken file)."""
+    if tomllib is None or not (toml_text or "").strip():
+        return {}
+    try:
+        return tomllib.loads(toml_text).get(name) or {}
+    except tomllib.TOMLDecodeError:
+        return {}
+
+
 def git(cwd, *args) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
                           errors="replace")
+
+
+def git_out(cwd, *args, ok=(0,)) -> str:
+    """stdout of a git call; RuntimeError on another exit code (no verdict is never a pass)."""
+    r = git(cwd, *args)
+    if r.returncode not in ok:
+        raise RuntimeError(f"git {' '.join(args[:3])} failed in {cwd}: {r.stderr.strip()[-300:]}")
+    return r.stdout
+
+
+class Snapshot:
+    """File reads of one tree: the work tree at `cwd` (rev "") or commit `rev`."""
+
+    def __init__(self, cwd, rev: str = ""):
+        self.cwd = Path(cwd)
+        self.rev = git_out(cwd, "rev-parse", "--verify", f"{rev}^{{commit}}").strip() if rev else ""
+
+    def files(self, roots) -> list:
+        if self.rev:
+            return git_out(self.cwd, "ls-tree", "-r", "--name-only", self.rev, "--", *roots).splitlines()
+        return [f for f in git_out(self.cwd, "ls-files", "--", *roots).splitlines() if (self.cwd / f).is_file()]
+
+    def grep(self, words, roots) -> list:
+        """Files under `roots` holding any of `words` as a whole word."""
+        words, out = sorted(words), set()
+        for k in range(0, len(words), 100):
+            pats = [a for w in words[k:k + 100] for a in ("-e", w)]
+            lines = git_out(self.cwd, "grep", "-l", "-w", "-F", *pats, *([self.rev] if self.rev else []), "--", *roots,
+                            ok=(0, 1)).splitlines()
+            out.update(x[len(self.rev) + 1:] if self.rev else x for x in lines)
+        return sorted(out)
+
+    def texts(self, rels) -> dict:
+        """{rel: text, None when absent}."""
+        rels = list(rels)
+        if not self.rev:
+            return {f: (self.cwd / f).read_text(encoding="utf-8", errors="replace") if (self.cwd / f).is_file()
+                    else None for f in rels}
+        r = subprocess.run(["git", "cat-file", "--batch"], cwd=str(self.cwd), capture_output=True, check=False,
+                           input="".join(f"{self.rev}:{f}\n" for f in rels).encode("utf-8"))
+        if r.returncode:
+            raise RuntimeError(f"git cat-file failed in {self.cwd}: {r.stderr.decode(errors='replace')[-300:]}")
+        out, pos, data = {}, 0, r.stdout
+        for f in rels:
+            nl = data.index(b"\n", pos)
+            head, pos = data[pos:nl].split(), nl + 1
+            if head[-1] == b"missing":
+                out[f] = None
+                continue
+            size = int(head[2])
+            out[f] = data[pos:pos + size].decode("utf-8", errors="replace") if head[1] == b"blob" else None
+            pos += size + 1
+        return out
+
+    @functools.cached_property
+    def arch(self) -> Arch:
+        text = self.texts([ARCH])[ARCH]
+        return read_arch(text) if text is not None else Arch()
 
 
 def default_state() -> Path:
@@ -135,9 +198,7 @@ def default_state() -> Path:
 
 # ------------------------------------------------------------------ scanning
 class TreeCode:
-    """The one product/test classification of the tree at `cwd`: the language's file rule plus what the tree shows
-    (Lang.tree; rust: an out-of-line `#[cfg(test)] mod x;` file, a crate used only as a [dev-dependencies] entry).
-    Built per gate call: a long-lived train's tree changes every batch."""
+    """Product/test classification of the tree at `cwd` (the file rule plus Lang.tree), built per gate call."""
 
     def __init__(self, lang: rl.Lang, cwd):
         self.lang, self.tree = lang, lang.tree(Path(cwd))
@@ -222,8 +283,7 @@ def read_arch(text: str) -> Arch:
 
 
 def tree_arch(cwd) -> Arch:
-    p = Path(cwd) / ARCH
-    return read_arch(p.read_text(encoding="utf-8", errors="replace")) if p.exists() else Arch()
+    return Snapshot(cwd).arch
 
 
 def product_files(code: TreeCode, cwd, roots=None) -> list:
@@ -261,6 +321,11 @@ def save_debt(st, new: dict, old: dict) -> None:
     """Write `new`; refused when any count of a rule `old` already has grows (a rule `old` lacks may be added)."""
     grown = [f"{r}:{f} {n} > {old['rules'][r].get(f, 0)}" for r, fs in new["rules"].items() if r in old["rules"]
              for f, n in fs.items() if n > old["rules"][r].get(f, 0)]
+    if "dups" in old:
+        was, now = old["dups"], new.get("dups", {})
+        grown += [f"dups:names:{n} {c} > {was.get('names', {}).get(n, 1)}" for n, c in now.get("names", {}).items()
+                  if c > was.get("names", {}).get(n, 1)]
+        grown += [f"dups:clones:{k} added" for k in now.get("clones", []) if k not in was.get("clones", [])]
     if grown:
         raise ValueError("rules debt may only shrink; refused: " + "; ".join(grown[:10]))
     p = Path(st) / DEBT
@@ -278,6 +343,9 @@ def init_debt(lang: rl.Lang, st, cwd, note: str) -> dict:
     if missing:
         c = counts(lang, cwd, rules=missing)
         new["rules"].update({r: dict(sorted(c[r].items())) for r in missing})
+    if "dups" not in old:
+        new["dups"] = dup_debt(lang, cwd)
+    if missing or "dups" not in old:
         new.setdefault("history", []).append(note)
         save_debt(st, new, old)
     return new
@@ -287,12 +355,12 @@ def tighten(lang: rl.Lang, st, cwd, files=None) -> list:
     """Lower each debt entry to its count in `cwd` (main after a land), over `files` (default all); returns the
     'rule:file old->new' changes."""
     old = load_debt(st)
-    if not old["rules"]:
+    if not old["rules"] and "dups" not in old:
         return []
     text_on = TextCaps.of(cwd).on()
     if files is not None and text_on and "text" in old["rules"]:
         files = sorted(set(files) | set(text_files(cwd)))  # a few files: always recounted after a land
-    c = counts(lang, cwd, files, rules=list(old["rules"]))
+    c = counts(lang, cwd, files, rules=list(old["rules"])) if old["rules"] else {}
     changed, new = [], {**old, "rules": {}}
     for r, fs in old["rules"].items():
         if r == "text" and not text_on:  # caps off on this tree: its zero counts say nothing
@@ -305,9 +373,152 @@ def tighten(lang: rl.Lang, st, cwd, files=None) -> list:
                 changed.append(f"{r}:{f} {n}->{now}")
             if min(n, now):
                 new["rules"][r][f] = min(n, now)
+    if "dups" in old and (files is None or any(lang.is_product(f) for f in files)):
+        try:
+            changed += tighten_dups(lang, cwd, old["dups"], new)
+        except RuntimeError as e:
+            raise ValueError(f"dups debt not tightened: {e}") from e
     if changed:
         save_debt(st, new, old)
     return changed
+
+
+def tighten_dups(lang: rl.Lang, cwd, was: dict, new: dict) -> list:
+    """Lower `was` names to their module counts in `cwd`, drop listed pairs no longer close; sets new["dups"]."""
+    code, snap = TreeCode(lang, cwd), Snapshot(cwd)
+    now = pub_names(lang, code, snap, set(was.get("names", {})))
+    names = {n: min(c, len(now.get(n, ()))) for n, c in was.get("names", {}).items()}
+    pairs = {k: [x.rsplit("::", 1) for x in k.split(" ~ ")] for k in was.get("clones", [])}
+    bodies = bodies_of(lang, snap, {f for p in pairs.values() for f, _ in p})
+
+    def near(p):
+        b = [bodies[f].get(n) for f, n in p]
+        return all(b) and cover(*b) >= CLONE_COVER
+    new["dups"] = {**was, "names": {n: c for n, c in names.items() if c > 1},
+                   "clones": [k for k, p in pairs.items() if near(p)]}
+    return ([f"dups:names:{n} {c}->{names[n]}" for n, c in was.get("names", {}).items() if names[n] < c]
+            + [f"dups:clones:{k} gone" for k in pairs if k not in new["dups"]["clones"]])
+
+
+# ------------------------------------------------------------------ duplicate items
+class Body(NamedTuple):
+    toks: tuple
+    bag: Counter
+
+
+def conventions(now: Snapshot, was: Snapshot) -> frozenset:
+    """overhaul.toml [rules] name_conventions of both trees: names every module declares by design."""
+    sets = [set(toml_table(s.texts(["overhaul.toml"])["overhaul.toml"], "rules").get("name_conventions") or ())
+            for s in (now, was)]
+    return frozenset(sets[0] & sets[1])
+
+
+def pub_names(lang: rl.Lang, code: TreeCode, snap: Snapshot, words=None) -> dict:
+    """{name: {module}} of the exported items in the product files of `snap` (only `words`, when given)."""
+    files = snap.grep(words, lang.roots) if words is not None else snap.files(lang.roots)
+    out = {}
+    for rel, text in snap.texts(f for f in files if code.product(f) and snap.arch.module_of(f)).items():
+        for name in lang.exported(lang.tokens(text or "")):
+            if words is None or name in words:
+                out.setdefault(name, set()).add(snap.arch.module_of(rel))
+    return out
+
+
+def name_problems(lang: rl.Lang, code: TreeCode, now: Snapshot, was: Snapshot, mine, allowed: dict, conv) -> list:
+    """An exported name a module adds while another declares it, past both debt `names` and base's count."""
+    words = {n for t in now.texts(mine).values() for n in lang.exported(lang.tokens(t or ""))} - conv
+    if not words:
+        return []
+    have, had, out = pub_names(lang, code, now, words), pub_names(lang, code, was, words), []
+    for name in sorted(words):
+        mods, before = have.get(name, set()), had.get(name, set())
+        cap = min(allowed.get(name, 1), max(1, len(before)))
+        if mods - before and len(mods) > cap:
+            out.append(f"duplicate name: public `{name}` added in {', '.join(sorted(mods - before))}; declared in "
+                       f"{len(mods)} modules ({', '.join(sorted(mods))}), allowed {cap} ({DEBT} dups.names); reuse "
+                       "or extend the owner, or name what differs")
+    return out
+
+
+def fn_bodies(lang: rl.Lang, text: str | None) -> dict:
+    """{function name: Body} of a file's product functions, strings blanked."""
+    toks, out = lang.tokens(text or ""), {}
+    for name, a, b in lang.functions(toks):
+        body = tuple('""' if k == "str" else t for k, t, _ in toks[a:b + 1])
+        out.setdefault(name, Body(body, Counter(body)))
+    return out
+
+
+def bodies_of(lang: rl.Lang, snap: Snapshot, files) -> dict:
+    return {f: fn_bodies(lang, t) for f, t in snap.texts(files).items()}
+
+
+def cover(a: Body, b: Body) -> float:
+    """Share of the shorter body the longer holds in order (difflib matching blocks); 0 under CLONE_MIN_TOKENS."""
+    short, long_ = sorted((a, b), key=lambda x: len(x.toks))
+    if len(short.toks) < CLONE_MIN_TOKENS or sum((short.bag & long_.bag).values()) < CLONE_COVER * len(short.toks):
+        return 0.0
+    sm = difflib.SequenceMatcher(None, short.toks, long_.toks, autojunk=False)
+    return sum(m.size for m in sm.get_matching_blocks()) / len(short.toks)
+
+
+def close_pairs(bodies: dict, arch: Arch, mine=None) -> dict:
+    """{"<file>::<fn> ~ <file>::<fn>": cover} of the pairs in one module at least CLONE_COVER close; with `mine`
+    ({(file, fn)}) only the pairs holding one of them."""
+    by = {}
+    for rel, fns in sorted(bodies.items()):
+        by.setdefault(arch.module_of(rel), []).extend((rel, n, b) for n, b in fns.items())
+    out = {}
+    for m, fns in by.items():
+        for i, (rel, name, body) in enumerate(fns if m else ()):
+            if mine is not None and (rel, name) not in mine:
+                continue
+            for orel, oname, other in fns if mine is not None else fns[i + 1:]:
+                if (orel, oname) != (rel, name) and (share := cover(body, other)) >= CLONE_COVER:
+                    out[" ~ ".join(sorted((f"{rel}::{name}", f"{orel}::{oname}")))] = share
+    return out
+
+
+def clone_problems(lang: rl.Lang, code: TreeCode, now: Snapshot, was: Snapshot, mine, listed) -> list:
+    """A function the diff adds or changes now CLONE_COVER close to a sibling in its module, unless the pair was that
+    close at base or debt `clones` lists it."""
+    mods = {now.arch.module_of(f) for f in mine}
+    files = [f for f in now.files(lang.roots) if code.product(f) and now.arch.module_of(f) in mods]
+    have, had = bodies_of(lang, now, files), bodies_of(lang, was, files)
+    grown = {(f, n) for f in mine for n, b in have.get(f, {}).items() if had.get(f, {}).get(n) != b}
+    out = []
+    for key, share in sorted(close_pairs(have, now.arch, grown).items() if grown else ()):
+        old = [had.get(f, {}).get(n) for f, n in (x.rsplit("::", 1) for x in key.split(" ~ "))]
+        if key not in listed and not (all(old) and cover(*old) >= CLONE_COVER):
+            out.append(f"near copy: {key} ({share:.0%} of the shorter body); make one function (a flag or a shared "
+                       "step) and call it from both")
+    return out
+
+
+def dup_problems(lang: rl.Lang, code: TreeCode, cwd, base, st, changed) -> list:
+    """Duplicate names and near copies the diff against `base` adds; a failed git call is a problem line."""
+    debt = load_debt(st)
+    dups, hint = debt.get("dups", {}), "" if "dups" in debt else " (no dups debt: run rules_gate.py init on main)"
+    try:
+        now = Snapshot(cwd)
+        mine = [f for f in changed if code.product(f) and now.arch.module_of(f)]
+        if not mine:
+            return []
+        was = Snapshot(cwd, base)
+        out = name_problems(lang, code, now, was, mine, dups.get("names", {}), conventions(now, was)) \
+            + clone_problems(lang, code, now, was, mine, set(dups.get("clones", ())))
+    except RuntimeError as e:
+        return [f"rules gate: the duplicate check has no verdict: {e}"]
+    return [x + hint for x in out]
+
+
+def dup_debt(lang: rl.Lang, cwd) -> dict:
+    """The doubles of the tree at `cwd`: sweep work the debt lists, never room for more."""
+    code, snap = TreeCode(lang, cwd), Snapshot(cwd)
+    conv = conventions(snap, snap)
+    files = [f for f in snap.files(lang.roots) if code.product(f) and snap.arch.module_of(f)]
+    return {"names": {n: len(m) for n, m in sorted(pub_names(lang, code, snap).items()) if len(m) > 1 and n not in conv},
+            "clones": sorted(close_pairs(bodies_of(lang, snap, files), snap.arch))}
 
 
 # ------------------------------------------------------------------ the gate
@@ -326,8 +537,7 @@ def added_lines(cwd, base, rel) -> set:
 
 
 def flipped(code: TreeCode, cwd, base, scratch) -> tuple:
-    """(product files of the packages test-only at `base` but not in `cwd`, problem lines): a manifest change that
-    gives a test crate a normal dependent makes its files product, though none of them changed."""
+    """(product files of the packages test-only at `base` but not in `cwd`, problem lines)."""
     sha = git(cwd, "rev-parse", base).stdout.strip()
     with tree_at(cwd, sha, scratch) as wt:
         was = code.lang.tree(wt) if wt is not None else None
@@ -337,9 +547,9 @@ def flipped(code: TreeCode, cwd, base, scratch) -> tuple:
     return (product_files(code, cwd, gone) if gone else []), []
 
 
-def count_problems(lang: rl.Lang, cwd, base, st, changed, scratch) -> list:
+def count_problems(lang: rl.Lang, code: TreeCode, cwd, base, st, changed, scratch) -> list:
     debt = load_debt(st)["rules"]
-    arch, caps, code = tree_arch(cwd), TextCaps.of(cwd), TreeCode(lang, cwd)
+    arch, caps = tree_arch(cwd), TextCaps.of(cwd)
     files = product_files(code, cwd) if ARCH in changed else [f for f in changed if code.product(f)]
     out = [f"rules gate: {code.tree.error} (it classifies product and test packages)"] if code.tree.error else []
     flip = []
@@ -459,8 +669,7 @@ def plan_message(base, new) -> list:
 
 
 def plan_applies(cwd) -> bool:
-    """plan_validate holds an overhaul plan to its contract; a repo with no overhaul.toml has no such plan, and its own
-    spec format would fail every row (a node project's FUNCTIONS.md refused each spec update)."""
+    """Only an overhaul.toml repo holds an overhaul plan; another spec format would fail every row."""
     return (Path(cwd) / "overhaul.toml").is_file()
 
 
@@ -536,7 +745,9 @@ def problems(cwd, base="main", st=None, scratch=None, lang=None, plan="spec", la
     changed = changed_files(cwd, base)
     if changed is None:
         return [f"rules gate: git diff against {base} failed in {cwd}"]
-    return count_problems(lg, cwd, base, st, changed, Path(scratch or st)) + (
+    code = TreeCode(lg, cwd)
+    return count_problems(lg, code, cwd, base, st, changed, Path(scratch or st)) \
+        + dup_problems(lg, code, cwd, base, st, changed) + (
         plan_problems(cwd, base, st, Path(scratch or st), changed, landing, always=plan == "always")
         if plan != "off" else [])
 
@@ -571,7 +782,7 @@ def main(argv=None) -> int:
             print(json.dumps({r: sum(fs.values()) for r, fs in new["rules"].items()}))
         else:
             print("\n".join(tighten(lang, st, d)) or "no change")
-    except ValueError as e:
+    except (ValueError, RuntimeError) as e:
         print(e, file=sys.stderr)
         return 1
     return 0

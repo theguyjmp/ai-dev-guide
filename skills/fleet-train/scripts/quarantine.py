@@ -121,6 +121,22 @@ def heal(h, merged: list, rows: dict, fails, ids) -> Healed:
     return Healed(frozenset(proven), frozenset(unbuilt))
 
 
+def slow(h, tests: dict, sha: str) -> None:
+    """Quarantine tests whose alone re-run hit its time cap ({test: tail}): no verdict, never red (slow-tests class)."""
+    if not tests:
+        return
+    with h.lock("state"):
+        kr = h.load(KNOWN, {})
+        for t, tail in tests.items():
+            kr.setdefault(t, {"by": "time-cap", "since": h.iso(), "main": sha, "evidence": tail,
+                              "request": request_path(h, t).relative_to(h.HOME).as_posix(),
+                              "reason": f"alone re-run hit its time cap at {sha[:10]}: no verdict (class slow tests)"})
+        h.save(KNOWN, kr)
+    for t, tail in tests.items():
+        write_request(h, t, tail, sha)
+        h.event("quarantine_slow", test=t, sha=sha)
+
+
 REQUEST = """# Fix request: {test}
 > RULE ZERO: valuable, well made, clean, extensible code; never loosen a check (no timeout raise, no test weakening).
 

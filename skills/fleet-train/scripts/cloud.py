@@ -1,20 +1,14 @@
-"""Cloud builder bridge: hand frontier rows to Claude Code cloud sessions through GitHub and collect their branches.
+"""Cloud builder bridge: hand frontier rows to cloud sessions through GitHub and collect their branches.
 
   py -3 cloud.py assign --n N   # claim N frontier rows under slots 1000+, publish assign/<row>.json on harness-cloud
   py -3 cloud.py collect        # queue pushed cloud/<row> heads, release cloud/release-<row>, expire silent sessions
   py -3 cloud.py status         # assigned / claimed / pushed / landed
   py -3 cloud.py fixes          # fix lane (state/fix-tasks.txt): claimable now, claimed, queued
 
-Refs on origin: harness-cloud (assign/<row>.json), cloud/claim-<row> (a session took the row), cloud/<row> (its build),
-cloud/release-<row> (its blocker, in a REASON file), cloud/prev-<row> (an earlier attempt to salvage),
-cloud/stack-<row> (a queued dep to merge first), cloud-base (the train's local main, the base every session starts from).
-Task lanes (Lane; kit FIXER.md): cloud/<kind>-claim-<task>, cloud/wip-<kind>-<task>, <kind>/cloud-<task>; harness-cloud
-<kind>-tasks.txt, <kind>-tasks/<task>.md, <kind>-check.sh, <kind>-rejects/<task>.md.
-The cloud builder brief is <HARNESS_CLOUD_KIT>/BUILDER.md in the repo (templates: the skill's cloud/ folder).
-Run `collect` every 5 minutes (Task Scheduler / cron); it also tops the assignments up to HARNESS_CLOUD_TARGET.
-
-Env: HARNESS_CLOUD_KIT (kit folder in the repo, default tools/cloud), HARNESS_CLOUD_TARGET (rows kept assigned, default
-40), HARNESS_CLOUD_TTL (seconds a claimed row may push nothing, default 7200), plus harness.py's HARNESS_* settings.
+Refs on origin: harness-cloud (assign/<row>.json), cloud/claim-<row>, cloud/<row>, cloud/release-<row> (REASON file),
+cloud/prev-<row>, cloud/stack-<row>, cloud-base (the base every session starts from). Task lanes: cloud/<kind>-claim-,
+cloud/wip-<kind>-, <kind>/cloud-<task>. Run `collect` every 5 minutes. Env: HARNESS_CLOUD_KIT (default tools/cloud),
+HARNESS_CLOUD_TARGET (rows kept assigned, 40), HARNESS_CLOUD_TTL (silent claim seconds, 7200), harness.py's HARNESS_*.
 """
 from __future__ import annotations
 
@@ -112,8 +106,7 @@ def publish(msg):
 
 
 def write_assignment(slot, info, hd):
-    """assign/<row>.json: the local claim fields plus where to branch, push and salvage from, and the queued deps to
-    merge first (stacked start, as a local claim does)."""
+    """assign/<row>.json: the claim fields, where to branch, push and salvage from, and deps to merge first."""
     row = info["row"]
     stack = []
     for q in h.load("queue.json", []):
@@ -175,8 +168,7 @@ def cmd_assign(a):
 
 
 def review_dup(sha) -> str:
-    """Duplicate-capability refusal for a cloud row's tip (h.submit_dup, the local submit's check), else "". The tip is
-    checked out detached in a scratch worktree: the reviewer reads the tree."""
+    """Duplicate-capability refusal for a cloud row's tip (h.submit_dup), else ""; read in a scratch worktree."""
     wt = h.WT / "cloud-review"
     if (wt / ".git").exists():
         h.git("checkout", "-q", "-f", "--detach", sha, cwd=wt)
@@ -200,16 +192,12 @@ def batch_rows() -> set:
 
 
 def lane_owned(row) -> bool:
-    """True for a row its fix lane owns (CLEAN-*: clean-submit fix batches, cloud fixers and planners), often stacked
-    on another queued CLEAN row. The rebasers never get one: rebased onto cloud-base, its queued sha is rewritten, its
-    stack on the row below breaks and the lane's gated sha is gone. A conflicting one waits in the queue; its lane
-    restacks it when the train's merge conflicts."""
+    """True for a row its fix lane owns (CLEAN-*). Never sent to rebasers: a rebase rewrites the lane's gated sha."""
     return row.startswith(h.quarantine.FIX_PREFIX)
 
 
 def drop_lane_owned_rebases(hd, st, gone):
-    """Lane-owned rows are never out for rebase: their stale rebase_sent marks (which fill_wait counts as out) are
-    cleared and their rebase refs go into gone, so the rebasers drop work already sent. Caller holds the cloud lock."""
+    """Clear lane-owned rows' rebase marks and drop their rebase refs. Caller holds the cloud lock."""
     for row, r in st["rows"].items():
         if lane_owned(row):
             r.pop("rebase_sent", None)
@@ -217,9 +205,7 @@ def drop_lane_owned_rebases(hd, st, gone):
 
 
 def send_rebase(row, sha, st) -> bool:
-    """Push sha as cloud/rebase-<row> for the rebasers (cloud/REBASER.md); record it only if the push worked. The one
-    place a row goes to the rebasers: a lane-owned row is refused (rebase_skip_lane_owned, once per row and sha).
-    Caller holds the cloud lock (st is cloud.json)."""
+    """Push sha as cloud/rebase-<row> for the rebasers; record it only if the push worked (never a lane-owned row)."""
     if lane_owned(row):
         r = st["rows"].setdefault(row, {})
         if r.get("rebase_skip") != sha:
@@ -233,9 +219,7 @@ def send_rebase(row, sha, st) -> bool:
 
 
 def export_conflicts(hd, st):
-    """Queued rows outside the batch in flight that no longer merge onto main go to cloud rebasers as
-    cloud/rebase-<row> (cloud/REBASER.md); rebased while they wait, they merge clean. Lane-owned rows wait for
-    their lane (send_rebase)."""
+    """Queued rows outside the batch in flight that no longer merge onto main go out for rebase (send_rebase)."""
     batch, sent = batch_rows(), 0
     for q in h.load("queue.json", []):
         row, sha = q["row"], q["sha"]
@@ -250,8 +234,7 @@ REBASE_CLAIM_TTL = 60 * 60  # a rebaser claim with no rebased-<row> answer for t
 
 
 def expire_rebase_claims(hd, st, gone) -> list:
-    """Delete a cloud/rebase-claim-<row> that has had no cloud/rebased-<row> answer for REBASE_CLAIM_TTL and forget the
-    sent sha, so export_conflicts publishes the row for rebase again. rows[row].rebase_expired counts the expiries."""
+    """Drop rebase claims unanswered for REBASE_CLAIM_TTL so the row is published again; counts expiries."""
     queued, t, out = {q["row"] for q in h.load("queue.json", [])}, h.now(), []
     claims = {n.removeprefix("rebase-claim-") for n in hd if n.startswith("rebase-claim-")}
     for row, r in st["rows"].items():
@@ -273,9 +256,7 @@ def expire_rebase_claims(hd, st, gone) -> list:
 
 
 def take_rebased(row, sha, st):
-    """Swap a queued row's sha for its cloud rebase, if the row still waits (not in the batch) on the sha we sent.
-    The swap happens under the state lock and leaves claims untouched. A lane-owned row's answer (sent before
-    lane_owned) is never taken: its queued sha stays the lane's."""
+    """Swap a waiting queued row's sha for its cloud rebase (never a lane-owned or in-batch row)."""
     old = st["rows"].get(row, {}).get("rebase_sent")
     if not old or lane_owned(row) or row in batch_rows():
         return False
@@ -608,8 +589,7 @@ def check_label(c: str) -> str:
 
 
 def check_script(lane: Lane) -> str:
-    """<kind>-check.sh: the train's checks on a lane branch, built from the harness's own commands (no copy to drift). On
-    a clean commit that passes, it stamps HEAD with `<stamp><tree>`; collect queues only a tip stamped for its own tree."""
+    """<kind>-check.sh from the harness's own commands; a passing clean commit is stamped `<stamp><tree>`."""
     checks = [("strict lint", session_cmd(h.CLIPPY_STRICT)), ("unit tests", h.P["unit"]),
               *((check_label(c), session_cmd(c)) for c in h.QUALITY_CMDS),
               ("rules check", SESSION_RULES_CHECK), ("merges with the base", MERGES_CLEAN)]
@@ -642,9 +622,7 @@ def rebase_row(name: str) -> str:
 
 
 def refresh_cloud_base():
-    """Cloud builders start from origin/cloud-base = local main (2026-11-12: the pre-push quality hook guards only
-    refs/heads/main, and origin/main can lag local main when a push is refused; cloud work must start from what the
-    train has)."""
+    """origin/cloud-base = local main: sessions start from what the harness holds (origin/main can lag)."""
     h.git("push", "-q", "-f", "origin", f"main:refs/heads/{BASE}", check=False)
 
 

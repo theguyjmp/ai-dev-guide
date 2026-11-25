@@ -33,11 +33,18 @@ whose footprint overlaps nothing in flight and whose prerequisites landed.
   reviewer's prompt for a reviewer the harness does not start (a cloud session's fresh subagent). Its gate stages,
   known-red rule, quarantine, blame leaves and lock are the pieces the cycle's verifier is built on (CYCLE.md "What
   ships"). `submit`, `clean-submit` and `train` feed the retired queue.
+- `scripts/trunk.py` (tested reference, CYCLE.md "The minimum cycle"): receipts, the compare-and-swap push (exit 0
+  PUSHED, 1 REFUSED, 3 HELD, 4 RECHECK, 5 RACE), `main` following the trunk, `verify` (one verifier round: unrecorded
+  commits reverted first, `verified` moved to the longest green prefix, an isolated red push reverted), `status`,
+  `unhold`. `scripts/gate_sha.py <sha>`: the full gate on one sha as the verifier's gate command.
+- `scripts/task_loader.py`: the fix-by-class check and the footprint listing (`--check` over a plan, `--state` for the
+  claimable list and the claims to release). `scripts/keepalive.py`: the windowless watchdog.
 - `workflows/builders.js`: Claude Code Workflow, N worker loops, each spawning a FRESH builder agent per row (args:
-  {slots, max, idle, home, slot_list}). Builders run only their row's tests and strict lint on touched packages, then
-  `self-review` and fix every duplicate it lists. Its last step still calls `submit`: point it at the project's push
-  script when the cycle is built.
-- `workflows/cleanup.js`: one agent per crate group fixes dup blocks, repeated literals, long functions, strict lint.
+  {slots, max, idle, home, slot_list, push}; `push` is the project's push command with `{slot}` and `{row}`).
+  Builders run only their row's tests and strict lint on touched packages, then `self-review`, fix every duplicate
+  it lists, and push.
+- `workflows/cleanup.js`: one agent per disjoint module group (args.groups) sweeps dup blocks, repeated literals,
+  long functions and strict lint, each landed through the push command.
 - `scripts/remote.py --slot 100`: a second PC as extra builders (claims here, runs `claude -p` there over ssh).
 - `scripts/cloud.py` + `cloud/` (kit templates, copied to `<repo>/tools/cloud/`): the cloud fleet, below.
 - `scripts/dash.py`: static dashboard page from state/events.jsonl; publish it as an artifact.
@@ -61,9 +68,12 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
 | No gate without the stack's required env | `[profile] require_env` (rust on Windows: ProgramFiles(x86), which Git Bash drops) |
 | Quality has no switch. Every claim carries `must_also_before_commit` (index search and ARCHITECTURE owners first; dup_blocks, dup_literals, shape_check, check_cycles, strict lint). The gate adds the owner guard (allowlist stays EMPTY) and the size gate; the duplicate review rejects a copy of an existing owner under any name; the pre-push hook refuses a push to main whose commit fails the quality check | claim JSON, `owner_copies`, `oversized_files` (HARNESS_FILE_LINES 500, tests 600), `batch_review`, `scripts/pre-push.hook` |
 | The index builders search is never stale; no shared list is hand-edited | spec/INDEX.md and every generated list regenerated in the verifier's bookkeeping push; test registration by discovery (overhaul-build derived group roots) |
-| A recurring defect type is fixed as a class: its gate (lint, structural test, shrink-only ratchet or one owner) lands first, then sweeps; a per-instance packet is never published | the task loader's class check (CYCLE.md "Fix by problem class") |
+| A recurring defect type is fixed as a class: its gate (lint, structural test, shrink-only ratchet or one owner) lands first, then sweeps; a per-instance packet is never published | `task_loader.py` class check (CYCLE.md "Fix by problem class") |
+| No public item (function, type, enum, trait, const, static) named like another module's, and no function grown into a near copy of a sibling, beyond the shrink-only debt; the owners index is regenerated on every push and checked | `rules_gate.py` `dup_problems` (debt `dups`), `index_api.py --check` (CYCLE.md "The owners index") |
+| A test re-run alone that hits its time cap is no verdict, never red: quarantined as slow with a fix request in the slow-tests class | `run_one_alone` (`TIME_CAP`), `quarantine.slow` |
 | A codebase grown without these checks reaches 0 duplicates before any builder starts | workflows/cleanup.js, a semantic duplicate review, targeted refactors |
 | At most 3 kernel rows and 6 rows per module in flight, no two with overlapping declared files; rows unblocking 8+ others skip the module cap; priority rows go first | `claim`, state/priority.json |
+| A clean-up task is claimable only when its prerequisites landed and its footprint overlaps nothing in flight; a task whose push the base holds releases its claim at once; the gate packet leases first | `task_loader.py` listing |
 | A row whose deps are pushed but not yet verified starts from the trunk's head | the project's claim base |
 | Every long-running loop survives exceptions, re-execs when its source changes and still parses, and reads events tolerantly | the verifier loop, `read_events` |
 | Freeze a working harness: one tested change at a time, a dated backup, revert if the verified rate drops | the manager |
@@ -127,15 +137,17 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
   account resumes (`cloud/HANDOFF-ACCOUNT.md`). `collect` (every 5 min) expires claims silent for HARNESS_CLOUD_TTL
   (2 h) and tops assignments up to HARNESS_CLOUD_TARGET (40). Never stop `collect` while sessions work: it refreshes
   `cloud-base`, and sessions would build on a stale base.
-- Planners (`PLANNER.md`) turn roadmap rows into planned rows; fixers (`FIXER.md`) take clean-up packets (one per
+- Planners (`PLANNER.md`; add a `plan` Lane to `cloud.LANES`, the shipped one lists only `fix`) turn roadmap rows into planned rows; fixers (`FIXER.md`) take clean-up packets (one per
   problem class and module group) from `fix-tasks.txt`. Both claim with `claim_task.sh <kind>`; one `Lane` type
-  carries every task lane. Only listed tasks are claimable: the loader lists a task when its prerequisites landed
-  and its footprint overlaps nothing in flight (CYCLE.md "Claiming"; the shipped script still takes the first free).
+  carries every task lane. Only listed tasks are claimable: `task_loader.py` lists a task when its class check
+  passes, its prerequisites landed and its footprint overlaps nothing in flight (CYCLE.md "Claiming");
+  `claim_task.sh` takes the first unclaimed listed id.
 - Sessions seed the shared warm build cache before their first build (CYCLE.md); a cold build is never a stop.
-- A session lands by running the writer checks on its VM and pushing its branch plus an evidence commit; `collect`
-  replays the push with that evidence, git only (CYCLE.md "Cloud writers"). Work that comes back goes to its WIP ref
-  with the reason, and the waiting land script lands it again. The rebaser routine (`REBASER.md`) is retired with
-  the train: a conflicting push goes back to its writer.
+- A session lands by running the project's land script (writer checks on its VM, then its branch plus an evidence
+  commit); `collect` replays the push through `trunk.py push`, git only (CYCLE.md "Cloud writers" has the land script
+  and collector to build: the shipped `collect` still queues into the retired train). Work that comes back goes to
+  its WIP ref with the reason, and the waiting land script lands it again. The rebaser routine (`REBASER.md`) is
+  retired with the train: a conflicting push goes back to its writer.
 - The real caps on agent count are the frontier (ready rows: deps proven, not claimed) and what the verifier
   verifies, not slots. Run planners to grow the frontier. Only rows being built (claims) count against the module cap
   and file-overlap filter; check `harness.py frontier` against the rows whose deps are all proven or pushed.
@@ -150,6 +162,9 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
 - Only the manager chat can start cloud sessions (a routine run). An hourly in-chat heartbeat runs
   `py -3 scripts/fleet_beat.py`, which compares rows waiting for a session with sessions running and prints `FIRE n`.
   Scale with several routines on staggered minutes, never by firing runs by hand.
+- The owner's Discord card: the devping skill (one message edited in place; only owner-important events show on it:
+  blocked on the owner, work stopped, money or data at risk, cycle done). Its stats adapter counts the WHOLE platform and survives re-planning
+  (CYCLE.md "Measure"); `fleet_beat.py` sends ESCALATE items through it when HARNESS_PROJECT names the project.
 - The heartbeat is a health check, not a liveness check. Every alarm has a handler in `scripts/alarm_handlers.py`
   (one table; a test fails on an alarm without one) and `scripts/alarm_dispatch.py` runs them every 10 min: an
   idempotent, time-boxed auto-fix, or one headless `claude -p` per alarm from `scripts/alarm_briefs/` (RULE ZERO on
@@ -164,18 +179,27 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
 - NEVER attach a GitHub push webhook to a builder routine: builders push, so every push starts another builder.
 
 ## Run
-1. Set HARNESS_REPO, HARNESS_HOME (state dir parent), HARNESS_WT (fast drive), HARNESS_STACK (rust or node). Create
-   `state/train.off`. Rename an old overhaul guard hook (`.git/hooks/reference-transaction` -> `*.disabled`): it
-   blocks every main update. Free disk (keep 80 GB+; slot targets about 5-9 GB each, a gate's release target about
-   30 GB) and prune acceptance tests' leftover temp dirs (they once filled 26 GB).
-2. `py -3 harness.py frontier` must show rows. Build or sync the cycle's push script, verifier and collector
-   (CYCLE.md), with their tests, before any writer starts.
-3. Native box (the shipped OS, for the gate's non-test stages, OS-only tests and the run behind `verified`): ssh, Python,
-   git, the toolchain and a bare `<HARNESS_REMOTE_ROOT>/repo.git`; set HARNESS_REMOTE_HOST, HARNESS_REMOTE_ROOT,
-   HARNESS_REMOTE_ENV, or a `[desk]` table in harness.toml (host, root, env, path). Seed repo.git once with a bundle
-   of main and set refs/desk/base to that sha, or the first send carries the whole history. Keep it otherwise idle.
-4. Start the verifier (and the native run behind `verified`, if the cloud OS differs) detached, under the 5-minute
-   watchdog; turn sharding on with its flag once one probe session has returned a valid shard result.
-5. Writers: workflows/builders.js locally, or the cloud fleet; `remote.py` for a second PC.
-6. Measure fixes `verified` per wall-clock hour, send-backs per hour, reverts, holds and escapes, plus per-phase
+Needs: Python 3.10+, git 2.38+ (`merge-tree --write-tree`), the stack's toolchain, the overhaul-build skill (its
+scripts are the quality scripts: `index_api.py`, `dup_blocks.py`, `dup_literals.py`, `shape_check.py`,
+`check_cycles.py`; HARNESS_QS points at them, default `~/.claude/skills/overhaul-build/scripts`) and a planned
+repo (spec/FUNCTIONS.md and spec/ARCHITECTURE.md from overhaul-plan or dev-plan). S = this skill's `scripts` folder.
+1. Set HARNESS_REPO (the landing clone), HARNESS_HOME (state dir parent), HARNESS_WT (worktrees, on a fast drive)
+   and HARNESS_STACK (rust or node). Create `<HARNESS_HOME>/state/train.off`. Rename an old overhaul guard hook
+   (`.git/hooks/reference-transaction` -> `*.disabled`): it blocks every main update. Free disk (keep 80 GB+; slot
+   targets about 5-9 GB each, a gate's release target about 30 GB) and prune acceptance tests' leftover temp dirs.
+2. `py -3 $S/rules_gate.py init` on main once (the debt every ratchet shrinks from), then `py -3 $S/harness.py
+   frontier` must show rows.
+3. The minimum cycle (CYCLE.md, step by step): create `integ` and `verified`, write the project's push script from
+   step 2 there, save the verifier loop as `verify_loop.sh`, list it (and the collector, once cloud writers run) in
+   `keepalive.json`, schedule `keepalive.py` windowless. Run `py -3 -m py_compile $S/*.py` and the shipped tests
+   (`for f in $S/tests/test_*.py; do py -3 "$f" || echo "FAIL $f"; done`) before any writer starts.
+4. The owner's card: `/devping` (the devping skill) with a stats adapter that counts the whole platform.
+5. Writers: workflows/builders.js locally (args.push = the push command), or the cloud fleet (Cloud fleet above, with
+   the land script and collector of CYCLE.md "Cloud writers"); `remote.py` for a second PC. Audit findings become
+   class packets in a plan the task loader checks (`task_loader.py --check`), never one packet per instance.
+6. Optional, once measured as the bottleneck: a native box (the shipped OS, for OS-only tests and the run behind
+   `verified`: ssh, Python, git, the toolchain and a bare `<HARNESS_REMOTE_ROOT>/repo.git`; HARNESS_REMOTE_HOST,
+   HARNESS_REMOTE_ROOT, HARNESS_REMOTE_ENV or a `[desk]` table in harness.toml; seed repo.git once with a bundle of
+   main and set refs/desk/base to that sha), sharding and the shared build cache (CYCLE.md).
+7. Measure fixes `verified` per wall-clock hour, send-backs per hour, reverts, holds and escapes, plus per-phase
    time per landed fix (CYCLE.md "Measure"); report only measured rates, never agents busy.

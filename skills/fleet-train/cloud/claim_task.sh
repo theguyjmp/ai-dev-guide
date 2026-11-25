@@ -8,7 +8,7 @@ set -uo pipefail
 lane=${1:-}
 case $lane in plan|fix) ;; *) echo "usage: claim_task.sh plan|fix"; exit 2;; esac
 cd "$(git rev-parse --show-toplevel)"
-BASE=${CLOUD_BASE:-cloud-base}   # the train machine's main, mirrored by cloud.py collect
+BASE=${CLOUD_BASE:-cloud-base}   # the trunk's head, published by the collector
 git config user.email >/dev/null || git config user.email "cloud-builder@example.invalid"
 git config user.name >/dev/null || git config user.name "cloud builder"
 git fetch -q origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" \

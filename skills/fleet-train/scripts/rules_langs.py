@@ -4,7 +4,7 @@ from __future__ import annotations
 import json, os, re, subprocess, sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 
 def qs() -> Path:
@@ -25,6 +25,14 @@ class TreeTests:
     error: str = ""
 
 
+class Decl(NamedTuple):
+    """A public declaration; `exported`: plain public at module level, so other modules can name it."""
+    name: str
+    line: int
+    kind: str  # type, fn or value
+    exported: bool
+
+
 @dataclass(frozen=True)
 class Lang:
     name: str
@@ -32,13 +40,20 @@ class Lang:
     is_product: Callable[[str], bool]
     tokens: Callable[[str], list]  # [(kind ident/num/str/punct, text, line)]
     comments: Callable[[str], list]  # [(text, line)]
-    items: Callable[[list], list]  # [(public type name, line)]
+    decls: Callable[[list], list]  # [Decl]
     code: dict = field(default_factory=dict)  # rule id -> regexes over statements
     comment: dict = field(default_factory=dict)  # rule id -> regexes over comments
     keep_empty_braces: bool = False  # JS: an empty catch is one statement
     skip_spans: Callable[[list], list] = lambda toks: []  # test code inside a product file
     tree: Callable[[Path], TreeTests] = lambda cwd: TreeTests()  # built once per gate call
     manifests: tuple = ()  # file names whose change can move a package between test and product
+    functions: Callable[[list], list] = lambda toks: []  # [(name, body first token, body last token)]
+
+    def items(self, toks: list) -> list:
+        return [(d.name, d.line) for d in self.decls(toks) if d.kind == "type"]
+
+    def exported(self, toks: list) -> list:
+        return [d.name for d in self.decls(toks) if d.exported]
 
 
 def statements(lang: Lang, text: str) -> list:
@@ -184,26 +199,46 @@ def rust_tree(cwd) -> TreeTests:
     return TreeTests(lambda rel: rel.startswith(dev) or mods.test_module(rel), dev, err)
 
 
-def rust_items(toks: list) -> list:
-    rs = qs_import("rust_src")
-    skip = {k for a, b in rs.cfg_test_spans(toks) for k in range(a, b + 1)}
-    out = []
-    for i, (_, t, line) in enumerate(toks):
-        if t != "pub" or i in skip:
+RUST_KINDS = {"struct": "type", "enum": "type", "trait": "type", "type": "type", "union": "type", "fn": "fn",
+              "const": "value", "static": "value"}
+RUST_MODS = ("async", "unsafe", "extern")
+
+
+def rust_test_tokens(toks: list) -> set:
+    return {k for a, b in qs_import("rust_src").cfg_test_spans(toks) for k in range(a, b + 1)}
+
+
+def rust_decls(toks: list) -> list:
+    rs, skip = qs_import("rust_src"), rust_test_tokens(toks)
+    out, depth = [], 0
+    for i, (kind, t, line) in enumerate(toks):
+        if kind == "punct" and t in ("{", "}"):
+            depth += 1 if t == "{" else -1
+        if t != "pub" or kind != "ident" or i in skip:
             continue
-        j = i + 1
-        if j < len(toks) and toks[j][1] == "(":
+        j, scoped = i + 1, i + 1 < len(toks) and toks[i + 1][1] == "("
+        if scoped:
             j = rs.match_close(toks, j) + 1
-        if j + 1 < len(toks) and toks[j][1] in ("struct", "enum", "trait", "type", "union") and toks[j + 1][0] == "ident":
-            out.append((toks[j + 1][1], line))
+        while j + 1 < len(toks) and (toks[j][1] in RUST_MODS or toks[j][0] == "str"
+                                     or (toks[j][1] == "const" and toks[j + 1][1] in RUST_MODS + ("fn",))):
+            j += 1
+        n = j + 1 + (j + 2 < len(toks) and toks[j][1] == "static" and toks[j + 1][1] == "mut")
+        if n < len(toks) and toks[j][1] in RUST_KINDS and toks[n][0] == "ident":
+            out.append(Decl(toks[n][1], line, RUST_KINDS[toks[j][1]], not scoped and depth == 0))
     return out
+
+
+def rust_functions(toks: list) -> list:
+    skip = rust_test_tokens(toks)
+    return [(f["name"], *f["body"]) for f in qs_import("rust_src").functions(toks)
+            if f["body"] and not f["test"] and f["start"] not in skip]
 
 
 RUST = Lang(
     "rust", ("crates", "src"), rust_product,
     tokens=lambda text: qs_import("rust_src").tokens(text),
     comments=lambda text: [],
-    items=rust_items,
+    decls=rust_decls, functions=rust_functions,
     skip_spans=lambda toks: qs_import("rust_src").cfg_test_spans(toks),
     tree=rust_tree, manifests=("Cargo.toml",),
     code={
@@ -238,16 +273,56 @@ def js_lex(text: str) -> list:
     return out
 
 
-def js_items(toks: list) -> list:
-    out = []
-    for i, (_, t, _) in enumerate(toks):
-        if t != "export":
+JS_KINDS = {"class": "type", "interface": "type", "type": "type", "enum": "type", "function": "fn", "const": "value",
+            "let": "value", "var": "value"}
+
+
+def js_decls(toks: list) -> list:
+    out, depth = [], 0
+    for i, (kind, t, _) in enumerate(toks):
+        if kind == "punct" and t in ("{", "}"):
+            depth += 1 if t == "{" else -1
+        if t != "export" or kind != "ident":
             continue
         j = i + 1
-        while j < len(toks) and toks[j][1] in ("default", "abstract", "declare"):
+        while j + 1 < len(toks) and (toks[j][1] in ("default", "abstract", "declare", "async")
+                                     or (toks[j][1] == "const" and toks[j + 1][1] == "enum")):
             j += 1
-        if j + 1 < len(toks) and toks[j][1] in ("class", "interface", "type", "enum") and toks[j + 1][0] == "ident":
-            out.append((toks[j + 1][1], toks[j + 1][2]))
+        n = j + 1 + (j + 2 < len(toks) and toks[j + 1][1] == "*")
+        if n < len(toks) and toks[j][1] in JS_KINDS and toks[n][0] == "ident":
+            out.append(Decl(toks[n][1], toks[n][2], JS_KINDS[toks[j][1]], depth == 0))
+    return out
+
+
+def js_functions(toks: list) -> list:
+    """`function f(..) {..}`, `const f = (..) => {..}` and `const f = function (..) {..}`; methods are not read."""
+    rs, out = qs_import("rust_src"), []
+    at = lambda k: toks[k][1] if 0 <= k < len(toks) else ""  # noqa: E731
+    for i, (kind, t, _) in enumerate(toks):
+        if t == "function" and at(i - 1 - (at(i - 1) == "async")) in ("", ";", "{", "}", "export", "default"):
+            n = i + 1 + (at(i + 1) == "*")
+            if n >= len(toks) or toks[n][0] != "ident":
+                continue
+            name, k, arrow = toks[n][1], n + 1, False
+        elif t in ("const", "let", "var") and i + 2 < len(toks) and toks[i + 1][0] == "ident" and at(i + 2) == "=":
+            name, k = toks[i + 1][1], i + 3 + (at(i + 3) == "async")
+            arrow = at(k) != "function"
+            if not arrow:
+                k += 1 + (at(k + 1) == "*")
+                k += k < len(toks) and toks[k][0] == "ident"
+        else:
+            continue
+        if at(k) == "(":
+            k = rs.match_close(toks, k) + 1
+        elif arrow and k < len(toks) and toks[k][0] == "ident":
+            k += 1
+        else:
+            continue
+        head = k
+        while at(k) not in ("{", ";", "=", "}", ""):
+            k += 1
+        if at(k) == "{" and (not arrow or any(x[1] == "=>" for x in toks[head:k])):
+            out.append((name, k, rs.match_close(toks, k)))
     return out
 
 
@@ -255,7 +330,7 @@ NODE = Lang(
     "node", (".",), lambda rel: rel.endswith(JS_EXTS) and not JS_TEST.search(rel),
     tokens=lambda text: [t for t in js_lex(text) if t[0] != "comment"],
     comments=lambda text: [(t, n) for k, t, n in js_lex(text) if k == "comment"],
-    items=js_items,
+    decls=js_decls, functions=js_functions,
     keep_empty_braces=True,
     code={"swallow": (r"\bcatch(?:\(\w*\))?\{\}",  # an empty catch block
                       r"\.catch\(\(?[\w,]*\)?=>(?:\{\}|null|undefined|\[\]|\"\"|false)\)")},

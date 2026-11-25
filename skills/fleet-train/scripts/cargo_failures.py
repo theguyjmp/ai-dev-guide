@@ -1,4 +1,4 @@
-"""The one `cargo test` output parser; a failed target no name accounts for is kept by its selector.
+"""The one `cargo test` output parser; a failed target no test name explains is kept by its selector.
 
   py -3 cargo_failures.py <log>
 """
@@ -18,24 +18,23 @@ CRASH = re.compile(r"to rerun pass `([^`]+)`\s*\n\s*Caused by:\s*\n\s*process di
                    r"\((exit code: (?!101\))[^)]*|signal: [^)]*)\)")
 PASSED = re.compile(r"^test result: \w+\. (\d+) passed", re.M)
 UNBUILT = re.compile(r"^error: could not compile `([\w-]+)`(?: \((?:\w+ )*?(?:lib|\w+ \"([\w-]+)\"))?", re.M)
-LIB_UNBUILT = re.compile(r"^error: could not compile `([\w-]+)` \(lib\)", re.M)  # the library itself, not its tests
-# A link error's owners: the archive member or object holding an unresolved reference (`libX-<hash>.rlib(...)` or
-# `X.<cgu>.<n>.rcgu.o`), never the linker's argument list. Logs may carry cargo's JSON escapes (a literal \r\n).
+LIB_UNBUILT = re.compile(r"^error: could not compile `([\w-]+)` \(lib\)", re.M)  # the library, not its tests
+# Owner of an unresolved reference (`libX-<hash>.rlib(...)` or `X.<cgu>.<n>.rcgu.o`), never the linker's arguments.
 LINK_OWNER = re.compile(r"(?:\blib(\w+)-[0-9a-f]{16}\.rlib\([^)\s]*\)|(?<![\w.-])(\w+)\.\w+\.\w+\.rcgu\.o) : error LNK\d+")
 UNRESOLVED = re.compile(r"unresolved external symbol (_R\w+)")
-INSTANTIATING = re.compile(r".*Cs[0-9A-Za-z]*_(\d+)([A-Za-z]\w*)$")  # v0 mangling: the symbol's instantiating crate
+INSTANTIATING = re.compile(r".*Cs[0-9A-Za-z]*_(\d+)([A-Za-z]\w*)$")  # v0 mangling: instantiating crate
 SELECTOR = "-p "
 
 
 @dataclass(frozen=True)
 class CargoFailures:
-    tests: tuple = ()  # failing test names, sorted
-    targets: tuple = ()  # every failed target's selector ("-p crate --lib"), in cargo's order
-    unnamed: tuple = ()  # failed targets no printed name accounts for
+    tests: tuple = ()  # sorted
+    targets: tuple = ()  # selectors ("-p crate --lib"), cargo's order
+    unnamed: tuple = ()  # failed targets no test name explains
     crashes: dict = field(default_factory=dict)  # {selector: "exit code: ..."}
-    unbuilt: tuple = ()  # targets cargo could not compile or link, by crate name (incremental/<name>-*)
-    lib_packages: tuple = ()  # packages whose library cargo could not compile, as cargo names them
-    linked: tuple = ()  # crates a link error names: its archive/object owners and unresolved symbols' crates
+    unbuilt: tuple = ()  # crate names that did not compile or link
+    lib_packages: tuple = ()  # packages whose library did not compile
+    linked: tuple = ()  # crates a link error blames
 
     @property
     def found(self) -> bool:
@@ -43,11 +42,11 @@ class CargoFailures:
 
     @property
     def build_failed(self) -> bool:
-        """A target did not build and no test ran to a failure: the output is a build or link error, not a red."""
+        """A build or link error, not a red."""
         return bool(self.unbuilt) and not self.found
 
     def keys(self) -> list:
-        """Plain strings for JSON (a name never starts with "-")."""
+        """Plain strings for JSON."""
         return list(self.tests) + list(self.unnamed)
 
     def without(self, known: CargoFailures) -> CargoFailures:
@@ -73,7 +72,7 @@ def parse(out: str) -> CargoFailures:
         names |= set(block.split())
     targets = tuple(dict.fromkeys(TARGET.findall(out)))
     crashes = {t: c for t, c in CRASH.findall(out) if t in targets}
-    # an unaccounted target cannot be pinned: keep them all
+    # an unaccounted target cannot be pinned: keep all
     short = len(targets) - len(crashes) > len(RESULT_FAILED.findall(out))
     unnamed = tuple(t for t in targets if short or t in crashes)
     unbuilt_at = UNBUILT.findall(out)
@@ -83,7 +82,6 @@ def parse(out: str) -> CargoFailures:
 
 
 def captured(out: str) -> dict:
-    """{test: its captured output block}."""
     out = (out or "").replace("\r\n", "\n")
     blocks = {}
     for m in CAPTURED.finditer(out):
@@ -93,9 +91,7 @@ def captured(out: str) -> dict:
 
 
 def linked_crates(out: str) -> tuple:
-    """Crate names a link error blames, in order: the archive or object owning each unresolved reference, then each
-    unresolved symbol's instantiating crate (v0 `Cs<hash>_<len><name>` suffix). Std and registry crates may appear;
-    the caller keeps the ones it can map to its workspace's packages."""
+    """Crates a link error blames: reference owners, then symbols' crates (std and registry included)."""
     out = (out or "").replace("\\r\\n", "\n").replace("\\n", "\n")
     found =[a or o for a, o in LINK_OWNER.findall(out)]
     for sym in UNRESOLVED.findall(out):

@@ -17,6 +17,11 @@ You get a new person and a new project ready, then hand them to dev-prep, dev-pl
    - Linux: the system package manager (`sudo apt install git`, `sudo dnf install git`).
 3. Run `git --version` again. On Windows, a new terminal may be needed: tell the owner to restart the chat if it is still not found.
 
+## Step 1b. Python
+1. Run `py -3 --version` on Windows, `python3 --version` elsewhere. Version 3.10 or newer: skip to step 2.
+2. Install it: Windows `winget install --id Python.Python.3.12 -e --source winget`; macOS `brew install python`; Linux
+   the system package manager (`sudo apt install python3`). On Windows, a new terminal may be needed.
+
 ## Step 2. GitHub sign-in
 1. Run `gh --version`. If it is missing, install the GitHub CLI: Windows `winget install --id GitHub.cli -e`, macOS `brew install gh`, Linux from https://cli.github.com.
 2. Run `gh auth status`. If they are signed in, skip to step 3.
@@ -28,7 +33,7 @@ You get a new person and a new project ready, then hand them to dev-prep, dev-pl
 6. Set the commit name and email when they are empty (`git config --global user.name` and `user.email`). Use the GitHub login and the private no-reply address: `gh api user --jq '.id, .login'`, then `<id>+<login>@users.noreply.github.com`. Never put their real email anywhere.
 
 ## Step 3. The skills
-Check that ~/.claude/skills holds dev-prep, dev-plan, dev-build, overhaul-check, overhaul-plan, overhaul-build and overhaul-difference. Install any that are missing (and update old ones) from https://github.com/theguyjmp/ai-dev-guide: clone it to a temp folder and copy each folder in skills/ into ~/.claude/skills/. Keep any skill folder the owner has that is not in the repo. Then run `check_skills.py --force` (path as above) so it records the installed version; from then on every skill keeps them current once a day.
+Check that ~/.claude/skills holds dev-prep, dev-plan, dev-build, overhaul-check, overhaul-plan, overhaul-build, overhaul-difference, fleet-train and devping. Install any that are missing (and update old ones) from https://github.com/theguyjmp/ai-dev-guide: clone it to a temp folder and copy each folder in skills/ into ~/.claude/skills/. Keep any skill folder the owner has that is not in the repo. Then run `check_skills.py --force` (path as above) so it records the installed version; from then on every skill keeps them current once a day.
 
 ## Step 4. Global agent rules
 Write the block below into the owner's global agent file: ~/.claude/CLAUDE.md for Claude Code, and also ~/.codex/AGENTS.md if that folder exists. Put it between the two marker lines. If the markers are already there, replace only what is between them. Never touch the rest of the file, and never add a second copy.
@@ -70,13 +75,15 @@ Write the block below into the owner's global agent file: ~/.claude/CLAUDE.md fo
    - Open the Claude desktop app, choose **Code**, start a new chat in **Local** mode (not cloud), and click the folder icon to pick `<Documents>/AppDevelopment/<name>`.
    - Type `/dev-build` there.
 4. Tip for later, in one line: `/remote-control` lets them watch the build from their phone.
+5. When the build phase runs many agents at once, dev-build hands it to fleet-train (merge first, verified behind,
+   fixes by problem class); `/devping` puts the project on their Discord as one card.
 
 ## Finish
 Report in 4 lines at most: what was installed or already there, the project folder, and the next command they will type.
 
 ## Never
 - Put the owner's email, tokens or passwords in any file or command output.
-- Install anything except Git, the GitHub CLI and the ai-dev-guide skills.
+- Install anything except Git, the GitHub CLI, Python and the ai-dev-guide skills.
 - Overwrite the owner's existing CLAUDE.md or AGENTS.md text outside the marked block.
 - Delete or overwrite an existing project folder.
 - Start dev-build from this chat when it is not opened on the project folder.

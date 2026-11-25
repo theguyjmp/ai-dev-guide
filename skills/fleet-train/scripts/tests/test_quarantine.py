@@ -273,13 +273,19 @@ class AloneRunner(unittest.TestCase):
         return SimpleNamespace(returncode=rc, stdout=out, stderr="")
 
     def test_cargo(self):
-        with mock.patch.object(h, "sh", self.sh), mock.patch.dict(h.P, accept="cargo"):
-            want = sorted([self.T[1], self.T[3], self.T[4]])
+        """A time-capped alone run is no verdict, never red: quarantined as slow, not a failure (CYCLE.md)."""
+        slow = {}
+        head = SimpleNamespace(stdout="abc1234567")
+        with mock.patch.object(h, "sh", self.sh), mock.patch.dict(h.P, accept="cargo"), \
+                mock.patch.object(h, "git", lambda *a, **k: head), \
+                mock.patch.object(h.quarantine, "slow", lambda hh, tests, sha: slow.update(tests)):
+            want = sorted([self.T[1], self.T[4]])
             self.assertEqual(sorted(h.run_tests(self.T)), want)
             alone = h.run_alone(self.T)
+        self.assertEqual(sorted(slow), [self.T[3]])
+        self.assertIn(h.TIME_CAP, slow[self.T[3]])
         self.assertEqual(sorted(alone), want)
         self.assertIn("assert left", alone[self.T[1]])
-        self.assertIn("900", alone[self.T[3]])
         self.assertIn("test build failed", alone[self.T[4]])
 
     def test_cmd_profile(self):

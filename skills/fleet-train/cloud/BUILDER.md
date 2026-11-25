@@ -11,7 +11,7 @@ Every Bash call: `cd <repo root> && source /opt/harness/env.sh && ...` (the shel
    SETUP FAILED, stop and report that line; claim nothing.
 2. **Claim.** `bash tools/cloud/claim.sh`. It takes the first free row (a push of a new ref `cloud/claim-<row>`, which
    fails if another session holds it, so it tries the next one), checks out branch `cloud/<row>` from
-   `origin/cloud-base`, merges the queued deps in `stack` and `previous_branch` if the assignment names one, fetches
+   `origin/cloud-base`, merges the deps in `stack` (pushed, not on the base yet) and `previous_branch` if the assignment names one, fetches
    the quality scripts to `/tmp/harness-qa/` and prints the assignment JSON (also in `/tmp/assignment.json`).
    If it prints `NO ROW`, stop: there is nothing to do. If it prints `MERGE CONFLICT`, resolve it and commit first.
 3. Read the row's line in spec/FUNCTIONS.md (`grep -n "| <row> |" spec/FUNCTIONS.md`), its acceptance test files, and
@@ -19,8 +19,10 @@ Every Bash call: `cd <repo root> && source /opt/harness/env.sh && ...` (the shel
    say why earlier attempts failed: fix exactly that.
 4. You OWN this row completely. There is no planner to send it back to: if a dependency capability is missing, a stub
    is in the way, the row is too big, or a file is not in the row's file list, implement what is needed yourself, in
-   the module where it belongs. Keep it minimal and clean: find an existing owner first with
-   `python3 /tmp/harness-qa/index_api.py --find "<purpose words>"` (ranked index lines; never a raw grep).
+   the module where it belongs. Keep it minimal and clean: before adding or renaming ANY public item (function,
+   type, enum, trait, const, static) find an existing owner with
+   `python3 /tmp/harness-qa/index_api.py --find "<purpose words>"` (ranked index lines; never a raw grep). A public
+   name another module already declares, or a function grown into a copy of a sibling, is refused at land.
 5. **Done** = the row's acceptance tests pass: `cargo test -q --test <stem> -- --exact <test_name>` for each test in
    `tests` (add `--release` if a debug run takes over 3 min). Then strict clippy for each crate you touched:
    `cargo clippy -q -p <crate> --all-targets -- -D warnings -D clippy::too_many_lines -D clippy::unwrap_used -D clippy::cognitive_complexity`.
@@ -39,8 +41,10 @@ Every Bash call: `cd <repo root> && source /opt/harness/env.sh && ...` (the shel
    it reports none (at most 2 rounds). The verifier runs the same reviewer and reverts anything it lists.
 7b. **Rebase before push.** `git fetch -q origin cloud-base && git rebase origin/cloud-base`; resolve conflicts keeping both
    sides' behaviour, re-run the row's tests if anything changed. A row that merges clean never waits on a rebaser.
-8. **Push.** Re-run the `rules_gate.py check` command from `must_also_before_commit` (it must print RULES OK), then
-   `git push -q origin HEAD:refs/heads/cloud/<row>`. Then stop and report `DONE <row>`.
+8. **Land.** Re-run the `rules_gate.py check` command from `must_also_before_commit` (it must print RULES OK), push
+   the WIP, then run the project's land script in the background with its output in a file, exactly as
+   `FIXER.md` steps 8-9 say (`row-land.sh <row>` from harness-cloud; CYCLE.md "Cloud writers"). On `LANDED` or
+   `LAND PENDING` report `DONE <row>`.
 9. **Budget.** About 90 tool calls. If you cannot get it green by then, or the same step fails twice the same way, run
    `bash tools/cloud/release.sh <row> "<precise blocker: file, error, what is needed>"` (it saves your work as
    `cloud/prev-<row>` for the next attempt), then stop and report `BLOCKED <row>: <reason>`.

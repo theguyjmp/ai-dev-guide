@@ -21,6 +21,10 @@ Read `~/.claude/skills/overhaul-build/SKILL.md` in full and follow it, with the 
 - **No quarantine:** M0 item 6 has no fingerprint index or fingerprint lint of an old project; every other lint stays.
 - **health.py is written fresh:** there are no old-fleet context-watch, burn or outcome-watch scripts to reuse; it measures them from the transcripts itself.
 - **LATER rows are never dispatched.** A seam interface for a LATER row stays a stub and counts for nothing. A LATER row is built only after the owner moves it to now; then a ruling adds its FUNCTIONS row with an Acceptance, and it goes through the Acceptance packet and build packet like any other function.
+- **Many agents at once:** once M0 and the risk slice are proven, the build phase may move to fleet-train (it replaces
+  drive.py there): stop the drive (`drive.py --repo R --stop`), then follow `~/.claude/skills/fleet-train/SKILL.md`
+  "Run" (merge first, `verified` behind, audit findings fixed by problem class). The gates, audits and Finish here
+  still hold; releases come from `verified`.
 - **Finish:** there is no original to compare with, so the difference report (overhaul-difference) does not apply. Finish exactly as overhaul-build's Finish says.
 
 ## Never (in addition to overhaul-build's)

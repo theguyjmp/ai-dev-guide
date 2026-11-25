@@ -61,6 +61,7 @@ with tempfile.TemporaryDirectory() as d:
     git(root, "config", "user.name", "t")
     spec = importlib.util.spec_from_file_location("harness_under_test", HARNESS)
     h = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = h  # dataclasses (3.13) look the module up while the class body runs
     spec.loader.exec_module(h)
     h.main_spec = lambda: {}  # the temp repo has no spec/FUNCTIONS.md
     h.ensure_merge_drivers()

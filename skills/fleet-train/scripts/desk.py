@@ -1,10 +1,7 @@
-"""The desk: a second Windows machine (ssh, cmd shell) running tests from a git bundle. Cargo: acceptance split (units
-on both machines for the earliest finish by measured throughput, state/unit-rates.json; cold start by CPU load; no
-verdict runs here; a unit that did not build runs there once more after `cargo clean -p` of what its build output
-names, then here; a unit that times out here is no verdict, never a train error: split, the parts offered to the idle
-desk first; the smallest unit once more on the desk, else it raises).
-Other runners: every test run there (`job`); no verdict raises Unavailable.
-On with <state>/desk-on or [desk] host; HARNESS_DESK=0/1 overrides.
+"""The desk: a second Windows machine (ssh, cmd shell) running tests from a git bundle. Cargo acceptance splits into
+units across both machines for the earliest finish by measured throughput; other runners send every run there (`job`).
+A timed-out unit is no verdict, never a train error: it splits. No verdict raises Unavailable. On with
+<state>/desk-on or [desk] host; HARNESS_DESK=0/1 overrides.
 
   py -3 desk.py accept --rid R   # desk side (run.cmd)
 """
@@ -45,16 +42,16 @@ RREPO = ROOT + "\\repo.git"
 ON = "desk-on"
 MAX_UNITS = 12  # place() tries 2^n splits
 UNITS = min(MAX_UNITS, int(os.environ.get("HARNESS_DESK_UNITS", "8")))  # the parallel unit + solo units
-MIN_TESTS = 60  # fewer (probe, bisect): setup costs more than it saves
+MIN_TESTS = 60  # fewer (probe, bisect): setup outweighs the gain
 POOL = 10  # run_tests_cargo's parallel binaries
 LINK_SECS = 6.0
-SOLO_SECS = 120.0  # a solo test with no recorded alone run
-LATE = (3.0, 1500.0)  # no result after 3 x the unit's cost + 25 min (a cold build): no verdict
+SOLO_SECS = 120.0  # solo test with no recorded run
+LATE = (3.0, 1500.0)  # 3 x the unit's cost + 25 min (a cold build)
 POLL_SECS = 20
-BUSY_LOAD = 70.0  # cold start: CPU % at gate start above which no unit runs here
+BUSY_LOAD = 70.0  # cold start: no unit runs here above this CPU %
 LOAD_SECS = 2.0
 RATES = "unit-rates.json"  # {machine: {kind: [[ts, wall secs / unit cost], ...]}}, newest last
-RATE_KEEP = 3  # samples per machine and kind; the plan uses their median
+RATE_KEEP = 3  # samples kept per machine and kind (median)
 RATE_TTL = {"here": 12 * 3600.0}  # this machine's load swings; the desk's samples do not age
 MACHINES, KINDS = ("here", "desk"), ("par", "solo")
 KIT_SIG = "desk-kit.json"
@@ -93,7 +90,7 @@ def scp(h, src, dst: str, timeout=600) -> bool:
 
 
 def send(h, sha: str) -> str:
-    """main and sha into the desk's bare repo as a git bundle (refs/desk/base: the main it has). "" or why not."""
+    """main and sha into the desk's bare repo as a bundle (refs/desk/base: its main). "" or why not."""
     work = h.ST / "desk"
     work.mkdir(exist_ok=True)
     h.git("update-ref", "refs/desk/gate", sha)
@@ -168,7 +165,7 @@ def start(h, rid: str, spec: dict) -> str:
         if scp(h, p, f"{KIT}\\runs\\{rid}.json") else subprocess.CompletedProcess("", 1, "", "scp failed")
     if "rc 0" in r.stdout:
         return ""
-    h.save(KIT_SIG, {})  # the desk may have lost its kit: resend it next gate
+    h.save(KIT_SIG, {})  # the desk may have lost its kit: resend next gate
     return (r.stdout + r.stderr)[-300:] or f"exit {r.returncode}"
 
 
@@ -205,7 +202,7 @@ REMOVED = re.compile(r"Removed (\d+) files")
 
 
 def workspace_packages(h, tree: str) -> dict:
-    """{package or lib crate name: package} of the desk tree's cargo workspace (metadata --no-deps); {} unreadable."""
+    """{package or lib crate name: package} of the desk tree's cargo workspace; {} unreadable."""
     r = ssh(h, f'{ENV}&& cd /d "{tree}" && cargo metadata --no-deps --format-version 1 --offline', timeout=300)
     try:
         pkgs = json.loads(r.stdout)["packages"]
@@ -216,9 +213,8 @@ def workspace_packages(h, tree: str) -> dict:
 
 
 def clean_packages(h, tree: str, target: str, packages: list) -> dict:
-    """`cargo clean -p <package> --release` for each package in the desk's own target dir: {package: files removed}.
-    A clean that removed nothing counts 0 whatever its exit code (an incremental-dir glob once matched nothing and
-    still reported cleaned)."""
+    """`cargo clean -p <package> --release` in the desk's target dir: {package: files removed}, whatever the exit
+    code."""
     if not packages or not tree:
         return {p: 0 for p in packages}
     each = " & ".join(f'echo @@{p} & cargo clean -p {p} --release --target-dir "{target}" --offline 2>&1'
@@ -233,11 +229,9 @@ def clean_packages(h, tree: str, target: str, packages: list) -> dict:
 
 
 def unit_env(h, res: dict) -> str:
-    """A cargo unit that did not build (cargo_failures build_failed) is an env fault, never its tests' fails: event,
-    `cargo clean -p` only the library packages its errors name (a lib cargo could not compile; the linker's
-    archive/object owners and unresolved symbols' crates mapped to the desk workspace's packages, so a bin's package
-    only when its own objects are named: cleaning it rebuilds every test binary) in the desk's target dir, ENV_UNIT + why.
-    cleaned is true only when files were removed. "" otherwise. Desk.poll re-runs the unit once."""
+    """An unbuilt unit (build_failed) is an env fault, not a red: event, `cargo clean -p` in the desk's target dir the
+    library packages its errors name (a bin's only if its own objects are: that rebuilds every test binary), ENV_UNIT
+    + why; else "". Desk.poll re-runs it once."""
     ok = h.P.get("accept") == "cargo" and "tests" in res and res.get("fails") and res.get("target")
     f = h.cf.parse(res.get("log") or "") if ok else h.cf.CargoFailures()
     if not f.build_failed:
@@ -309,8 +303,7 @@ def balance(groups: dict, cost: dict, n: int) -> list:
 
 
 def units(tests, solo: set, times: dict, alone: dict, n: int) -> list:
-    """[{"cost", "tests", "solo"}], each test in one: the parallel unit first, then up to n - 1 solo units by alone
-    seconds, longest first (pick()'s priority order)."""
+    """[{"cost", "tests", "solo"}], each test in one: the parallel unit, then up to n - 1 solo units, longest first."""
     par = sorted(t for t in set(tests) if t not in solo)
     sol = {t: [t] for t in sorted(set(tests) & set(solo))}
     out = [{"cost": par_cost(par, times), "tests": par, "solo": []}] if par else []
@@ -353,8 +346,7 @@ def par_cost(tests, times: dict) -> float:
 
 
 def halve(u: dict, times: dict, alone: dict) -> list:
-    """A timed-out unit as two parts of about equal cost, each test in exactly one: a parallel unit by test binary,
-    a solo unit by test (alone seconds). [] for one binary or one test: the smallest unit."""
+    """A timed-out unit as two parts of about equal cost (by binary, or by test if solo); [] if smallest."""
     if u["solo"]:
         groups, cost = {t: [t] for t in u["tests"]}, {t: float(alone.get(t, SOLO_SECS)) for t in u["tests"]}
     else:
@@ -385,8 +377,8 @@ def learn(hist: dict, work: dict, ts: float) -> dict:
 
 
 def rates(hist: dict, here: bool, now: float) -> dict:
-    """{(machine, kind): wall secs per cost-second}: median of fresh samples; this machine's load slows both kinds, so
-    else its other kind's; else cold: desk 1.0, here the desk's when here, never when busy."""
+    """{(machine, kind): wall secs per cost-second}: median of fresh samples (here: else its other kind's); cold: desk
+    1.0, here the desk's when idle, else never."""
     def med(m, k):
         xs = [r for ts, r in hist.get(m, {}).get(k, []) if now - ts <= RATE_TTL.get(m, float("inf"))]
         return statistics.median(xs) if xs else None
@@ -402,8 +394,8 @@ def rates(hist: dict, here: bool, now: float) -> dict:
 @dataclass(frozen=True)
 class Plan:
     here: frozenset  # units here; the desk runs the rest
-    steal: frozenset  # desk units here may take when idle (not slower at them)
-    back: frozenset  # units here the idle desk may take (not slower at them)
+    steal: frozenset  # desk units here may take when idle
+    back: frozenset  # units here the idle desk may take
     expect: tuple  # planned wall secs (here, desk)
 
 
@@ -424,9 +416,9 @@ def place(us: list, rate: dict) -> Plan:
 
 
 def pick(us: list, todo: list, machine: str, desk_up: bool = True, here: bool = True, plan: Plan = None) -> list:
-    """The unit indices `machine` ("here" | "desk") runs next as one run_tests() call; todo: unstarted indices;
-    plan default: the cold start. Own units first, then steal (here the desk's first, the desk here's last). Desk out of the gate (desk_up False): here every whole unit left in one call, then a timed-out unit's parts
-    (part True) one per call. The desk takes a timed-out unit's parts before its own units."""
+    """Unit indices `machine` ("here" | "desk") runs next in one call; todo: unstarted indices; plan default: cold
+    start. Own units first, then steal. Desk out: here takes every whole unit in one call, then parts one by one; the
+    desk takes parts first."""
     plan = plan or place(us, rates({}, here, 0.0))
     if machine == "here":
         if not desk_up:
@@ -440,7 +432,7 @@ PICK = "desk-pick.json"  # {"pid", "start", "rid"} of harness.pick_accept_queue'
 
 
 def pick_stop(h) -> None:
-    """The gate takes the desk: kill the pick acceptance pass (same pid + start only), then its desk run."""
+    """The gate takes the desk: kill the pick pass (same pid + start only), then its desk run."""
     cur = h.load(PICK, None)
     if not cur:
         return
@@ -592,11 +584,11 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
     gid = f"{sha[:12]}-{int(t0) % 1000000}"
     fails, logs, where, todo = {}, {}, {}, list(range(len(us)))
     busy, dtimes, dalone = {"here": 0.0, "desk": 0.0}, {}, {}
-    work = {m: {} for m in MACHINES}  # {machine: {kind: [wall secs, cost]}} of the verdicts it gave
+    work = {m: {} for m in MACHINES}  # {machine: {kind: [wall secs, cost]}}
     lg = h.ST / "last-gate.txt"
     desk, skipped, opened = None, "every unit here", False
 
-    def local(ks):  # (ks, fails or None when the call timed out: no verdict, h.sh killed its tree, log, wall secs)
+    def local(ks):  # (ks, fails or None on timeout, log, wall secs)
         s0 = time.time()
         lg.unlink(missing_ok=True)
         try:
@@ -621,17 +613,17 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
             if log:
                 logs[k] = log
 
-    def did(machine, ks, wall):  # a run of one kind of unit is a throughput sample (a timed-out one: a lower bound)
+    def did(machine, ks, wall):  # a one-kind run is a throughput sample (timed out: a lower bound)
         if len({kind(us[k]) for k in ks}) == 1:
             w = work[machine].setdefault(kind(us[ks[0]]), [0.0, 0.0])
             w[0], w[1] = w[0] + wall, w[1] + sum(us[k]["cost"] for k in ks)
 
-    def give(machine, desk_up):  # pick()'s next units for machine, taken off todo
+    def give(machine, desk_up):  # pick()'s next units, taken off todo
         ks = pick(us, todo, machine, desk_up, plan=plan)
         todo[:] = [k for k in todo if k not in ks]
         return ks
 
-    def timed_out(ks, secs):  # no verdict: each unit retired for parts the desk is offered first
+    def timed_out(ks, secs):  # no verdict: units retired for parts
         nonlocal plan
         if not opened:
             open_desk()
@@ -643,7 +635,7 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
             h.event("unit_timeout", gate=gid, unit=k, machine="here", secs=round(secs), n=len(u["tests"]),
                     binaries=len({Path(t.split("::")[0]).stem for t in u["tests"]}), tests=u["tests"][:20],
                     parts=len(parts), desk=desk is not None)
-            shared = bool(parts)  # halves (or a merged call's units): this machine may take them while the desk is busy
+            shared = bool(parts)  # halves: here may take them while the desk is busy
             if not parts and desk is not None:  # the smallest unit: once more, on the desk only
                 parts = [dict(u, part=True)]
             if not parts:
@@ -672,7 +664,7 @@ def run_desk(h, tests, timeout=1800, desk_cls=Desk):
                     desk_first = True
                 else:
                     mine = [{t for t in f if t in set(us[k]["tests"])} for k in ks]
-                    mine[0] |= set(f) - set().union(*mine)  # a name of no unit (run_tests' "build") counts too
+                    mine[0] |= set(f) - set().union(*mine)  # a name of no unit ("build") counts too
                     for i, k in enumerate(ks):
                         take(k, sorted(mine[i]), log if i == 0 else "", "here", secs if i == 0 else 0.0)
                     did("here", ks, secs)

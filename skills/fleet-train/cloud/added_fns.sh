@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The functions this branch adds outside tests (file: signature): the list review_prompt.md checks. Same rule as the
-# land train's reviewer (harness.py batch_review).
+# verifier's duplicate reviewer (harness.py batch_review).
 base=$(git merge-base "origin/${CLOUD_BASE:-cloud-base}" HEAD)
 git diff -U0 "$base" HEAD -- crates src | awk '
   /^\+\+\+ b\// { f = substr($0, 7); next }

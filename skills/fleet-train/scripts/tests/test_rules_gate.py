@@ -211,7 +211,7 @@ class Node(Base):
 
     def test_test_files_and_owner_items(self):
         self.assertEqual(self.counts("try { f(); } catch {}", rel="src/app.test.js"), [])
-        self.assertEqual(rl.js_items(rl.NODE.tokens("export default class WidgetBox {}\nclass Local {}\n")),
+        self.assertEqual(rl.NODE.items(rl.NODE.tokens("export default class WidgetBox {}\nclass Local {}\n")),
                          [("WidgetBox", 1)])
 
     def test_gate_on_a_node_tree(self):
@@ -325,6 +325,126 @@ class PlanModes(Base):
         self.assertEqual(g.problems(r, "main", self.st, self.tmp, "rust", plan="always", landing=["R7"]), [])
         with self.assertRaises(ValueError):
             g.problems(r, "main", self.st, self.tmp, "rust", plan=True)
+
+
+ARCH3 = "# Architecture\n" + "".join(f"\n## Module {m}\nPaths: crates/{m}/\nDepends on: -\n" for m in "abc")
+GAUGE = "pub enum Gauge {\n    Fine,\n    Coarse,\n}\n"
+STEPS = ("    let rows = scan(src)?;\n    let keys = index(&rows, depth, label)?.keys;\n    let tally = weigh(&rows, depth)?;\n"
+         "    let out = merge(&keys, &tally, label, src)?;\n    Ok(emit(out, rows, keys, tally, label, src))\n")
+FIRST = "pub fn first(src: &str, depth: u32, label: &str) -> Out {\n" + STEPS + "}\n"
+SECOND = "fn second(src: &str, depth: u32, label: &str) -> Out {\n" + STEPS.replace("emit(", "flush(") + "}\n"
+SMALL = "fn second(src: &str) -> u8 {\n    7\n}\n"
+
+
+class Dups(Base):
+    """Exported items named like another module's, and functions grown into near copies of a sibling."""
+
+    def dups(self, r, base="main"):
+        return g.dup_problems(rl.RUST, g.TreeCode(rl.RUST, r), r, base, self.st, g.changed_files(r, "main"))
+
+    def set_dups(self, names=None, clones=()):
+        (self.st / g.DEBT).write_text(json.dumps({"rules": {}, "dups": {"names": names or {}, "clones": list(clones)}}),
+                                      encoding="utf-8")
+
+    def test_new_item_named_like_another_modules(self):
+        r = self.repo({g.ARCH: ARCH3, "crates/a/src/lib.rs": GAUGE, "crates/b/src/lib.rs": "//! b\n"})
+        self.commit(r, {"crates/b/src/lib.rs": "pub fn local() {}\n" + GAUGE})
+        p = self.problems(r)
+        self.assertTrue(len(p) == 1 and "`Gauge` added in b" in p[0] and "no dups debt" in p[0], p)
+
+    def test_a_single_owner_moving_passes(self):
+        r = self.repo({g.ARCH: ARCH3, "crates/a/src/lib.rs": GAUGE, "crates/b/src/lib.rs": "//! b\n"})
+        self.commit(r, {"crates/a/src/lib.rs": "//! a\n", "crates/b/src/lib.rs": GAUGE})
+        self.assertEqual(self.dups(r), [])
+
+    def test_snapshot_reads_a_commit(self):
+        r = self.repo({g.ARCH: ARCH3, "crates/a/src/lib.rs": GAUGE, "crates/a/src/empty.rs": ""})
+        self.commit(r, {"crates/a/src/lib.rs": "//! a\n", "crates/b/src/lib.rs": GAUGE})
+        was = g.Snapshot(r, "main")
+        self.assertEqual(was.files(("crates",)), ["crates/a/src/empty.rs", "crates/a/src/lib.rs"])
+        self.assertEqual(was.texts(["crates/a/src/empty.rs", "crates/b/src/lib.rs", "crates/a/src/lib.rs"]),
+                         {"crates/a/src/empty.rs": "", "crates/b/src/lib.rs": None, "crates/a/src/lib.rs": GAUGE})
+        self.assertEqual(was.grep({"Gauge"}, ("crates",)), ["crates/a/src/lib.rs"])
+        self.assertEqual(was.arch.module_of("crates/c/src/x.rs"), "c")
+
+    def test_a_move_passes_when_debt_counts_the_double(self):
+        r = self.repo({g.ARCH: ARCH3, "crates/a/src/lib.rs": GAUGE, "crates/b/src/lib.rs": GAUGE,
+                       "crates/c/src/lib.rs": "//! c\n"})
+        self.commit(r, {"crates/b/src/lib.rs": "//! b\n", "crates/c/src/lib.rs": GAUGE})
+        self.assertEqual(len(self.dups(r)), 1)  # an existing double, unlisted
+        self.set_dups({"Gauge": 2})
+        self.assertEqual(self.dups(r), [])
+        self.commit(r, {"crates/b/src/lib.rs": GAUGE})
+        p = self.dups(r)
+        self.assertTrue(len(p) == 1 and "3 modules" in p[0] and "allowed 2" in p[0], p)
+
+    def test_name_conventions_from_both_trees(self):
+        conv = {"overhaul.toml": '[rules]\nname_conventions = ["Gauge"]\n'}
+        r = self.repo({g.ARCH: ARCH3, "crates/a/src/lib.rs": GAUGE, "crates/b/src/lib.rs": "//! b\n", **conv})
+        self.commit(r, {"crates/b/src/lib.rs": GAUGE})
+        self.assertEqual(self.dups(r), [])
+        self.tearDown(), self.setUp()
+        r = self.repo({g.ARCH: ARCH3, "crates/a/src/lib.rs": GAUGE, "crates/b/src/lib.rs": "//! b\n"})
+        self.commit(r, {"crates/b/src/lib.rs": GAUGE, **conv})  # a diff cannot excuse its own double
+        self.assertEqual(len(self.dups(r)), 1)
+
+    def test_methods_and_scoped_items_are_not_module_names(self):
+        r = self.repo({g.ARCH: ARCH3, "crates/a/src/lib.rs": "pub struct A;\nimpl A { pub fn new() -> A { A } }\n"})
+        self.commit(r, {"crates/b/src/lib.rs": "pub struct B;\nimpl B { pub fn new() -> B { B } }\n"
+                                               "pub(crate) struct A;\n"})
+        self.assertEqual(self.dups(r), [])
+
+    def test_changed_fn_grown_into_a_near_copy(self):
+        self.assertGreaterEqual(len(g.fn_bodies(rl.RUST, FIRST)["first"].toks), g.CLONE_MIN_TOKENS)
+        r = self.repo({g.ARCH: ARCH3, "crates/a/src/lib.rs": FIRST + SMALL})
+        self.commit(r, {"crates/a/src/lib.rs": FIRST + SECOND})
+        p = self.dups(r)
+        self.assertTrue(len(p) == 1 and "near copy: crates/a/src/lib.rs::first ~ crates/a/src/lib.rs::second" in p[0], p)
+        self.set_dups(clones=["crates/a/src/lib.rs::first ~ crates/a/src/lib.rs::second"])
+        self.assertEqual(self.dups(r), [])
+
+    def test_pair_close_at_base_passes(self):
+        r = self.repo({g.ARCH: ARCH3, "crates/a/src/lib.rs": FIRST + SECOND})
+        self.assertEqual(len(g.close_pairs({"crates/a/src/lib.rs": g.fn_bodies(rl.RUST, FIRST + SECOND)},
+                                           g.tree_arch(r))), 1)
+        self.commit(r, {"crates/a/src/lib.rs": FIRST + SECOND.replace("flush(", "store(")})
+        self.assertEqual(self.dups(r), [])
+
+    def test_no_verdict_is_a_problem(self):
+        r = self.repo({g.ARCH: ARCH3, "crates/a/src/lib.rs": GAUGE})
+        self.commit(r, {"crates/a/src/lib.rs": GAUGE + "pub fn more() {}\n"})
+        p = self.dups(r, base="no-such-ref")
+        self.assertTrue(len(p) == 1 and "no verdict" in p[0], p)
+
+    def test_node_exports(self):
+        arch = "# Architecture\n\n## Module a\nPaths: src/a/\nDepends on: -\n\n## Module b\nPaths: src/b/\nDepends on: -\n"
+        r = self.repo({"package.json": "{}", g.ARCH: arch, "src/a/x.js": "export class Gauge {}\n", "src/b/y.js": "//\n"})
+        self.commit(r, {"src/b/y.js": "export function Gauge() { return 1; }\n"})
+        p = g.problems(r, "main", self.st, self.tmp)
+        self.assertTrue(len(p) == 1 and "`Gauge` added in b" in p[0], p)
+
+
+class DupDebt(Base):
+    def test_init_seeds_and_save_refuses_growth(self):
+        r = self.repo({g.ARCH: ARCH3, "crates/a/src/lib.rs": GAUGE + FIRST + SECOND, "crates/b/src/lib.rs": GAUGE})
+        new = g.init_debt(rl.RUST, self.st, r, "init")
+        key = "crates/a/src/lib.rs::first ~ crates/a/src/lib.rs::second"
+        self.assertEqual(new["dups"], {"names": {"Gauge": 2}, "clones": [key]})
+        old = g.load_debt(self.st)
+        for grown in ({"names": {"Gauge": 3}, "clones": [key]}, {"names": {"Gauge": 2, "Other": 2}, "clones": [key]},
+                      {"names": {"Gauge": 2}, "clones": [key, "x.rs::a ~ x.rs::b"]}):
+            with self.assertRaises(ValueError):
+                g.save_debt(self.st, {**old, "dups": grown}, old)
+        g.save_debt(self.st, {**old, "dups": {"names": {}, "clones": []}}, old)
+
+    def test_tighten_lowers(self):
+        r = self.repo({g.ARCH: ARCH3, "crates/a/src/lib.rs": GAUGE + FIRST + SMALL, "crates/b/src/lib.rs": GAUGE})
+        key = "crates/a/src/lib.rs::first ~ crates/a/src/lib.rs::second"
+        (self.st / g.DEBT).write_text(json.dumps({"rules": {}, "dups": {"names": {"Gauge": 3, "Gone": 2},
+                                                                        "clones": [key]}}), encoding="utf-8")
+        self.assertEqual(sorted(g.tighten(rl.RUST, self.st, r)),
+                         ["dups:clones:" + key + " gone", "dups:names:Gauge 3->2", "dups:names:Gone 2->0"])
+        self.assertEqual(g.load_debt(self.st)["dups"], {"names": {"Gauge": 2}, "clones": []})
 
 
 if __name__ == "__main__":

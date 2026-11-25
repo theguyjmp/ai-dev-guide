@@ -11,5 +11,12 @@ Claude Code skills for rebuilding a project, or building a new one, with a fleet
 - `skills/dev-prep`: brainstorms a new project with the owner in multiple-choice rounds plus research into similar apps, and writes a feature map of what to build now, later or maybe.
 - `skills/dev-plan`: turns that feature map into an audited build spec, following overhaul-plan without the old-project steps.
 - `skills/dev-build`: runs the master agent on that spec, following overhaul-build without salvage or quarantine.
+- `skills/devping`: puts a project on the owner's Discord as one card edited in place; owner-important events (blocked on the owner, work stopped, cycle done) show on it, routine progress never does.
 
-Install: copy the folders in `skills/` into `~/.claude/skills/`.
+Install: copy the folders in `skills/` into `~/.claude/skills/` (or say "dev-setup" in Claude Code and it does it).
+
+The path for a new project: `dev-setup` (tools, sign-in, skills, rules, folder) -> `dev-prep` (feature map) ->
+`dev-plan` (audited spec, repo, dashboard) -> `dev-build` (M0 and the risk slice) -> `fleet-train` for the build
+phase with many agents (merge first: a push reaches `main` after its affected checks, the full suite runs behind it
+and moves `verified`; audit findings are fixed by problem class; see `skills/fleet-train/CYCLE.md`, "The minimum
+cycle") -> `devping` for the owner's card. Python 3.10+ and git 2.38+ are needed for the scripts.

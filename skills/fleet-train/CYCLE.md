@@ -9,7 +9,7 @@ dropped: each one runs at write time (affected, scoped) or behind on the trunk (
 
 ## Before tuning the pipeline: question the work list
 Most lost hours came from what was queued, not from how it was gated: one packet per instance of a recurring defect,
-packets that overlapped in flight, and shared files every packet edited. Fix those three first (the next three
+packets that overlapped in flight, and shared files every packet edited. Fix those three first (the next four
 sections); then measure (the last section) before changing the cycle itself.
 
 ## Fix by problem class, never by instance
@@ -24,14 +24,18 @@ sections); then measure (the last section) before changing the cycle itself.
   at 0 everywhere becomes a hard ban.
 - Then whole-codebase sweeps, one packet per class per group of modules, groups chosen so no two sweeps of a class
   share a module. Sweeps of different classes on one group serialize through the claim footprint (same files).
-  Every sweep packet names the gate packet as a prerequisite, so nothing else is listed while baselines are written.
+  Every sweep packet names the gate packet as a prerequisite, so no sweep is listed while baselines are written
+  (one-offs that touch none of its counters do not wait for it).
   The gate itself never waits for work already in flight: its baselines are counted on the trunk it lands on, and
   in-flight fixes can only lower them (one that raises a count is a real red). Making it wait idles the fleet.
 - Each packet row carries a `class` (a class id, `gate`, or `one-off` for real one-of-a-kind design work, which must
   name its regression test or check) and a `gate` (the counter or owner that keeps the class gone).
-- Enforced in the task loader, not in notes: a row with no valid class, a gate counter that is neither on main nor
-  delivered by a prerequisite, or a second open packet of the same class on an overlapping module group is held with
-  its reason and never published as claimable. A test runs that check over the real plan file on every harness run.
+- Enforced in the task loader, not in notes (`scripts/task_loader.py`, below): a row with no valid class, a gate
+  counter that is neither on main nor delivered by a prerequisite, or a second open packet of the same class on an
+  overlapping module group is held with its reason and never published as claimable. A test runs that check over the
+  real plan file on every harness run.
+- Slow tests are a class too (slow tests / perf budget): its gate is a per-test time budget; a property test that
+  rebuilds a large fixture per case is fixed in the test (open it once, keep every assertion), never by raising a cap.
 - Sample, tune, sweep: tune the gate on a sample of hits before the sweep, so the sweep is mechanical.
 
 ## No shared append points
@@ -49,17 +53,56 @@ sections); then measure (the last section) before changing the cycle itself.
   before building it: every reader of the spec must agree on it.
 - A keyed merge driver resolves conflicts in such files but not patch-id drift; it is no substitute.
 
+## The owners index and the duplicate check
+- Agents create duplicates when they cannot find the owner. The owners index (overhaul-build `index_api.py`: every
+  public item per module with its signature and first doc line) is regenerated on EVERY push as a fix-up commit of
+  the push script, and `index_api.py --check` runs in the static quality stage. An index only one retired step
+  regenerated went stale in 43 files and agents stopped trusting it. Until main's index is fresh, run the check on
+  the writer path only, or the verifier blames in-flight pushes for main's drift.
+- Before adding ANY public item (function, type, enum, trait, const, static), a writer runs
+  `index_api.py --find "<purpose words>"` and a grep for the same rule or body, and names in its commit each owner it
+  reused. Briefs say "every new or renamed public item", not "every function".
+- The LLM duplicate review sees only the functions a diff adds, so it misses a new type, enum or const named like
+  another module's, and a changed function whose signature stayed while its body grew into a copy of a sibling.
+  `rules_gate.py` checks both mechanically (`dup_problems`, in the writer floor, pre-push and the quality stage): a
+  public item named like another module's item fails unless the shrink-only debt (`dups` in state/rules-debt.json,
+  seeded by `rules_gate.py init`) already counts that many modules; a function the diff adds or changes whose body
+  now covers most of a sibling's fails unless that pair was already that close. Names every module declares by
+  design (a per-module contract) go in `overhaul.toml` `[rules] name_conventions` (read from the base too, so a diff
+  cannot exempt its own name); covered: Rust and JS/TS public items; existing doubles are sweep work, never room for more. On the
+  commits that added the duplicates of one audit it flagged 5 of 5 and none of 6 clean fixes.
+
 ## Claiming: footprint and prerequisites
 - A task is claimable only when its prerequisites have landed and its footprint (the modules or packages it may
-  write, from its packet row, else from its file paths) overlaps nothing in flight: no claimed, pushed or not yet
-  rebased task, and no task listed before it. A claimed task stays listed; a fresh claim is never displaced.
-- One owner computes footprints (a typed record: lease areas and prerequisites) and publishes the claimable list
-  plus the footprints; the claim script only reads it. An unknown footprint is logged, never guessed.
-- A session works only listed tasks and lands each with its own land call. A sent-back task is taken again only
-  while its claim is still the session's own or the list still shows it; otherwise it overlaps work in flight and
-  the session ends there.
+  write, from its packet row) overlaps nothing in flight and no task listed before it. In flight = claimed, or pushed
+  but not yet on the published base sessions start from. A task whose push the base holds is NOT in flight: it
+  leases nothing and its claim is released at once (a later revert lists it again, its WIP kept). Holding claims
+  until `verified` moved over them once blocked the gate packet and everything behind it behind 26 landed packets.
+- Lease order: the class's gate packet first (it unblocks every sweep), then the tasks the last publish listed (a
+  fresh claim is never displaced), then plan order. A claimed task stays listed.
+- One owner computes footprints (a typed record: areas, prerequisites, class, gate, absorbed packets) and publishes
+  the claimable list; the claim script only reads it. An unknown footprint (no areas) is logged, never guessed.
+- A session works only listed tasks, each claimed by the claim script and landed with its own land call; it never
+  folds an unlisted task into its land. A sent-back task is taken again only while its claim is still the
+  session's own or the list still shows it; otherwise it overlaps work in flight and the session ends there.
 - Parallel fixers on shared modules collided until this existed; worktrees stop file clobbering, not semantic
   collisions.
+
+## Task loader (shipped: `scripts/task_loader.py`)
+The fix-by-class check and the footprint listing above, as pure functions over a plan file, with tests
+(tests/test_task_loader.py). The plan is Markdown data the loader reads, three tables found by their headers:
+```
+| class | problem | gates |              one row per class; gates = the counters or owners that keep it gone
+| area | group |                        module or package -> module group (two sweeps of a class never share one)
+| id | areas | deps | class | gate | replaces |    one row per packet; class = a class id, `gate` or `one-off`
+```
+- `py -3 task_loader.py --plan <plan.md> --check --repo <repo> --gate-dir <where main declares gates>` exits 1 on
+  any refusal: run it on every harness test run and before publishing a plan.
+- `py -3 task_loader.py --plan <plan.md> --state <loader.json>` prints `{listed, held, release, unknown}` from
+  `{"claimed": [...], "unbased": [...], "done": [...], "previous": [...]}` (done = pushes the published base holds).
+  Your collector writes that state from its refs, publishes `listed` as `<kind>-tasks.txt` (the shipped
+  `claim_task.sh` takes the first unclaimed id in it) and deletes the claim refs in `release`.
+- One-offs never wait for the gate packet unless they touch its counter; they depend only on what their change needs.
 
 ## Invariant and refs
 - `integ`: the trunk. Linear (merge commits refused), moved only by compare-and-swap
@@ -76,17 +119,55 @@ sections); then measure (the last section) before changing the cycle itself.
 ## What ships and what you build
 - Ships in `scripts/` and is reused unchanged: the gate stages (`harness.gate`), the one known-red rule
   (`known_red_tests`), quarantine heal, blame by entry and by file (`blame_entries`, `blame_by_file`), the duplicate
-  review (`batch_review`, `self-review --base`), keyed and line-set merge drivers, ratchets, the claim kit
-  (`cloud.py assign`, `cloud/`), the lock (`harness.lock`). overhaul-build ships derived test group roots.
-- Specified here, built per project on those leaves: the gate scope (every test in the tree but unbuilt rows'; the
-  shipped `gate_tests` still selects proven rows' tests only); a per-push `base` in blame ranges (`own_ranges` takes
-  one cumulative range today); the writer floor's base (`finish.py` compares with `origin/main` today); receipts and
-  the compare-and-swap push; `main` following the trunk and the `verified` ref; the class check and the footprint
-  listing in the task loader (the shipped `claim_task.sh` takes the first free task); the cloud land script and the
-  collector's evidence replay (the shipped `collect` still queues); the verifier loop with batch-first bisecting;
-  the shard protocol and its runner; the shared build cache; the native run behind. Keep each one module with typed
-  records.
+  review (`batch_review`, `self-review --base`) and the mechanical duplicate check (`rules_gate.py`), keyed and
+  line-set merge drivers, ratchets, the claim kit (`cloud.py assign`, `cloud/`), the lock (`harness.lock`).
+  overhaul-build ships derived test group roots and the owners index (`index_api.py`).
+- Ships as a tested reference to build on (the minimum cycle below runs on these alone):
+  `trunk.py` (receipts, the CAS push with its exit codes, `main` following the trunk, unrecorded commits reverted
+  first, a verifier round over closed prefixes n, n/2, ... that moves `verified` to the longest green and reverts an
+  isolated red push, holds); `gate_sha.py` (the full gate on one sha as the verifier's gate command: exit 0 green,
+  1 red, 2 no verdict); `task_loader.py` (the class check and footprint listing); `keepalive.py` (the watchdog).
+- Specified here, built per project when the minimum cycle is too slow or too narrow, one module each with typed
+  records: the gate scope (every test in the tree but unbuilt rows'; the shipped `gate_tests` still selects proven
+  rows' tests only: widen it first); blame and true dependents before a revert (`trunk.py` reverts only an isolated
+  single push; `own_ranges` takes one cumulative range); the writer floor's base (`finish.py` compares with
+  `origin/main`: point it at the trunk commit it rebased onto); the cloud land script and the collector's evidence
+  replay (the shipped `collect` still queues into the retired train: replace that step); sharding, the native run
+  behind and the shared build cache.
 - Retired: `harness.py train --loop` and its queue. Create `state/train.off` so the heartbeat never restarts it.
+
+## The minimum cycle, step by step
+Run every command from `<skill>/scripts` with HARNESS_REPO (the landing clone, which holds the refs) and
+HARNESS_HOME set. On Windows use `py -3`; elsewhere `python3`.
+1. Refs, once: `git -C $HARNESS_REPO branch integ main && git -C $HARNESS_REPO branch verified main`. Protect them
+   on the host so only the landing clone pushes them; writers push only their own branches.
+2. Writer push (the only push path; lanes and the cloud land script run the same lines in the writer's worktree):
+   ```
+   git fetch -q && git rebase integ                       # a conflict refuses: resolve, check again
+   base=$(git rev-parse integ); sha=$(git rev-parse HEAD)
+   FINISH_NO_SUBMIT=1 py -3 finish.py --slot N --name X > check.log    # last line must be GATES OK
+   pid=$(git diff --binary $base $sha | git patch-id --stable | cut -d' ' -f1)
+   { echo "CHECKED $sha $pid"; cat check.log; } > receipt.log
+   py -3 trunk.py push --sha $sha --base $base --log receipt.log --name X --rows R1 R2
+   ```
+   Exit 0 PUSHED, 1 REFUSED, 3 HELD, 4 RECHECK (run the checks again), 5 RACE (rebase, push again; the receipt
+   stays valid while the patch-id is unchanged). Then `git -C $HARNESS_REPO push origin integ main`.
+3. Verifier loop: save as `<HARNESS_HOME>/verify_loop.sh` (S = this skill's scripts folder) and let the watchdog
+   start it detached:
+   ```
+   while true; do
+     py -3 "$S/trunk.py" verify --gate-cmd "py -3 \"$S/gate_sha.py\" {sha}"
+     git -C "$HARNESS_REPO" push -q origin integ main verified
+     sleep 300
+   done
+   ```
+   `trunk.py status` prints `main`, `verified`, unverified pushes, unrecorded commits and any hold;
+   `trunk.py unhold --why "<fix>"` clears a hold after its cause is fixed.
+4. Task loader: the collector runs `task_loader.py --state` each cycle and publishes `listed` (above).
+5. Watchdog: `<HARNESS_HOME>/keepalive.json` lists the verifier loop and the collector (`{"processes": [{"name":
+   "verifier", "cmd": ["bash", "verify_loop.sh"], "cwd": "."}], "disk": {"path": ".", "prune_below_gb":
+   100, "alarm_below_gb": 30, "prune_cmd": []}}`) and is scheduled every 5 minutes with no window (Operations).
+6. Release only from `verified`. Measure (below) before adding sharding, bisect depth or a cache.
 
 ## Records
 - Receipt (one JSON line per push, appended BEFORE the CAS): `id, base, sha, kind (lane | revert | verifier |
@@ -135,9 +216,33 @@ A writer never waits for the verifier; its next work bases on the trunk's head.
 - The collector (every 5 min, git only, nothing built) replays the push with that evidence: the evidence must name
   the branch tip; a young branch without evidence waits (its land run may still be pushing); a lost race rebases (at
   most 3 times); RECHECK, a conflict or a refusal goes back to the task's WIP ref with the reason. It refreshes the
-  base after its landings, so a sent-back session rebases onto what it overlapped. A task is done once `verified`
-  holds its push and no revert undid it; a WIP ref is dropped only then.
+  base after its landings, so a sent-back session rebases onto what it overlapped. Its claim is released as soon as
+  the base holds its push (Claiming); the task is done, and its WIP ref dropped, once `verified` holds it and no
+  revert undid it.
 - Pausing stops new claims; it never throws away claimed work that is still landing.
+- Build these two on `trunk.py` (the shipped `cloud.py collect` still queues a stamped branch into the retired
+  train: replace that call, keep its claim, WIP and release handling):
+  ```
+  <kind>-land.sh <task> <rows...>     (fix-land.sh, plan-land.sh; row-land.sh for builder rows; on the kit branch)
+    rebase onto origin/<base>; run the writer checks (step 2 of the minimum cycle) on the VM -> check.log, GATES OK
+    commit nothing after; push <kind>/cloud-<task> and cloud/check-<kind>-<task> holding
+      check.json {base, head, selection}, finish.log, ROWS
+    print LAND SENT <task> <sha>; poll the outcome note on the kit branch every 60 s for up to 25 min:
+      LANDED <push id>        -> exit 0
+      SENT BACK <reason>      -> re-claim only if the claim is still ours or the task is listed; rebase onto the new
+                                 base; land again (3 rounds at most)
+      nothing yet             -> LAND PENDING, exit 0 (the collector still lands it)
+  collect (every 5 min, git only, nothing built)
+    for each <kind>/cloud-<task> with evidence:
+      evidence head != branch tip           -> send back "evidence names another sha"
+      no evidence and branch younger than 20 min -> wait (its land run may still be pushing)
+      rebase the tip onto integ with git only; a conflict -> send back "conflict with <base>"
+      log = "CHECKED <evidence head> <patch-id of evidence base..head>" + finish.log
+      trunk.py push --sha <rebased> --base <integ> --log log --name <task> --rows ROWS
+        PUSHED -> outcome LANDED; RACE -> rebase again (3 times); RECHECK, REFUSED, HELD -> send back with the reason
+    send back = the branch to cloud/wip-<kind>-<task>, the reason to <kind>-rejects/<task>.md, outcome SENT BACK
+    then: cloud-base = integ; task_loader.py --state -> publish <kind>-tasks.txt; delete the claims in `release`
+  ```
 
 ## Shared warm build cache (cloud writer sessions)
 - A content-hashed compile cache (key: toolchain version, cache tool version, lockfile, repo path) seeded into each
@@ -148,9 +253,26 @@ A writer never waits for the verifier; its next work bases on the trunk's head.
 - Store it where the sessions' git access already reaches, in parts under the host's size limits, published
   atomically with a manifest; a reader that meets a part a newer publish replaced builds cold.
 - Measured: about 1.5x on cloud writer builds. Worth having, not a silver bullet. Shard runners do not use it: they
-  keep their own build warm between gates. Lint runs are not cached by such a
-  tool. Locally, a path-keyed cache missed every workspace crate across per-slot target dirs (0%): keep per-slot warm
-  targets there; the cloud cache works because every session builds at the same path.
+  keep their own build warm between gates. Lint runs are not cached by such a tool. Locally, a path-keyed cache
+  missed every workspace crate across per-slot target dirs (0%): keep per-slot warm targets there; the cloud cache
+  works because every session builds at the same absolute repo path.
+- Build it as one script with four commands (Rust example: sccache, a pinned release checked by sha256; any
+  content-hashed compiler cache fits the same shape):
+  ```
+  key      = sha256(compiler -vV, cache tool version, lockfile, absolute repo path)
+  seed     : install the pinned tool (verify its checksum) -> read the store's MANIFEST {key, gen, parts: [commit]}
+             -> stream every part, check each commit is the one MANIFEST names (else: cold) -> unpack into the local
+             cache dir -> start the cache server -> only if it answers, export the compiler wrapper in the env file
+             every build sources. Prints WARM or COLD; exit 0 either way.
+  needed   : exit 0 (and why) when there is no snapshot, its key differs or it is older than the refresh period;
+             else exit 3. Runs before any setup, so a scheduled refresh that is not due costs nothing.
+  refresh  : seed, then build every test target with incremental compilation off (incremental builds are not
+             cacheable), log hits and misses, compress the cache dir, split it under the host's object size limit,
+             push the parts as orphan commits on fixed branches, push MANIFEST last (it names this generation).
+  ```
+  Keep the store out of the product repo (its own private repo the sessions can fetch); never delete refs (some git
+  proxies refuse it: overwrite fixed branches instead). Writers seed it in step 1 of their brief; COLD never stops a
+  session.
 
 ## Verifier: one round
 1. Fetch. Pushes = the trunk's first-parent chain after `verified`, each matched to its receipt. Unrecorded: revert
@@ -165,7 +287,10 @@ A writer never waits for the verifier; its next work bases on the trunk's head.
 4. Judging a red, one routine for every route: known-red dropped; every failing test re-run alone at the candidate
    (green alone = flaky: quarantined with a fix request, nothing reverted, no hold); red alone at `verified` too =
    pre-existing, healed by quarantine; a test red when every suspect push is documentation no code reads is no
-   push's. Only what stands is blamed.
+   push's. A re-run alone killed by its time cap is NO VERDICT for that test, never red: nothing is blamed or
+   reverted, the test is quarantined as slow with a fix request in the slow-tests class (`TIME_CAP`,
+   `quarantine.slow`), and the rest of the verdict stands (one 21-minute property test past a 15-minute cap under load made two candidates red and stalled
+   `verified` for hours). Only what stands is blamed.
 5. Green: move `verified` by CAS (fast-forward only). Bookkeeping the verifier writes (proven rows, ratchet
    tightening, regenerated indexes, reformatting) goes onto the trunk as its own recorded push. A quarantined test
    whose fix landed is released on the next green.
@@ -214,7 +339,12 @@ gates run it natively.
 - A watchdog every 5 min restarts the verifier, the native verifier and the collector when gone, detached (never as
   an agent shell's child), by pid file, with no visible window (on Windows a hidden-window process start; a console
   that pops up on the owner's screen is a defect). It never starts the retired train. It also guards disk: prune
-  stale targets below a free-space floor, an owner alarm below a lower one.
+  stale targets below a free-space floor, an owner alarm below a lower one. Shipped: `keepalive.py` (an unknown
+  probe is no evidence: it restarts only what is positively gone). Schedule it windowless:
+  Windows `schtasks /Create /SC MINUTE /MO 5 /TN <project>-keepalive /TR "\"<pythonw.exe>\" \"<scripts>\keepalive.py\" --home \"<home>\""`
+  (pythonw has no console); POSIX `*/5 * * * * python3 <scripts>/keepalive.py --home <home>` in crontab.
+- Every background job an agent starts (a land run, a gate, a loop) is windowless and detached the same way, with its
+  output in a file the agent tails; never a visible console, never a child of the agent's shell.
 - Feature flags are state files read each cycle (sharding, bisecting rounds, native run): delete one to turn it off
   without a restart.
 - A script cannot create cloud sessions; it can wake a pool the owner created once.
@@ -227,6 +357,12 @@ gates run it natively.
   measured rate rose.
 - Report only measured rates. An estimate is labelled as one; a claimed speedup without a before and after is not
   reported.
+- The owner's card (the devping skill, one message edited in place) shows these numbers with progress over the WHOLE
+  platform: every planned row, roadmap rows not moved into the plan yet and any separate track, each counted once.
+  Counting only the current plan read 91% while far less was done. It survives re-planning: done counts the plan's
+  packets plus the older packets their `replaces` cells absorb, the rate counts every fix push on main (not only the
+  new plan's ids), and open problems come from the class gates' own counts (the day-one baseline, marked not
+  measured, until the gate lands; never 0). After one switch to class packets the card read 0 done and 0 per hour.
 
 ## Measured (one project, 2026-11-24/25; a Rust workspace of ~4,000 integration tests)
 - Old land train: ~1.5 packets/h at best; the gate itself 60-75 min, the rest picks, rejects and bisects.
@@ -245,6 +381,15 @@ gates run it natively.
   pipeline's. Gate first, then sweep every instance.
 - Shared append points were the measured cause of most send-backs; generate lists, never hand-edit them.
 - Claim by footprint: parallel fixers on shared modules collided and redid each other's work.
+- Release the claim of work the base holds: claims kept until `verified` moved held every lease and blocked the gate
+  packet behind 26 packets already on main.
+- The gate packet goes first and never waits for work in flight: making it wait idled the fleet. One-offs that touch
+  no counter of it never wait for it.
+- The duplicate review sees only added functions: types, enums, consts and grown functions need the mechanical check,
+  and agents need an owners index regenerated on every push.
+- A test killed by its time cap is no verdict, not red; a slow test is a class with a time budget, fixed in the test.
+- The owner's card counts the whole platform and survives a re-plan; a card counting one plan's ids read 0 after it.
+- Every background job runs windowless and detached; a console window opening on the owner's screen is a defect.
 - The full gate runs every built test. A gate scoped to "tests a live row lists" skipped half the files.
 - One known-red list, read by writer and verifier alike; a writer-side copy diverged and blocked good pushes.
 - Static quality stays in the writer's checks: deferring it let cap and wiring reds reach candidates, and blame

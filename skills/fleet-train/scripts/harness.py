@@ -1,8 +1,5 @@
-"""fleet-train harness v2: claim / submit / release for builder agents, and a batch land train.
-
-No LLM in here. Builders are Claude Code Workflow agents; this file only hands out rows,
-keeps per-slot worktrees warm, and lands finished branches in batches (merge all, gate once,
-bisect on red).
+"""fleet-train harness v2: claim / submit / release for builder agents, and a batch land train (merge all, gate
+once, bisect on red). No LLM in here.
 
   py -3 harness.py frontier            # JSON summary of buildable rows
   py -3 harness.py claim --slot N [--wait S]
@@ -10,10 +7,7 @@ bisect on red).
   py -3 harness.py release --slot N --row R --reason "..."
   py -3 harness.py train [--loop]      # land queued branches
   py -3 harness.py status              # one-line rate
-  py -3 harness.py note "<text>"       # append one line to the dated log (<HARNESS_HOME>/notes/log/YYYY-MM.md)
-
-One harness for every stack: HARNESS_STACK=rust (default) or node, or `stack = "node"` in <HARNESS_HOME>/harness.toml,
-whose [profile] table overrides any command or pattern in STACKS below.
+  py -3 harness.py note "<text>"       # append a line to <HARNESS_HOME>/notes/log/YYYY-MM.md
 """
 from __future__ import annotations
 
@@ -52,7 +46,7 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no console windows for
 
 
 def kill_tree(pid: int, sig: int = 9) -> None:
-    """Kill pid and its tree: taskkill /T on Windows, its process group on POSIX (sh() children lead one), else pid."""
+    """Kill pid and its tree: taskkill /T on Windows, else its process group (sh() children lead one) or pid."""
     if os.name == "nt":
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, creationflags=NO_WINDOW)
         return
@@ -82,7 +76,7 @@ def sh(cmd, cwd=REPO, check=True, env=None, timeout=None, stdin=None, low=False,
     try:
         out, err = p.communicate(input=stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
-        # kill the whole tree: a grandchild (app.exe under a test) keeps the pipes open and would hang us forever
+        # kill the tree: a grandchild (app.exe under a test) holds the pipes open
         kill_tree(p.pid)
         try:
             out, err = p.communicate(timeout=60)
@@ -123,7 +117,7 @@ LOCK_PROBE_SECS = 5.0  # a waiter asks whether the holder still runs at most thi
 
 
 def pid_state(pid: int) -> bool | None:
-    """The one process probe: True runs, False gone (positive evidence only), None unknown (the probe failed)."""
+    """The one process probe: True runs, False gone (positive evidence only), None unknown."""
     if os.name != "nt":
         try:
             os.kill(pid, 0)
@@ -149,9 +143,8 @@ def pid_alive(pid: int) -> bool:
 
 
 def _break_dead(p: Path, stale: float, probe: bool = True) -> bool:
-    """Take a dead lock out of the way: its holder pid is gone (probe: dead at once, not after the age limit), or it
-    is older than `stale` (a hung holder). The file moves aside and goes back if it changed since it was read, so two
-    waiters never both break it. True when p is gone."""
+    """Move a dead lock aside: its holder pid is gone, or it is older than `stale` (hung). It goes back if it changed
+    since read, so two waiters never both break it. True when p is gone."""
     try:
         seen, age = p.read_text(encoding="utf-8").strip(), now() - p.stat().st_mtime
     except FileNotFoundError:
@@ -293,9 +286,8 @@ def held_rows() -> set:
 
 def frontier(rows, claims, queue, attempts):
     busy = {c["row"] for c in claims.values()} | landing_ids(queue) | held_rows()
-    # Only rows being BUILT (claims) count against the module cap and file overlap. Counting queued rows (built,
-    # waiting to land) too left 0 of 93 ready rows buildable while 93 waited in the land queue: builders starved
-    # exactly when landing was behind. The trial-merge batch pick handles queued-vs-new overlap at land time.
+    # Only claims count against the module cap and file overlap (counting queued rows starved builders); the batch
+    # pick handles queued-vs-new overlap.
     building = {c["row"] for c in claims.values()}
     inflight = {}
     busy_files = set()
@@ -312,7 +304,7 @@ def frontier(rows, claims, queue, attempts):
         if r["id"] in pri:
             pass
         elif b[r["id"]] < 8 and inflight.get(r["module"], 0) >= MODULE_CAP.get(r["module"], DEFAULT_CAP):
-            continue  # too many rows of this module in flight: they conflict in its shared files
+            continue  # too many of this module in flight: shared files conflict
         if r["id"] not in pri and set(r["file_list"]) & busy_files:
             continue
         queued = {q["row"] for q in queue}
@@ -332,7 +324,7 @@ def slot_wt(slot: int) -> Path:
 
 
 def copy_assets(dst: Path, src: Path = None, globs=None) -> int:
-    """Copy the profile's `copy_ignored` globs from the main checkout into a worktree (real files); returns the count."""
+    """Copy the profile's `copy_ignored` globs from the main checkout into a worktree; the count."""
     src = Path(src or REPO).resolve()
     n = 0
     for g in (P["copy_ignored"] if globs is None else globs):
@@ -377,7 +369,7 @@ def env_for(slot) -> dict:
 
 # ---------------------------------------------------------------- commands
 def reexec_argv() -> list:
-    """The argv a restarted train runs: the project's run_train.py wrapper when there is one, else this file."""
+    """The argv a restarted train runs: the project's run_train.py wrapper, else this file."""
     wrap = Path(__file__).with_name("run_train.py")
     if wrap.exists():
         pyw = Path(sys.executable).with_name("pythonw.exe")
@@ -395,7 +387,7 @@ def cmd_frontier(a):
     print(json.dumps({"frontier": len(f), "top": f[:20], "claimed": len(claims), "queued": len(queue), "status": c}))
 
 
-CLOUD_SLOT0 = int(os.environ.get("HARNESS_CLOUD_SLOT0", "1000"))  # cloud.py slots: expired by `cloud.py collect` (2 h after a cloud session claims), never by CLAIM_TTL
+CLOUD_SLOT0 = int(os.environ.get("HARNESS_CLOUD_SLOT0", "1000"))  # cloud.py slots: expired by `cloud.py collect`, never by CLAIM_TTL
 
 
 def is_cloud(slot) -> bool:
@@ -457,14 +449,12 @@ def cmd_claim(a):
 
 
 class QueueRefused(SystemExit):
-    """queue_sha / queue_clean refused a sha (replace_refusal): a CLI exit with the reason; cloud.py catches it."""
+    """queue_sha / queue_clean refused a sha (replace_refusal); cloud.py catches it."""
 
 
 def replace_refusal(row, sha, slot, replace=False) -> str:
-    """Why `slot` may not queue `sha` over row's queued entry, else "" (caller holds the state lock). A resubmit
-    replaces the queued sha only when it contains it (a restack's requeue-in-place merges it), the same slot queued it,
-    or the lane passes --replace. Pilot: a second lane's unrelated submit of the same fix row replaced the first lane's
-    gated packet and moved h/<row>, silently."""
+    """Why `slot` may not queue `sha` over row's queued entry, else "" (caller holds the state lock). Allowed when sha
+    contains the queued sha, the same slot queued it, or the lane passes --replace."""
     q = next((q for q in load("queue.json", []) if q["row"] == row), None)
     if replace or not q or q.get("slot") == slot or git("merge-base", "--is-ancestor", q["sha"], sha, check=False).returncode == 0:
         return ""
@@ -474,7 +464,7 @@ def replace_refusal(row, sha, slot, replace=False) -> str:
 
 def queue_sha(slot, row, sha, since, replace=False) -> int:
     """Queue sha as slot's submission of row and drop slot's claim (caller holds the state lock); the queue length.
-    Raises QueueRefused when another slot's packet holds the row (replace_refusal)."""
+    QueueRefused when another slot's packet holds the row."""
     if why := replace_refusal(row, sha, slot, replace):
         raise QueueRefused(why)
     git("branch", "-f", f"h/{row}", sha)
@@ -488,7 +478,7 @@ def queue_sha(slot, row, sha, since, replace=False) -> int:
 
 
 def cmd_submit(a):
-    why = submit_dup(slot_wt(a.slot))  # minutes, so before the state lock; the claim is still ours, fix and submit again
+    why = submit_dup(slot_wt(a.slot))  # takes minutes: run before the state lock
     if why:
         sys.exit(why)
     with lock("state"):
@@ -517,9 +507,8 @@ def cmd_release(a):
 
 
 # ---------------------------------------------------------------- stack profile
-# Every stack-specific command and pattern is here, nowhere else. HARNESS_STACK (else `stack` in <HARNESS_HOME>/harness.toml,
-# else rust) picks the profile; a [profile] table in harness.toml overrides any key. Command strings may use {QS} (quality
-# scripts), {files} (the changed files, one run) or {file} (one run per changed file). "" turns a step off.
+# Every stack-specific command and pattern lives here; HARNESS_STACK (else harness.toml `stack`, else rust) picks the
+# profile and a harness.toml [profile] table overrides any key. Placeholders: see expand(); "" turns a step off.
 QS = os.environ.get("HARNESS_QS", str(Path.home() / ".claude/skills/overhaul-build/scripts"))
 JS_EXTS = [".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"]
 STACKS = {
@@ -554,7 +543,7 @@ STACKS = {
         "check": "cargo check -q --workspace --tests",
         "check_exts": [".rs"],
         "check_hint": "cargo check -q --workspace --tests 2>&1 | grep -E '^error' -A5 | head -40",
-        # the unit stage's compile, run by the pick check on main + one row (a warm target rechecks only what changed)
+        # the pick check's compile of main + one row
         "pick_build": "cargo check -q --profile test --lib --bins --workspace",
         "pick_env": {"CARGO_TARGET_DIR": "{targets}/pick"},
         "pick_err_re": r"^error(\[E\d+\])?: (?!could not compile)",
@@ -571,10 +560,9 @@ STACKS = {
         "test_file": "cargo test -q --test {stem}",
         "include_re": r"include_(?:str|bytes)!\(\s*\"([^\"]+)\"\s*\)",
         "include_const_re": r"(?:const|static)\s+(\w+)\s*:[^=;]*=\s*include_(?:str|bytes)!\(\s*\"([^\"]+)\"\s*\)",
-        # env the toolchain needs: on Windows the MSVC linker and cc builds are found through ProgramFiles(x86),
-        # which Git Bash drops. A profile can add its own (harness.toml [profile] require_env = [...]).
+        # MSVC and cc builds need ProgramFiles(x86), which Git Bash drops
         "require_env": ["ProgramFiles(x86)"] if os.name == "nt" else [],
-        # a gate log line that means the toolchain env was wrong, not a row (fleet_beat TRAIN-ENV)
+        # a gate log line meaning a wrong toolchain env, not a bad row (fleet_beat TRAIN-ENV)
         "env_fail_re": r"linker `link\.exe` not found|cannot open input file 'kernel32\.lib'",
         "crate_blame": True,  # unit failures name `-p <CRATE>-x` -> crates/x/
         "owner_fns": True,  # flag local copies of fns core owns (owner_copies)
@@ -590,7 +578,7 @@ STACKS = {
         "test_file_re": r"(^|/)(tests?|__tests__)/|[._-](test|spec)\.[mc]?[jt]sx?$",
         "slot_env": {"NODE_PATH": "{repo}/node_modules"},  # worktrees have no node_modules (CommonJS only; ESM ignores it)
         "train_env": {"NODE_PATH": "{repo}/node_modules"},
-        "fmt": "",  # prettier on the files the train changed, when the project has prettier (load_profile)
+        "fmt": "",  # prettier on changed files, when the project has it
         "unit": "node --test --test-reporter=tap",
         "unit_one": "node --test --test-reporter=tap --test-name-pattern=\"^{name}$\"",
         "name_escape": True,  # unit_one gets re.escape(name)
@@ -606,7 +594,7 @@ STACKS = {
         "done_brief": ("`node --test --test-name-pattern=\"^<test_name>$\" <test file>` for each test in \"tests\" "
                        "(`<file>::*` is the whole file), then `node --check` on each .js/.mjs file you changed"),
         "tail_brief": "pipe test output through tail -30 or grep \"not ok\"",
-        "qa": [],  # {changed} in a command = the files the batch changed vs main. dup_literals.py / check_cycles.py read JS: turn them on in harness.toml once main passes them
+        "qa": [],  # {changed} = files the batch changed vs main
         "accept": "node --test --test-reporter=tap {names} {file}",  # one run per test file
         "accept_name": "--test-name-pattern=^{name}$",  # `file::*` runs the whole file
         "accept_fail_re": r"^\s*not ok \d+ - (.+?)(?: # .*)?$",
@@ -622,7 +610,7 @@ STACKS = {
         "review_skip_re": r"(^|/)(tests?|__tests__)/|[._-](test|spec)\.[mc]?[jt]sx?$",
         "path_re": r"((?:[\w.-]+[\\/])+[\w.-]+\.(?:[mc]?js|jsx|[mc]?ts|tsx))",
         "quoted_path_re": r"[\"'`]((?:\.{1,2}/)*[\w./-]+\.(?:[mc]?js|jsx|[mc]?ts|tsx|json))[\"'`]",
-        "strip_root": True,  # logs carry absolute paths: drop the train root so the names are repo-relative
+        "strip_root": True,  # make logs' absolute paths repo-relative
         "assert_sides_re": "",
         "shrink_cmd": "",
         "include_re": "",
@@ -642,7 +630,7 @@ STACKS = {
 
 
 def derive_unit_one(unit: str, template: str) -> str:
-    """The one-test rerun for an overridden `unit`: a `node --test` unit gets the name filter appended, any other gets ""."""
+    """The one-test rerun for an overridden `unit`: a `node --test` unit gets the name filter, any other ""."""
     if unit.startswith("node --test") and "--test-name-pattern=" in template:
         return f"{unit} --test-name-pattern=" + template.split("--test-name-pattern=", 1)[1]
     return ""
@@ -678,7 +666,7 @@ STACK, P = load_profile()
 
 
 def changed_files(cwd, base: str, dirs=None, exts=None) -> list:
-    """Repo paths added or modified in the tree at `cwd` against `base`, under `dirs`, with one of `exts`."""
+    """Repo paths under `dirs` with one of `exts` added or modified at `cwd` against `base`."""
     r = git("diff", "--name-only", "--no-renames", "--diff-filter=AM", base, "--", *(dirs or []), cwd=cwd, check=False)
     exts = tuple(exts or P["src_exts"])
     return [f for f in r.stdout.split() if f.endswith(exts) and (Path(cwd) / f).exists()]
@@ -727,7 +715,7 @@ def tests_cmd(tests):
 
 
 def run_tests(tests, timeout=1800, solo=None):
-    """Run acceptance tests 'file::name' on the train tree (or the desk). Returns the failed ones (empty = pass)."""
+    """Acceptance tests 'file::name' failing on the train tree (or the desk); empty = pass."""
     if desk.offload(sys.modules[__name__]):
         res = desk.job(sys.modules[__name__], "tests", timeout, tests=sorted(set(tests)), solo=sorted(solo or []))
         lg = ST / "last-gate.txt"
@@ -739,8 +727,7 @@ def run_tests(tests, timeout=1800, solo=None):
 
 
 def unit_runs(cmds, timeout=1800, first_fail=False, cwd=None) -> list:
-    """[CompletedProcess] of each unit command in the train tree (or the desk), in order. cwd: run them in that tree,
-    here, instead (a tree the desk does not hold, such as a cloud builder's scratch merge for `unit-check`)."""
+    """[CompletedProcess] of each unit command, in order, in the train tree (or the desk), or in `cwd` here."""
     if cwd is None and desk.offload(sys.modules[__name__]):
         res = desk.job(sys.modules[__name__], "cmd", timeout * len(cmds), cmds=list(cmds), timeout=timeout,
                        first_fail=first_fail)
@@ -775,11 +762,11 @@ def run_alone(tests, timeout=1800) -> dict:
         for t in tests:
             bad, log = run_cmd_test(t.split("::")[0], [t.split("::", 1)[1]], env)
             tails[t] = (log or "failed") if bad and not perf_debt(t, log) else ""
-    return {t: tail for t, tail in tails.items() if tail}
+    return {t: tail for t, tail in tails.items() if tail and not tail.startswith(TIME_CAP)}  # a time cap: no verdict
 
 
 def perf_debt(t, out) -> bool:
-    """A perf budget failed: meaningless on a loaded laptop, so record it to check later on a quiet machine."""
+    """A perf budget failed: meaningless under load, so record it for a quiet machine."""
     if not re.search(r"over budget|under floor|over the budget|over limit|^BENCH ", out, re.M):
         return False
     with open(ST / "perf-debt.jsonl", "a", encoding="utf-8") as fh:
@@ -808,8 +795,8 @@ def run_cmd_test(f, names, env) -> tuple:
 
 
 def run_tests_cmd(tests, timeout=1800):
-    """One profile `accept` run per test file (in parallel), its failures parsed by `accept_fail_re`; each failure is
-    re-run alone, serially, before it counts (perf and timing tests fail under parallel load)."""
+    """One profile `accept` run per test file, in parallel, failures parsed by `accept_fail_re`; each re-runs alone,
+    serially, before it counts (perf tests fail under load)."""
     if not tests:
         return []
     from concurrent.futures import ThreadPoolExecutor
@@ -842,8 +829,11 @@ def build_test_exes(stems, env, timeout=1800) -> tuple:
     return exes, r
 
 
+TIME_CAP = "time cap: "  # run_one_alone's tail when the alone run was killed: no verdict, never red
+
+
 def run_one_alone(exes, t, env) -> str:
-    """Failure tail of one test run alone; "" on a pass or perf debt."""
+    """Failure tail of one test run alone; "" on a pass or perf debt; TIME_CAP... when killed by its cap."""
     stem, name = Path(t.split("::")[0]).stem, t.split("::")[1]
     if stem not in exes:
         return "no executable"
@@ -856,6 +846,8 @@ def run_one_alone(exes, t, env) -> str:
                 f.unlink(missing_ok=True)
             rr = sh([exes[stem], "--exact", "--test-threads=1", name], cwd=TRAIN, check=False, env=env, timeout=900)
             out = rr.stdout + rr.stderr
+    except subprocess.TimeoutExpired as e:
+        return f"{TIME_CAP}{e.timeout}s"
     except Exception as e:  # noqa: BLE001
         return str(e) or type(e).__name__
     if rr.returncode == 0 or perf_debt(t, out):
@@ -869,8 +861,8 @@ SOLO_DAYS = 2  # a test with a perf-budget miss this recent runs alone only (see
 
 
 def solo_tests(tests) -> set:
-    """Tests with a perf-budget miss in state/perf-debt.jsonl in the last SOLO_DAYS days: they fail under parallel
-    load and are re-run alone anyway, so they run alone only."""
+    """Tests with a perf-budget miss (state/perf-debt.jsonl) within SOLO_DAYS: they fail under load, so run alone
+    only."""
     p = ST / "perf-debt.jsonl"
     if not p.exists():
         return set()
@@ -887,15 +879,13 @@ def solo_tests(tests) -> set:
 
 
 def longest_first(stems, known: dict) -> list:
-    """`stems` in start order: longest recorded time first, an unknown binary (a new row's) before all. Alphabetical
-    order started the slow bench binaries last, so they were the parallel phase's tail."""
+    """`stems` in start order: unknown (new) binaries, then longest recorded time first, so no slow tail."""
     return sorted(stems, key=lambda s: (-known.get(s, float("inf")), s))
 
 
 def run_tests_cargo(tests, timeout=1800, solo=None):
-    """Build the needed test binaries once (release, incremental), run them in parallel, longest first; `solo` tests
-    (default solo_tests) run alone. Returns list of failed 'file::name' (empty = pass).
-    Logs accept_split (build / parallel / serial seconds, slowest binaries and alone runs) and keeps per-binary times."""
+    """Build the test binaries once (release, incremental) and run them in parallel, longest first; `solo` tests
+    (default solo_tests) alone. Failed 'file::name' (empty = pass)."""
     if not tests:
         return []
     from concurrent.futures import ThreadPoolExecutor
@@ -937,15 +927,19 @@ def run_tests_cargo(tests, timeout=1800, solo=None):
             if bad:
                 logs.append(f"== {stem}: {log}")
     t_par = now()
-    # perf/bench tests fail under parallel load: re-run each failure alone, serially, with the solo tests
-    retry, fails, logs, alone = fails + sorted(solo), [], [], {}
+    # perf tests fail under load: re-run each failure alone, serially, with the solo tests
+    retry, fails, logs, alone, capped = fails + sorted(solo), [], [], {}, {}
     for t in retry:
         s0 = now()
         tail = run_one_alone(exes, t, env)
         alone[t] = round(now() - s0)
-        if tail:
+        if tail.startswith(TIME_CAP):
+            capped[t] = tail
+        elif tail:
             fails.append(t)
             logs.append(f"== {Path(t.split('::')[0]).stem}::{t.split('::')[1]} (serial): {tail}")
+    if capped:
+        quarantine.slow(sys.modules[__name__], capped, git("rev-parse", "HEAD", cwd=TRAIN, check=False).stdout.strip())
     if logs:
         (ST / "last-gate.txt").write_text(chr(10).join(logs)[-20000:], encoding="utf-8")
     save(ACCEPT_TIMES, {**load(ACCEPT_TIMES, {}), **took})
@@ -959,8 +953,8 @@ def run_tests_cargo(tests, timeout=1800, solo=None):
 
 
 def fmt_tree(cwd):
-    """rustfmt every workspace target root in batches and commit (`cargo fmt --all` overflows the Windows command
-    line on large workspaces). Other stacks: the profile's `fmt` over the files changed against main."""
+    """rustfmt each workspace target root in batches and commit (`cargo fmt --all` overflows Windows' command line);
+    other stacks: the profile's `fmt` on files changed vs main."""
     if P["fmt"] != "rustfmt":
         for c in expand(P["fmt"], changed_files(cwd, "main")):
             sh(c, cwd=cwd, check=False, timeout=600)
@@ -979,8 +973,8 @@ def fmt_tree(cwd):
 
 
 def regen_tree(cwd) -> str:
-    """Run the profile's `regen` commands (generated files) in the train tree and commit them as "train: regen", so
-    they come from the merged batch. "" or the failure text (the batch fails quality with it)."""
+    """Run the profile's `regen` commands in the train tree and commit them ("train: regen"): generated files come
+    from the merged batch. "" or the failure text."""
     for c in P.get("regen") or []:
         try:
             r = sh(c, cwd=cwd, check=False, timeout=600)
@@ -1003,12 +997,12 @@ def unit_failures(out: str) -> cf.CargoFailures:
     return cf.CargoFailures(tuple(sorted(set().union(*(re.findall(p, out, re.M) for p in P["unit_fail_re"])))))
 
 
-UNIT_BLOCK_CAP = 12000  # chars of one failing test's captured output a red unit log carries, in whole lines
+UNIT_BLOCK_CAP = 12000  # chars of a failing test's captured output in a red unit log (whole lines)
 
 
 def unit_red_log(out: str, new: "cf.CargoFailures | None" = None) -> str:
-    """Output tail, each new failing test's own output (cargo: whole captured block; main's own failures never feed
-    blame), the names last (reject reasons)."""
+    """Output tail, each new failing test's own output (cargo: its captured block; main's failures never feed blame),
+    names last (reject reasons)."""
     failing = unit_failures(out)
     if not failing.found:
         return out[-6000:]
@@ -1030,8 +1024,8 @@ def unit_red_log(out: str, new: "cf.CargoFailures | None" = None) -> str:
 
 
 def unit_flaky(failing: cf.CargoFailures, cwd=None) -> bool:
-    """True when each failing test, and each target that crashed naming none, passes alone on one thread (load
-    flakiness). A cargo rerun must pass a test: `--exact` on a name matching nothing exits 0. cwd as unit_runs."""
+    """True when each failing test, and each target crashed naming none, passes alone on one thread (load flakiness).
+    A cargo rerun must pass a test (`--exact` matching nothing exits 0). cwd as unit_runs."""
     keys = failing.keys()
     if not keys or len(keys) > 5 or not P["unit_one"] or (failing.unnamed and not P["unit_target"]):
         return False
@@ -1046,9 +1040,9 @@ def unit_flaky(failing: cf.CargoFailures, cwd=None) -> bool:
 
 
 def unit_verdict(r, base, cwd=None) -> tuple:
-    """(red, failing) of one unit run r, the gate's one rule: green when it passed, when every failure is main's own
-    (base() gives main's failures; called only after a failure), or when each other failure passes alone (unit_flaky).
-    A failed run whose output names no failure is red."""
+    """(red, failing) of unit run r, the gate's one rule: green when it passed, when every failure is main's own
+    (base(), called only after a failure), or when each other failure passes alone (unit_flaky). A failed run naming no
+    failure is red."""
     if r.returncode == 0:
         return False, cf.from_keys([])
     failing = unit_failures(r.stdout + r.stderr)
@@ -1111,7 +1105,7 @@ QUALITY_BRIEF = ("The plan forbids second copies (spec/STANDARDS.md S1, S5, S6, 
 
 
 def quality_on() -> bool:
-    return True  # owner 2026-11-11: never optional. No flag file; removing this needs a code change and a commit.
+    return True  # never optional: removing it takes a code change
 
 
 OWNED_FN = re.compile(r"^\s*(?:pub(?:\([a-z]+\))?\s+)?fn\s+(unit|unit_above|unit_scaled|cross|cross2|dot|norm|point2|point3|"
@@ -1135,14 +1129,13 @@ def owner_copies(cwd) -> set:
 
 
 def file_line_cap(rel: str) -> int:
-    """The S8 cap for repo path `rel`: test files (profile test_file_re; rust: under a tests/ folder, or tests.rs /
-    *_tests.rs) get TEST_FILE_LINES."""
+    """The S8 cap for repo path `rel`: test files (profile test_file_re) get TEST_FILE_LINES."""
     return TEST_FILE_LINES if re.search(P["test_file_re"], rel) else FILE_LINES
 
 
 def oversized_files(cwd, base: str) -> list:
-    """Size gate: source files (profile src_exts under size_dirs) the tree at `cwd` adds or grows past the cap against
-    `base`. A file already over at `base` is grandfathered until split; renames count as adds."""
+    """Size gate: source files (src_exts under size_dirs) the tree at `cwd` adds or grows past the cap against
+    `base`. A file over at `base` is grandfathered until split; renames count as adds."""
     r = git("diff", "--name-only", "--no-renames", "--diff-filter=AM", base, "--", *P["size_dirs"],
             cwd=cwd, check=False)
     if r.returncode != 0:
@@ -1163,7 +1156,7 @@ def oversized_files(cwd, base: str) -> list:
 
 
 def quality_problems(cwd, base: str = "main", landing=(), plan: str = "spec") -> str:
-    """Output of every quality check that fails (empty = clean). `base` is what the size gate measures growth from."""
+    """Output of every failing quality check (empty = clean); the size gate measures growth from `base`."""
     static = static_problems(cwd, base, plan, landing)
     out = [static] if static else []
     env = run_env(qc_env(cwd))
@@ -1215,8 +1208,7 @@ def static_problems(cwd, base: str = "main", plan: str = "spec", landing=()) -> 
 def cmd_quality_check(a):
     """Used by <repo>/.git/hooks/pre-push: refuse to publish a tree with quality problems."""
     d = Path(a.dir) if a.dir else REPO
-    # --regen: regenerate generated files first, exactly as the train does before its quality stage (regen_tree), so
-    # a pre-push check of a row that changes a generator's input does not fail on drift the train itself would fix
+    # --regen: regenerate first, as the train does, so its fixable drift does not fail
     if getattr(a, "regen", False):
         bad = regen_tree(d)
         if bad:
@@ -1242,8 +1234,8 @@ def cmd_review_prompt(a):
 
 
 def cmd_unit_baseline(a):
-    """Main's unit failures for the tree --dir (checked out at main), written to --out as {"sha", "fails"}: the baseline
-    `unit-check` compares a merged tree against. A builder outside the train (a cloud session) caches it per main sha."""
+    """Main's unit failures for the tree --dir (at main) to --out as {"sha", "fails"}: `unit-check`'s baseline. A
+    builder outside the train caches it per main sha."""
     d = Path(a.dir)
     r = unit_runs([P["unit"]], cwd=d)[0]
     data = {"sha": git("rev-parse", "HEAD", cwd=d).stdout.strip(), "fails": unit_failures(r.stdout + r.stderr).keys()}
@@ -1254,9 +1246,8 @@ def cmd_unit_baseline(a):
 
 
 def cmd_unit_check(a):
-    """The train's unit stage and verdict (unit_verdict) on the tree --dir against --baseline (from `unit-baseline`).
-    Prints MAIN-RED <names> for main's own failures (never the tree's fault), then RED <names> and exit 1 when the tree
-    fails tests main passes and they do not pass alone, else UNIT OK."""
+    """unit_verdict on the tree --dir against --baseline. Prints MAIN-RED <names> for main's own failures, then RED
+    <names> and exit 1 when the tree fails tests main passes that also fail alone, else UNIT OK."""
     base = cf.from_keys(json.loads(Path(a.baseline).read_text(encoding="utf-8"))["fails"])
     if base.found:
         print("MAIN-RED " + "; ".join(base.keys()[:20]))
@@ -1291,10 +1282,8 @@ def cmd_clean_submit(a):
 
 
 def queue_clean(name, sha, slot, front=False, absorbs=None, replace=False) -> None:
-    """Queue sha as row CLEAN-<name> (caller holds the state lock). front: ahead of every queued row (ts = oldest - 1;
-    the train picks by ts), for a fix the owner wants landed first (cloud.py lane fix). absorbs: the rows this
-    integration row lands with it (lands_rows); None keeps the queued entry's own, so a resubmit never drops them.
-    Each is verified against sha first."""
+    """Queue sha as row CLEAN-<name> (caller holds the state lock). front: ahead of every row (ts = oldest - 1).
+    absorbs: rows it lands too (lands_rows), each verified against sha; None keeps the queued entry's."""
     row = f"CLEAN-{name}"
     if why := replace_refusal(row, sha, slot, replace):  # QueueRefused: another slot's packet holds the row
         raise QueueRefused(why)
@@ -1308,7 +1297,7 @@ def queue_clean(name, sha, slot, front=False, absorbs=None, replace=False) -> No
     rest = [q for q in queue if q["row"] != row]
     ts = min([now()] + [q["ts"] for q in rest]) - 1 if front else now()
     entry = {"row": row, "sha": sha, "ts": ts, "slot": slot, **({"absorbs": absorbs} if absorbs else {})}
-    absorb_own_rows(entry, rest)  # the spec rows its own commits carry, so a lane never has to name them
+    absorb_own_rows(entry, rest)  # its commits' spec rows, so a lane never names them
     extra = {"absorbs": entry["absorbs"]} if entry.get("absorbs") else {}
     save("queue.json", rest + [entry])
     event("submit", slot=slot, row=row, sha=sha, **extra)
@@ -1350,11 +1339,11 @@ def gate(new_rows, rows, quick=False):
     """Return (ok, failed_tests, log)."""
     env = run_env(TRAIN_ENV)
     fmt_tree(TRAIN)  # auto-fix formatting, never fail on it
-    bad = regen_tree(TRAIN)  # generated files: regenerated from the merged tree; a failing command fails the batch
+    bad = regen_tree(TRAIN)  # a failing regen fails the batch
     if bad:
         return False, ["quality"], bad
-    if quick:  # retry after ejecting rows whose own tests failed: lint passed with them in; unit is re-run (cheap, and
-        # removing a branch can break another that used it)
+    if quick:  # retry after ejecting rows whose tests failed: lint passed; unit re-runs (removing a branch can
+        # break another that used it)
         with train_stage("unit"):
             r = unit_runs([P["unit"]])[0]
         red, failing = unit_verdict(r, main_unit_baseline)
@@ -1369,7 +1358,7 @@ def gate(new_rows, rows, quick=False):
         event("gate_stage", stage="acceptance-quick", secs=round(now() - t0), fails=len(fails), failed=sorted(fails)[:20])
         log = (ST / "last-gate.txt").read_text(encoding="utf-8", errors="replace")[-20000:] if fails else ""
         return (not fails), fails, log
-    if not quality_on():  # the quality stage's strict clippy is a superset; running both cost ~10 min a train (2026-11-12)
+    if not quality_on():  # the quality stage's strict clippy is a superset
         t0 = now()
         with train_stage("clippy"):
             r = sh(P["lint"] or "exit 0", cwd=TRAIN, check=False, env=env, timeout=1800)
@@ -1401,14 +1390,14 @@ def gate(new_rows, rows, quick=False):
     t0 = now()
     fails = acceptance_tests(tests)
     event("gate_stage", stage="acceptance", secs=round(now() - t0), n=len(tests), fails=len(fails), failed=sorted(fails)[:20])
-    # 2026-11-13: an empty log here sent every unowned acceptance failure to bisect (~18 min a level, 6 h with 0 landed)
+    # an empty log would send every unowned acceptance failure to bisect
     log = (ST / "last-gate.txt").read_text(encoding="utf-8", errors="replace")[-20000:] if fails else ""
     return (not fails), fails, log
 
 
 def build_train(batch, rows):
-    """Merge every queued sha onto main in the train worktree. Returns (merged, conflicted). An entry no longer queued
-    with its sha (superseded) is left out: not merged, not rejected; the queued sha goes in a later train."""
+    """Merge every queued sha onto main in the train worktree; (merged, conflicted). Superseded entries are left out
+    (neither merged nor rejected) for a later train."""
     if stale := superseded(batch):
         event("train_superseded", rows=[q["row"] for q in stale], shas=[q["sha"][:12] for q in stale], at="build")
         batch = [q for q in batch if q not in stale]
@@ -1426,8 +1415,7 @@ def build_train(batch, rows):
             conflicted.append(q)
         else:
             merged.append(q)
-    # 2026-11-11: 16 of 18 rows in one train were rejected on one hot file; each reject cost a
-    # whole builder pass plus another train. Resolve a few here instead; the gate still tests the result.
+    # one hot file can reject most of a train: resolve a few here; the gate still tests the result
     for q in list(conflicted[:RESOLVE_MAX]):
         if resolve_conflict(q):
             conflicted.remove(q)
@@ -1447,7 +1435,8 @@ Row {row}'s branch is being merged onto main. Conflicted files: {files}
 
 
 def resolve_conflict(q):
-    """Merge q again, let a short Sonnet pass resolve the conflict, accept it only if no markers remain and cargo check passes."""
+    """Merge q again with a short Sonnet pass resolving the conflict; accept only with no markers left and cargo
+    check passing."""
     t0 = now()
     git("merge", "-q", "--no-ff", "--no-edit", "-m", f"train: land {q['row']} (conflict resolved)", q["sha"], cwd=TRAIN, check=False)
     files = git("diff", "--name-only", "--diff-filter=U", cwd=TRAIN, check=False).stdout.split()
@@ -1468,7 +1457,7 @@ def resolve_conflict(q):
     return ok
 
 
-# A proven row's prose is dead text (its test is the contract): the proven commit deletes its bullet and packet.
+# A proven row's prose is dead text (its test is the contract): the proven commit deletes it.
 PACKETS = "spec/packets"
 BULLET_RE = re.compile(r"^- ([A-Za-z0-9][\w.-]*): ")
 PACKET_RE = re.compile(r"^- `([A-Za-z0-9][\w.-]*)` ")
@@ -1573,8 +1562,8 @@ def tighten_shrink_lists(tree, base) -> list:
 
 
 def reject(q, reason, locked=False):
-    """Record the reject AND dequeue the row (every reject path: pick checks, rulings, batch rejects). A rejected row
-    left in queue.json was picked again forever. locked=True when the caller already holds the state lock."""
+    """Record the reject AND dequeue the row (every reject path), so it is never picked again. locked=True: the
+    caller holds the state lock."""
     with nullcontext() if locked else lock("state"):
         rj = load("rejects.json", {})
         rj.setdefault(q["row"], []).append({"t": iso(), "by": "train", "sha": q["sha"], "reason": reason[:1500]})
@@ -1584,7 +1573,7 @@ def reject(q, reason, locked=False):
 
 
 def dup_text(dups) -> str:
-    """The one refusal text for duplicates: pick time, submit time and cloud collect all say it the same way."""
+    """The one refusal text for duplicates (pick time, submit time, cloud collect)."""
     why = "; ".join(f"{d['file']}::{d['fn']} duplicates {d['existing']} ({d.get('why', '')[:120]})" for d in dups)
     return ("duplicate capability (STANDARDS S1/S6): reuse or extend the owner, delete your copy: " + why) if why else ""
 
@@ -1594,9 +1583,9 @@ def dup_reason(q, dups) -> str:
 
 
 def submit_dup(cwd) -> str:
-    """Refusal text when the branch checked out in cwd adds a duplicate capability (the pick-time batch_review, same
-    function), else "". Every reported duplicate is the row's own: the diff is merge-base..HEAD of one row. The reviewer
-    being unavailable is not a verdict: say so on stderr and let the row queue, the pick-time review still guards it."""
+    """Refusal text when the branch in cwd adds a duplicate capability (batch_review on merge-base..HEAD, so every
+    duplicate is the row's own), else "". An unavailable reviewer is no verdict: warn on stderr and let the row queue;
+    the pick-time review still guards it."""
     base = git("merge-base", "main", "HEAD", cwd=cwd).stdout.strip() or "main"
     try:
         return dup_text(batch_review([], cwd=cwd, base=base))
@@ -1606,7 +1595,7 @@ def submit_dup(cwd) -> str:
 
 
 def adds_fn(q, d) -> bool:
-    """True when branch q itself adds fn d["fn"] in d["file"] (not merely touches the file)."""
+    """True when branch q itself adds fn d["fn"] in d["file"], not merely touches it."""
     diff = git("diff", "-U0", f"main...{q['sha']}", "--", d["file"], check=False).stdout
     return re.search(r"^\+.*" + P["fn_def_re"].replace("{name}", re.escape(d["fn"])), diff, re.M) is not None
 
@@ -1633,7 +1622,7 @@ REVIEW_MAX_FNS = 300
 
 
 class ReviewUnavailable(Exception):
-    """The duplicate reviewer gave no usable answer twice: the batch waits, it never lands unreviewed (rule zero)."""
+    """The reviewer gave no usable answer twice: the batch waits, never landing unreviewed."""
 
 
 def added_functions(cwd, base: str) -> list:
@@ -1649,13 +1638,13 @@ def added_functions(cwd, base: str) -> list:
 
 
 def review_prompt(added: list) -> str:
-    """The one duplicate-review prompt for `added` (every reviewer gets this text); "" when nothing is added."""
+    """The one duplicate-review prompt for `added`; "" when nothing is added."""
     return REVIEW_PROMPT.format(added=chr(10).join(added[:REVIEW_MAX_FNS])) if added else ""
 
 
 def batch_review(merged, cwd=None, base="main") -> list:
     """Headless reviewer over the functions this batch adds, fail-CLOSED: an empty or unparseable answer is retried
-    once, then ReviewUnavailable defers the batch. Builders run it before submit (`self-review --slot N`)."""
+    once, then ReviewUnavailable defers the batch. Builders run it as `self-review --slot N`."""
     cwd = cwd or TRAIN
     added = added_functions(cwd, base)
     if not added:
@@ -1680,25 +1669,25 @@ def batch_review(merged, cwd=None, base="main") -> list:
     raise ReviewUnavailable(last)
 
 
-GREEN = {"head": ""}  # last gate-verified train head; a bisect's rejected right half stays in HEAD, so never land HEAD
+GREEN = {"head": ""}  # last gate-verified train head; never HEAD, which keeps a bisect's rejected right half
 
 
 def train_spec(rows: dict) -> dict:
-    """`rows` (main's spec) with the merged train tree's spec rows over them: a batch that rewrites a row's acceptance is
-    gated on what it lands, not on main's old line (a spec regen was rejected for a test its row had moved and deleted)."""
+    """`rows` (main's spec) overlaid with the train tree's spec rows, so a batch rewriting a row's acceptance is gated
+    on what it lands."""
     p = TRAIN / SPEC
     return {**rows, **parse_spec(p.read_text(encoding="utf-8", errors="replace"))} if p.is_file() else rows
 
 
 def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
-    """Land as much of batch as possible. Returns list of landed queue entries."""
+    """Land as much of batch as possible; the landed queue entries."""
     merged, conflicted = build_train(batch, rows)
     for q in conflicted:
         reject(q, "merge conflict with main or another branch in the same train; merge main into your branch and resolve")
     if not merged:
         return []
     rows = train_spec(rows)
-    # review first (about a minute): a duplicate found after a 15-min gate would cost a whole second gate run
+    # review first (a minute): a duplicate found after the gate costs a second gate
     if not quick and not reviewed:
         dups = batch_review(merged)
         why = {q["sha"]: dup_reason(q, dups) for q in merged}
@@ -1737,7 +1726,7 @@ def try_batch(batch, rows, depth=0, quick=False, reviewed=False):
             log = (log or "").replace(root + chr(92), "").replace(root + "/", "")
     if len(merged) > 1:
         group, entries, lists = blame_entries(merged, fails, log)
-        if group and len(group) < len(merged):  # every row of one shared cause in one step, the rest gated as one run
+        if group and len(group) < len(merged):  # one shared cause's rows in one step, the rest gated as one run
             why = (f"gate red ({fails[:3]}): your branch changes an entry the failing assert diff names "
                    f"({sorted(entries)[:4]}), as does every row ejected with it: {[q['row'] for q in group]}; "
                    f"lists read: {sorted(lists)[:3]} :: {log[-1200:]}")
@@ -1805,7 +1794,7 @@ def assert_diff_files(log: str) -> set:
 
 def blame_named(rows, fails, log, tree=TRAIN) -> set:
     """Files a red gate names: an assertion diff's alone, else the log's paths, failing crates, failing tests' row
-    files and the files an unowned failing test reads."""
+    files and an unowned failing test's reads."""
     named = assert_diff_files(log)
     if named:
         return named
@@ -1816,7 +1805,7 @@ def blame_named(rows, fails, log, tree=TRAIN) -> set:
     for r_ in rows.values():  # a failing test points at its row's declared files
         if any(t in fails for t in r_["tests"]):
             named |= set(r_["file_list"])
-    for t in fails:  # a test no row owns (a quality or regression test) points at the repo files it reads
+    for t in fails:  # an unowned test (quality, regression) points at the repo files it reads
         src = tree / t.split("::")[0]
         if "::" in t and src.is_file():
             import posixpath  # a relative import ("../x.js") resolves against the test file's folder
@@ -1902,8 +1891,7 @@ def blame_by_file(merged, rows, fails, log, tree=TRAIN):
 
 
 def probe_culprit(merged, rows, fails):
-    """The one row that alone reproduces the failing tests, bisecting with only those tests; None for an interaction
-    (the caller runs the full bisect)."""
+    """The one row that alone reproduces the failing tests (bisected with only those); None for an interaction."""
     cand, t0 = list(merged), now()
     while len(cand) > 1:
         mid = len(cand) // 2
@@ -1924,15 +1912,15 @@ class UnprovenLand(RuntimeError):
 
 
 def superseded(entries) -> list:
-    """The entries no longer queued with their own sha (queue.json now): requeued in place or dequeued since the pick.
-    The one rule for "a row lands only with the sha currently queued" (build_train, try_batch's green path, promote)."""
+    """Entries no longer queued with their own sha (queue.json now): the one rule that a row lands only with its
+    queued sha (build_train, try_batch, promote)."""
     queued = {(q["row"], q["sha"]) for q in load("queue.json", [])}
     return [q for q in entries if (q["row"], q["sha"]) not in queued]
 
 
 def promote(landed):
-    """Fast-forward main to the last gate-verified train head (GREEN); a no-op when main already has it. Raises
-    UnprovenLand when an entry not yet on main is no longer queued with its sha (a requeue in place mid-train)."""
+    """Fast-forward main to GREEN (the last gate-verified head); no-op when there. UnprovenLand when an entry not on
+    main is no longer queued with its sha."""
     head = GREEN["head"]
     before = git("rev-parse", "main").stdout.strip()
     if not head or head == before:
@@ -1950,7 +1938,7 @@ def promote(landed):
 
 
 def tighten_rules_debt(before, head):
-    """Lower the rules debt to the landed files' counts in the train tree; an error is an event, never a failed land."""
+    """Lower the rules debt to the landed files' counts; an error is an event, never a failed land."""
     files = git("diff", "--name-only", "--no-renames", before, head, check=False).stdout.split()
     try:
         with lock("rules-debt"):
@@ -1966,17 +1954,16 @@ TRAIN_CODE = ("harness.py", "desk.py", "quarantine.py", "rules_gate.py", "rules_
 
 
 def train_code() -> dict:
-    """{path: mtime} of the train's own modules: a change to any of them restarts it between trains."""
+    """{path: mtime} of the train's own modules: any change restarts it between trains."""
     here = Path(__file__).resolve().parent
     return {p: p.stat().st_mtime for p in (here / n for n in TRAIN_CODE) if p.exists()}
 
 
 def cmd_train(a):
     missing = [v for v in P["require_env"] if not os.environ.get(v)]
-    if missing:  # measured: a train started from Git Bash (no ProgramFiles(x86)) found no MSVC toolchain, every native
-        # test failed and 16 innocent rows were rejected. Refuse to start instead.
+    if missing:  # without it every native test fails and innocent rows are rejected
         sys.exit(f"train: {', '.join(missing)} not set (started from Git Bash?): start the train from PowerShell or cmd")
-    if a.loop:  # restart and kill scripts use this pid (and its tree), never a machine-wide command-line pattern
+    if a.loop:  # restart and kill scripts use this pid, never a command-line pattern
         (ST / "train.pid").write_text(str(os.getpid()), encoding="utf-8")
     born = train_code()
     while True:
@@ -2006,7 +1993,7 @@ DESK_RETRY_SECS = 300
 MIN_BATCH = int(os.environ.get("HARNESS_MIN_BATCH", "8"))
 BATCH_WAIT_BUSY = int(os.environ.get("HARNESS_BATCH_WAIT_BUSY", str(25 * 60)))  # max wait for MIN_BATCH while claims are in flight
 BATCH_WAIT = 600
-# measured: batches of <=30 rows landed 20-38 rows/h; every 42-80-row batch landed 0 (one bad row or clash per ~10 rows)
+# bigger batches land less: one bad row or clash per ~10 rows
 BATCH_CAP = int(os.environ.get("HARNESS_BATCH_CAP", "20"))
 
 
@@ -2061,14 +2048,10 @@ SKIP_PARENT = "pick-skip-parent.json"  # {row: sha}: queued rows whose pick_skip
 
 
 def stacked_on(picks: list, blockers: dict, base: str = "main") -> list:
-    """[(q, parent sha)] for the picks whose sha carries the unlanded commit (base..q, git ancestry) of a blocker:
-    {sha: (row, rejected)}, rows the train rejected and rows queued outside the picks. Landing q would land the
-    parent's rejected or unjudged code through the child (pilot: a batch started with 5 rows stacked on 4 rows the
-    pick check and gate_rows had just rejected). Exempt: a blocker that is a pick, and one a pick re-lands on purpose:
-    a pick landing the blocker's row (lands_rows: q itself, the parent's fix on top of its rejected sha, a row it
-    absorbs) carries it, so the child rides with its parent's layer (pilot: skipping those landed one layer of each
-    stack a train). A skipped pick blocks its own descendants and no longer re-lands its row's shas (fixpoint).
-    Rejected parent named first."""
+    """[(q, parent sha)] for picks whose sha carries a blocker's unlanded commit (base..q): landing q would land the
+    parent's rejected or unjudged code. Exempt: a blocker that is a pick, or whose row a pick lands (lands_rows): the
+    child rides with its parent. A skipped pick blocks its own descendants and re-lands none of its row's shas
+    (fixpoint). Rejected parent first."""
     left, out = list(picks), []
     carried = {q["sha"]: set(git("rev-list", f"{base}..{q['sha']}").stdout.split()) for q in picks}
     while True:
@@ -2087,9 +2070,8 @@ def stacked_on(picks: list, blockers: dict, base: str = "main") -> list:
 
 
 def pick_blockers(picks: list) -> dict:
-    """{sha: (row, rejected)} the picks must not carry: every sha the train rejected (rejects.json; reject() dequeues
-    it, so the next pick no longer sees it queued) and every row still queued (queue.json, not the pick's filtered
-    copy) outside the picks."""
+    """{sha: (row, rejected)} picks must not carry: every rejected sha (rejects.json) and every queued row
+    (queue.json, not the filtered pick copy) outside the picks."""
     picked = {q["sha"] for q in picks}
     out = {r["sha"]: (row, True) for row, rs in load("rejects.json", {}).items() for r in rs if r.get("sha")}
     out.update({q["sha"]: (q["row"], False) for q in load("queue.json", []) if q["sha"] not in picked})
@@ -2097,8 +2079,8 @@ def pick_blockers(picks: list) -> dict:
 
 
 def skip_stacked(picks: list) -> list:
-    """The picks stacked_on a blocker: not picked, they stay queued until the parent lands (or are restacked off a
-    rejected one). Each skipped (row, sha) is logged once as pick_skip_parent, not on every idle pick."""
+    """The picks stacked_on a blocker: they stay queued until the parent lands or they are restacked. Each (row, sha)
+    logs pick_skip_parent once."""
     blockers = pick_blockers(picks)
     hits = stacked_on(picks, blockers)
     with lock("state"):
@@ -2112,7 +2094,7 @@ def skip_stacked(picks: list) -> list:
     return [q for q, _ in hits]
 
 
-MERGE_DRIVERS = {  # name -> (description, command): the drivers the project's .gitattributes names for its data files
+MERGE_DRIVERS = {  # name -> (description, command) of each .gitattributes driver
     "lineset": ("three-way merge of a line-set data file (fleet-train harness)",
                 f"{PY} {(HOME / 'lineset_merge.py').as_posix()} %O %A %B %P"),
     "keyed": ("three-way merge of a keyed spec file by row, bullet or [[test]] entry (fleet-train harness)",
@@ -2121,9 +2103,8 @@ MERGE_DRIVERS = {  # name -> (description, command): the drivers the project's .
 
 
 def ensure_merge_drivers() -> None:
-    """Register every MERGE_DRIVERS driver in the repo config, so every local merge and merge-tree (train, picker,
-    conflict checks, slot worktrees, which share the repo config) merges those files the same way. Another clone
-    runs the same `git config` lines once (SKILL.md "Merge drivers")."""
+    """Register every MERGE_DRIVERS driver in the repo config, shared by every local merge and merge-tree. Another
+    clone runs the same `git config` lines once (SKILL.md)."""
     for name, (description, command) in MERGE_DRIVERS.items():
         if git("config", "--get", f"merge.{name}.driver", check=False).stdout.strip() != command:
             git("config", f"merge.{name}.name", description)
@@ -2131,10 +2112,9 @@ def ensure_merge_drivers() -> None:
 
 
 def disjoint(queue: list) -> list:
-    """Oldest first, the rows that merge cleanly onto main plus every earlier pick (git merge-tree; file-disjoint
-    before git 2.38). A fixed point: a row is a candidate while a candidate anywhere in the queue lands (lands_rows)
-    each unproven row it carries, so a stack goes whole or waits (state/pick-held.json); a conflicting candidate
-    waits, and the fixed point is retaken without it."""
+    """Oldest first, the rows that merge cleanly onto main plus every earlier pick (git merge-tree). Fixed point: a row
+    stays a candidate while candidates land each unproven row it carries (lands_rows), so a stack goes whole or waits
+    (state/pick-held.json)."""
     ensure_merge_drivers()
     main = git("rev-parse", "main").stdout.strip()
     spec = main_spec()
@@ -2172,10 +2152,9 @@ def disjoint(queue: list) -> list:
 
 
 def lands_rows(q) -> list:
-    """The rows queue entry q lands: its own, then the rows an integration entry absorbs on purpose (`absorbs`, set by
-    clean-submit --absorbs). The one answer for the hold rule, the frontier, the gate's new rows, finish_spec and the
-    land event.
-    In a train, gate_rows adds `proves` (memory only): rows the branch's spec marks proven and main's does not."""
+    """The rows queue entry q lands: its own, then its `absorbs`; the one answer for the hold rule, frontier, gate's
+    new rows, finish_spec and land event. In a train gate_rows adds `proves` (memory only): rows the branch's spec marks
+    proven and main's does not."""
     return [q["row"], *q.get("absorbs", []), *q.get("proves", [])]
 
 
@@ -2185,9 +2164,8 @@ def landing_ids(entries) -> set:
 
 
 def absorbs_unverified(sha: str, absorbs) -> list:
-    """The rows of `absorbs` whose commits sha does not contain, by git: sha must carry commits under the row's own
-    subject (main..sha; a spec row may be one the branch adds), and the row's h/<row> tip, when that branch exists,
-    must be an ancestor of sha."""
+    """`absorbs` rows sha does not verify: it must carry commits under the row's subject (main..sha) and, if h/<row>
+    exists, descend from its tip."""
     if not absorbs:
         return []
     spec = {**main_spec(), **parse_spec(git("show", f"{sha}:{SPEC}", check=False).stdout)}
@@ -2201,12 +2179,10 @@ def absorbs_unverified(sha: str, absorbs) -> list:
 
 
 def gate_rows(entries, rows) -> list:
-    """Fill rows (main's spec, the gate's) with each row the entries land that main's spec lacks: a CLEAN-* row as a
-    test-less cleanup stub; an absorbed spec row from the entry's own spec (an integration row may add it), status
-    "absorbed" until it lands, so the gate runs its acceptance tests as a new row's and finish_spec marks it proven.
-    A row the branch's spec marks proven and main's does not lands with the entry too (q["proves"]), so its tests run
-    here: a merge would otherwise bring it to main proven, untested (CLEAN-int3 carried 8 such rows, 2026-11-18).
-    Returns [(entry, why)] for entries landing a spec row with no acceptance tests: no row is proven without its tests."""
+    """Fill rows (main's spec) with each row the entries land that main's spec lacks: a CLEAN-* row as a test-less
+    stub, an absorbed spec row from the entry's spec as "absorbed" (gated, then marked proven by finish_spec). Rows the
+    branch marks proven and main does not (q["proves"]) are gated too. Returns [(entry, why)] for entries landing a spec
+    row with no acceptance tests."""
     bad = []
     for q in entries:
         q.pop("proves", None)
@@ -2229,8 +2205,8 @@ def gate_rows(entries, rows) -> list:
 
 
 def carried_rows(q, spec: dict) -> set:
-    """Rows other than the ones q lands (lands_rows) whose commits (not on main) q's branch carries: a commit subject starting `<row id>:`
-    or `stack: <row id>` for a spec row or a CLEAN-* fix. A stacked row landing without them fails the plan check."""
+    """Rows other than q's own (lands_rows) whose unlanded commits q's branch carries, by subject (`<row id>:` or
+    `stack: <row id>`); landing without them fails the plan check."""
     subj = git("log", "--no-merges", "--format=%s", f"main..{q['sha']}", check=False).stdout
     return {i for i in subject_ids(subj) if i in spec or i.startswith("CLEAN-")} - set(lands_rows(q))
 
@@ -2241,15 +2217,9 @@ def subject_ids(subj: str) -> list:
 
 
 def own_spec_rows(q: dict, queue: list) -> list:
-    """The spec rows queue entry q's own commits carry that no other entry lands: q should absorb them. Own commits:
-    main..sha minus the commits of the queued entries it stacks on: those whose sha q's branch contains and those
-    whose row q's commits carry by subject (a parent resubmitted under a new sha that still holds the old parent
-    commits; a child stacked on q is never one, so a parent's resubmit keeps its rows). None when the own commits
-    still carry another CLEAN-* row: q stacks on a parent that is not queued,
-    whose rows are the parent's to absorb (a child taking them would hold the parent's resubmit for good). Kept: a
-    spec row (main's or the branch's spec) that main does not mark proven, that no other entry lands (landing_ids: an
-    id is never moved off the entry that absorbs it) and that absorbs_unverified passes. A lane that builds spec rows
-    inside a clean row and names none of them would otherwise hold every row stacked on it at pick."""
+    """The spec rows q's own commits (main..sha minus those of queued entries it stacks on) carry that no other entry
+    lands: q should absorb them. None when they still carry another CLEAN-* row (an unqueued parent's rows are its own
+    to absorb). Kept: rows main does not mark proven, no other entry lands (landing_ids) and absorbs_unverified passes."""
     sha, others = q["sha"], [o for o in queue if o["row"] != q["row"]]
     mine = set(git("rev-list", f"main..{sha}", check=False).stdout.split())
     own = lambda under: subject_ids(git("log", "--reverse", "--no-merges", "--format=%s", sha, "--not", "main", *under,
@@ -2271,8 +2241,8 @@ def own_spec_rows(q: dict, queue: list) -> list:
 
 
 def absorb_own_rows(q: dict, queue: list) -> list:
-    """Add own_spec_rows(q, queue) to q's absorbs in place and log absorbs_auto (caller holds the state lock and saves
-    the queue): the one writer of automatic absorbs. Returns the ids added."""
+    """Add own_spec_rows to q's absorbs and log absorbs_auto (caller holds the state lock, saves the queue): the one
+    writer of automatic absorbs; the ids added."""
     add = own_spec_rows(q, queue)
     if add:
         q["absorbs"] = [*q.get("absorbs", []), *add]
@@ -2335,7 +2305,7 @@ def merged_commit(base: str, sha: str) -> str | None:
 
 
 def main_static_clean(base: str, cache: dict) -> bool:
-    """A main that fails the static checks itself rejects no row (its problems are not the row's)."""
+    """A main failing the static checks itself rejects no row."""
     if cache.get("_main", {}).get("sha") != base:
         wt = pick_slot(0).wt
         pick_checkout(base, wt)
@@ -2357,8 +2327,8 @@ def in_acceptance() -> bool:
 
 
 def pick_compile(commit: str, background: bool = False) -> tuple:
-    """(ok, error lines) of P["pick_build"] at `commit` in PICK_WT; NoVerdict on a timeout and, unless
-    background (below normal, pid in PICK_BACKGROUND_PID), in acceptance."""
+    """(ok, error lines) of P["pick_build"] at `commit` in PICK_WT; NoVerdict on a timeout, and in acceptance unless
+    background (PICK_BACKGROUND_PID)."""
     if not background and in_acceptance():
         raise NoVerdict("the train is in its acceptance stage")
     pick_checkout(commit)
@@ -2426,8 +2396,7 @@ def pick_verdict(q: dict, base: str, cache: dict, slot: PickSlot | None = None, 
     entry, wt = cache.setdefault(q["sha"], {"row": q["row"]}), (slot or pick_slot(0)).wt
     pick_checkout(merged, wt)
     if entry.get("checks") != PICK_CHECKS:
-        # generated files come from the merged tree first, exactly as the train regenerates before its quality stage
-        # (a row that changes a generator's input was rejected for drift the train itself would have fixed)
+        # regenerate first, as the train does: its fixable drift never rejects
         log = chr(10).join(x for x in (regen_tree(wt), static_problems(wt, base, plan="off"),
                                        *rules_gate.row_plan_problems(wt, base, WT, (q["row"],))) if x)
         if log:
@@ -2446,10 +2415,9 @@ def pick_verdict(q: dict, base: str, cache: dict, slot: PickSlot | None = None, 
     return ""
 
 
-# Pick acceptance: `harness.py pick-accept` (schedule it every few minutes; on while <state>/pick-accept-on exists) runs
-# each queued row's owner_tests on the desk, merged onto the code the next pick sees (the batch head while a batch
-# gates, else main). Never in acceptance; the gate's Desk.setup kills it (desk.pick_stop). pick_screen rejects a red
-# verdict while main's code equals its base (only the spec differs); no verdict leaves the row to the gate.
+# Pick acceptance (`harness.py pick-accept`, on while <state>/pick-accept-on exists): each queued row's owner_tests on
+# the desk, merged onto what the next pick sees. Never during acceptance (desk.pick_stop). pick_screen rejects a red
+# verdict while main's code equals its base; no verdict leaves the row to the gate.
 PICK_ACCEPT_ON = "pick-accept-on"
 PICK_ACCEPT = "pick-accept.json"  # {sha: {row, base, ok, fails, tests, log, secs, send_secs}}
 PICK_ACCEPT_PID = "pick-accept.pid"
@@ -2554,8 +2522,8 @@ def pick_screen(picks: list, budget: float = float("inf"), workers: int = PICK_P
 
 
 def pick_rows(todo: list, base: str, cache: dict, deadline: float, workers: int) -> dict:
-    """{sha: reason} of the failing `todo` rows, up to `workers` at once, each in its own PickSlot on a copy of
-    its cache entry; this thread alone writes `cache`, saved per verdict."""
+    """{sha: reason} of the failing `todo` rows, `workers` at once, each in a PickSlot on a copy of its cache entry;
+    only this thread writes `cache`, saved per verdict."""
     slots = [pick_slot(i) for i in range(max(1, min(workers, len(todo))))]
     for s in slots:  # serially: parallel worktree adds race
         if not (s.wt / ".git").exists():
@@ -2604,9 +2572,8 @@ def owes_prescreen(entry: dict, head: str) -> bool:
 
 
 def prescreen(skip, stop, poll: float = PRESCREEN_POLL, accepting=None, head=None) -> int:
-    """Warm the pick cache while a batch gates: queued rows outside `skip` that owe it, oldest first, until
-    `stop`. Static checks and review on main; in acceptance also the compile on the batch head, in the
-    background. Never a reject or a lock. Rows passed."""
+    """Warm the pick cache while a batch gates: rows outside `skip` that owe it, oldest first, until `stop`: static
+    checks and review on main, in acceptance the compile on the batch head. Never rejects or locks. Rows passed."""
     accepting, head = accepting or in_acceptance, head or pick_accept_base
     tried, red, n = set(), set(skip), 0  # tried: (sha, compile base)
     while not stop.is_set():
@@ -2665,9 +2632,8 @@ def train_once():
             queue = [q for q in queue if q["row"].startswith("CLEAN-")]
             if not queue:
                 return False
-        # a gate run costs ~15-20 min whatever the size: wait for a real batch (8 rows) or 10 min since the oldest
-        # 2026-11-12: a 1-row train cost a full 22-min gate while 10 rows queued behind it. While builders still hold
-        # claims, wait up to BATCH_WAIT_BUSY for a fuller batch; with no claims in flight nothing more is coming: go now.
+        # a gate costs ~15-20 min at any size: while builders hold claims wait up to BATCH_WAIT_BUSY for MIN_BATCH
+        # rows; with no claims nothing more is coming: go now
         in_flight = len(load("claims.json", {}))
         wait = BATCH_WAIT_BUSY if in_flight else 0
         queue = sorted(queue, key=lambda q: q["ts"])
@@ -2687,7 +2653,7 @@ def train_once():
                 break
             queue = [q for q in queue if q["sha"] not in bad]
             batch = disjoint(queue)[:BATCH_CAP]
-        if not batch:  # every queued row conflicts with main: normal conflict handling, then idle (never an empty train)
+        if not batch:  # every queued row conflicts: normal conflict handling, then idle (never an empty train)
             for q in queue:  # skipped rows already left this list: they stay queued for their parents
                 reject(q, "merge conflict with main; merge main into your branch and resolve")
             ride = f"; {len(skipped)} ride on a rejected or queued parent" if skipped else ""
@@ -2723,7 +2689,7 @@ def land_batch(batch: list, rows: dict, t0: float) -> bool:
     event("train_end", landed=sorted(landing_ids(landed)), tried=len(batch), secs=round(now() - t0))
     for gen in ("dash.py",):  # dashboards are regenerated by the train, never by memory
         if (HOME / gen).exists():
-            # run detached: a slow dashboard (15 min timeout) inside the train lock blocked every next batch
+            # detached: a slow dashboard inside the train lock blocked every next batch
             subprocess.Popen([*PY.split(), str(HOME / gen)], cwd=HOME, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              creationflags=NO_WINDOW)
     print(f"{iso()} train: landed {len(landed)}/{len(batch)} in {round(now() - t0)}s", flush=True)
@@ -2732,8 +2698,7 @@ def land_batch(batch: list, rows: dict, t0: float) -> bool:
 
 
 def read_events() -> list:
-    """events.jsonl, skipping blank or half-written lines (2026-11-12: one blank line took status, the card and the
-    dashboard down)."""
+    """events.jsonl, skipping blank or half-written lines."""
     out = []
     if (ST / "events.jsonl").exists():
         for line in open(ST / "events.jsonl", encoding="utf-8"):

@@ -22,8 +22,9 @@ frontier). You write no product code beyond the stubs the plan needs.
      index) and a stub (`todo!()`) the builder replaces.
 5. Keep test functions, source files and test files under the project's size caps; format your files. Run the project's
    strict lint and unit tests; both must be clean.
-6. Commit `plan: phase <N> part (<k> rows)` and `git push -q origin plan/cloud-<phase>`. Never push main, cloud-base or
-   harness-cloud. Report `DONE <phase> <k> rows; left in ROADMAP: <ids>`.
+6. Commit `plan: phase <N> part (<k> rows)`, push the WIP, then land it with the project's land script in the
+   background, as `FIXER.md` steps 8-9 say (`plan-land.sh <phase>` from harness-cloud). Never push main, the trunk,
+   cloud-base or harness-cloud. On `LANDED` or `LAND PENDING` report `DONE <phase> <k> rows; left in ROADMAP: <ids>`.
 
 **Git discipline.** Same as the builder: push `cloud/wip-<id>` with `HANDOFF-<id>.md` (at most 10 lines) after the first
 compiling step and every ~15 tool calls or ~10 minutes; on a limit warning push it and report `HANDOFF <id>: cloud/wip-<id>`.

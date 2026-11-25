@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hand a row back: push cloud/release-<row> holding a REASON file (the train machine releases the claim with it) and
+# Hand a row back: push cloud/release-<row> holding a REASON file (the collector releases the claim with it) and
 # keep the work in progress as cloud/prev-<row> so the next attempt merges it.
 #   bash tools/cloud/release.sh <row> "<reason>"
 set -euo pipefail

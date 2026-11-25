@@ -1290,7 +1290,7 @@ def row_files(r):
 
 
 def api_packets(text):
-    """{row id: [(line, signature bullet, packet text or '')]} from the ARCHITECTURE API bullets (`- \`sig\` [F04]`)
+    """{row id: [(line, signature bullet, packet text or '')]} from the ARCHITECTURE API bullets (`- <sig> [F04]`)
     and their `Packet:` / `Packet F04:` line (on the bullet or an indented line under it)."""
     out, cur = {}, None
     for n, line in enumerate(text.splitlines(), 1):

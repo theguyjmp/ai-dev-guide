@@ -3,7 +3,7 @@
 # A claim is a push of a brand-new ref cloud/claim-<row>: a unique commit, so a second session's push is rejected.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
-BASE=${CLOUD_BASE:-cloud-base}   # the train machine's main, mirrored by cloud.py collect
+BASE=${CLOUD_BASE:-cloud-base}   # the trunk's head, published by the collector
 QA=/tmp/harness-qa               # cloud.py rewrites the quality commands to run from here
 KIT=${HARNESS_CLOUD_KIT:-tools/cloud}
 git config user.email >/dev/null || git config user.email "cloud-builder@example.invalid"
@@ -27,7 +27,7 @@ mkdir -p "$QA" && for p in $(git ls-tree --name-only origin/harness-cloud qa/); 
   git show "origin/harness-cloud:$p" > "$QA/$(basename "$p")"; done
 git show "origin/harness-cloud:assign/$row.json" > "$A"
 git checkout -q -B "cloud/$row" "origin/$BASE"
-# deps still waiting for the land train (stack, merged clean or skipped), then the earlier attempt to salvage
+# deps pushed but not on the base yet (stack, merged clean or skipped), then the earlier attempt to salvage
 for s in $(field stack); do
   git fetch -q origin "+refs/heads/${s#origin/}:refs/remotes/$s" && git merge -q --no-edit -m "stack: ${s##*-}" "$s" \
     || { git merge --abort 2>/dev/null; echo "stack $s did not merge clean: skipped"; }
