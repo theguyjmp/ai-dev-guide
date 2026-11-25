@@ -25,6 +25,8 @@ sections); then measure (the last section) before changing the cycle itself.
 - Then whole-codebase sweeps, one packet per class per group of modules, groups chosen so no two sweeps of a class
   share a module. Sweeps of different classes on one group serialize through the claim footprint (same files).
   Every sweep packet names the gate packet as a prerequisite, so nothing else is listed while baselines are written.
+  The gate itself never waits for work already in flight: its baselines are counted on the trunk it lands on, and
+  in-flight fixes can only lower them (one that raises a count is a real red). Making it wait idles the fleet.
 - Each packet row carries a `class` (a class id, `gate`, or `one-off` for real one-of-a-kind design work, which must
   name its regression test or check) and a `gate` (the counter or owner that keeps the class gone).
 - Enforced in the task loader, not in notes: a row with no valid class, a gate counter that is neither on main nor
