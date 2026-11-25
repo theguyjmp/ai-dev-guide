@@ -13,7 +13,8 @@ and reverts what fails (fleet-train CYCLE.md).
 2. Claim: `bash tools/cloud/claim_task.sh fix`. It claims the first free task of `fix-tasks.txt` on harness-cloud,
    which lists only claimable tasks (prerequisites landed, footprint overlapping nothing in flight; a task not
    listed is never yours to take): a unique commit pushed to `cloud/fix-claim-<task>`. It checks out
-   `fix/cloud-<task>` from the base, or from `cloud/wip-fix-<task>` merged with the base. `NO TASK`: stop and report it. `MERGE CONFLICT`: resolve, commit.
+   `fix/cloud-<task>` from the base, or from `cloud/wip-fix-<task>` merged with the base. `NO TASK`: stop and report
+   it. `MERGE CONFLICT`: resolve, commit.
    Read the task `git show origin/harness-cloud:fix-tasks/<task>.md`, why an earlier branch came back
    `git show origin/harness-cloud:fix-rejects/<task>.md` (fix that first) and `HANDOFF-fix-<task>.md` if resuming.
 3. Recheck the packet on your branch: grep the WHOLE module group for the class, not only the cited lines (cite
@@ -22,9 +23,9 @@ and reverts what fails (fleet-train CYCLE.md).
    documents still load" where a stored shape changes. Never edit or weaken another row's test.
 5. Fix in the owner: before adding any function find the owner (the project's index search, then grep for the same rule
    or body); fold every copy into the owner and delete it. Fix every instance of the class in your modules and lower
-   their ratchet baselines to the new count in the same change (never raise one; another group's entries are not
-   yours). Green: the new test, the owning modules' unit tests, the acceptance tests that drive what you touched,
-   the strict linter on what you touched, the formatter.
+   their ratchet entries to the new count (never raise one; another group's entries are not yours). Green: the new
+   test, the owning modules' unit tests, the acceptance tests that drive what you touched, the strict linter on what
+   you touched, the formatter.
 6. Record the packet's roadmap rows as fixed the way the project records finished clean-up rows, so no planner plans them
    again. Never hand-edit a shared list or generated index: add your own files and let the generator register them.
    Commit `fix(<module>): <task> <what>`.

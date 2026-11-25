@@ -18,10 +18,10 @@ sections); then measure (the last section) before changing the cycle itself.
   a lint whose message carries the fix, a structural test, a shrink-only ratchet, or one shared owner the others
   must call. The gate's baseline is the whole-codebase count from a grep of every file, not the instances an audit
   happened to name.
-- One counting owner for every ratchet, with per-module baselines keyed per file and equality required (a count
-  above is a new instance, a count below fails until the baseline is lowered in the same change). Per-module
-  baselines are what let sweeps run in parallel: a sweep lowers only its own modules' entries. A counter at 0
-  everywhere becomes a hard ban.
+- One counting owner for every ratchet (the shrink-only rule in SKILL.md "Gate rules": a count above its entry is a
+  new instance; lists never grow; the verifier tightens them after green), with per-module baselines keyed per file.
+  Per-module baselines are what let sweeps run in parallel: a sweep lowers only its own modules' entries. A counter
+  at 0 everywhere becomes a hard ban.
 - Then whole-codebase sweeps, one packet per class per group of modules, groups chosen so no two sweeps of a class
   share a module. Sweeps of different classes on one group serialize through the claim footprint (same files).
   Every sweep packet names the gate packet as a prerequisite, so nothing else is listed while baselines are written.
@@ -35,8 +35,8 @@ sections); then measure (the last section) before changing the cycle itself.
 ## No shared append points
 - A file every packet appends to (a hand-sorted test module list, a test manifest, an index, a spec table edited at
   one hot spot) turns every race into a send-back: the rebase is clean but the diff's context lines changed, so the
-  patch-id changed and the writer must check again. Measured: 48 send-backs against 36 landed pushes in one day; in
-  every pair checked, the patch-id differed only in shared test-group roots and the spec table.
+  patch-id changed and the writer must check again. Measured: 48 send-backs against 36 landed pushes in about 29
+  hours; in the pairs checked, the patch-id differed only in shared test-group roots and the spec table.
 - Lists and indexes are generated from the files that exist: test registration by discovery (overhaul-build's
   derived test group roots: the build script declares every test file, so a branch only adds a file), indexes and
   tables by a generator with a check that its output is current, run in the verifier's bookkeeping push.
@@ -114,7 +114,8 @@ One script is the only push path; cloud and local writers run the same one.
    fast-forward `main`. Exit codes: 0 pushed, 1 refused, 3 held, 4 RECHECK (run the checks again), 5 RACE (the trunk
    moved: rebase, push).
 5. Receipt validity after a race: a clean rebase whose patch-id is unchanged keeps the receipt valid (the full gate
-   judges every candidate whole anyway); a changed rebase rechecks only what the trunk gained in its closure.
+   judges every candidate whole anyway; only files the writer alone runs are run again). A changed patch-id is
+   RECHECK: the writer runs its checks again.
 6. A writer may revert a red the verifier has not reached: the push names the reverted push ids and why, each must
    be a lane push not yet reverted and fully undone by this push, and it is recorded as a verifier revert.
 7. `INTEG_FULL=1` (or a full gate on the native box) is the strict check for the rare push that must be judged first.
@@ -136,15 +137,16 @@ A writer never waits for the verifier; its next work bases on the trunk's head.
   holds its push and no revert undid it; a WIP ref is dropped only then.
 - Pausing stops new claims; it never throws away claimed work that is still landing.
 
-## Shared warm build cache (cloud sessions)
+## Shared warm build cache (cloud writer sessions)
 - A content-hashed compile cache (key: toolchain version, cache tool version, lockfile, repo path) seeded into each
-  session from one snapshot before its first build; any failure (no snapshot, a key mismatch, a fetch error) is a
+  writer session from one snapshot before its first build; any failure (no snapshot, a key mismatch, a fetch error) is a
   cold build, never an error and never a reason to stop.
 - A scheduled refresh rebuilds every test target and publishes the snapshot when it is missing, its key changed or
   it is older than a few hours; the refresh decides "needed" before any setup and logs hits and misses per build.
 - Store it where the sessions' git access already reaches, in parts under the host's size limits, published
   atomically with a manifest; a reader that meets a part a newer publish replaced builds cold.
-- Measured: about 1.5x on cloud builds. Worth having, not a silver bullet. Lint runs are not cached by such a
+- Measured: about 1.5x on cloud writer builds. Worth having, not a silver bullet. Shard runners do not use it: they
+  keep their own build warm between gates. Lint runs are not cached by such a
   tool. Locally, a path-keyed cache missed every workspace crate across per-slot target dirs (0%): keep per-slot warm
   targets there; the cloud cache works because every session builds at the same path.
 
@@ -174,7 +176,7 @@ A writer never waits for the verifier; its next work bases on the trunk's head.
   longest-first by recorded seconds (24 for ~4,000 tests on 4-core sessions).
 - A runner claims shard k with a unique commit on `gate-claim/<id>-<k>`, builds and runs exactly as the gate does
   (every failure re-run alone), and answers with `gate-result/<id>-<k>`: `{fails, tests, head, times, build_secs}`.
-  `gate-done/<id>` closes it. Runners serve detached until idle 45 min and seed the shared build cache.
+  `gate-done/<id>` closes it. Runners serve detached until idle 45 min, and warm the newest gate's build when idle.
 - In parallel the native box (or several registered native workers) runs every non-test stage plus the OS-only
   tests, re-runs every cloud failure (the cloud can pass a test, never forgive one), and takes unclaimed or late
   shards. A native shard that did not build falls back to another worker once per worker; red only after every
@@ -231,9 +233,9 @@ gates run it natively.
   trunk.
 - Full gate on one quiet native box: 55-81 min with all ~4,000 tests; sharded over 24 shards: 34-35 min. A cloud
   shard runs in 0.2-2.5 min after a 2-13 min cold build.
-- Cloud fixers: 0.3-0.5 fixes per agent-hour. One day: 36 pushes landed against 48 RECHECK send-backs (about 1.3 per
-  landed push, nearly all from shared append points) and 6 verifier reverts.
-- Shared warm build cache in cloud sessions: about 1.5x.
+- Cloud fixers: 0.3-0.5 fixes per agent-hour. Over about 29 hours: 36 pushes landed against 48 RECHECK send-backs
+  (about 1.3 per landed push, most from shared append points) and 6 verifier reverts.
+- Shared warm build cache in cloud writer sessions: about 1.5x.
 - Not yet measured: merge-first fixes per hour over a full day, batch-first bisecting, the native run's cycle time.
 
 ## Lessons (these replace older guidance; never append a contradiction)

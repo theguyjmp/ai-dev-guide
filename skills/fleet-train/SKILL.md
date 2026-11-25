@@ -56,7 +56,7 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
 | Shrink-only lists only shrink: `path count` lines in tracked .txt files (merge=lineset), one assert helper every such gate test calls (real <= listed, unlisted 0; never `==`), each test named `*only_shrink*` and printing its tightened list between `--- tightened <path> ---` and `--- end tightened ---`. After a green gate the verifier runs `[profile] shrink_cmd` on the proven tree and lowers every printed list in its bookkeeping push | `tighten_shrink_lists` (events shrink_lists_tightened / shrink_lists_error; off while `shrink_cmd` is "") |
 | Rerun before blaming: a failed test reruns alone; perf-budget failures go to state/perf-debt.jsonl; stale fixture locks are cleared and rerun once; one parser reads every cargo format and keeps a crashed binary that named no test by its selector | `gate()`, `unit_flaky`, scripts/cargo_failures.py |
 | One known-red rule, read by writer and verifier: a failing test no push owns runs alone on main; red there, it is quarantined (accept-known-red + a fix request) and skipped. When every failure is proven red alone on main (a test not built on main is no proof), the verdict stands. A failing test whose file is not on main is the push's own | `known_red_tests()`, `quarantine.py` (heal, `Healed.covers`, `on_main`) |
-| Blame by assert entry, then by file, then a linear probe at each push's own sha (each push blamed on its own `base..sha`, never a cumulative range: to build, `own_ranges` takes one range today). A probe reproduces only the same stage or test red at the probed sha with that sha's own rows | `blame_entries`, `blame_by_file`, CYCLE.md "Red" |
+| Blame by assert entry, then by file, then a probe at each push's own sha (each push blamed on its own `base..sha`, never a cumulative range: to build, `own_ranges` takes one range today). A probe reproduces only the same stage or test red at the probed sha with that sha's own rows | `blame_entries`, `blame_by_file`, CYCLE.md "Red" |
 | No verdict is never a pass or a fail: a native-box job that is down, late, on another head, an env failure, a build refusing a target, a shard with 0 tests or a short census | `desk.job`, CYCLE.md census |
 | No gate without the stack's required env | `[profile] require_env` (rust on Windows: ProgramFiles(x86), which Git Bash drops) |
 | Quality has no switch. Every claim carries `must_also_before_commit` (index search and ARCHITECTURE owners first; dup_blocks, dup_literals, shape_check, check_cycles, strict lint). The gate adds the owner guard (allowlist stays EMPTY) and the size gate; the duplicate review rejects a copy of an existing owner under any name; the pre-push hook refuses a push to main whose commit fails the quality check | claim JSON, `owner_copies`, `oversized_files` (HARNESS_FILE_LINES 500, tests 600), `batch_review`, `scripts/pre-push.hook` |
@@ -64,9 +64,9 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
 | A recurring defect type is fixed as a class: its gate (lint, structural test, shrink-only ratchet or one owner) lands first, then sweeps; a per-instance packet is never published | the task loader's class check (CYCLE.md "Fix by problem class") |
 | A codebase grown without these checks reaches 0 duplicates before any builder starts | workflows/cleanup.js, a semantic duplicate review, targeted refactors |
 | At most 3 kernel rows and 6 rows per module in flight, no two with overlapping declared files; rows unblocking 8+ others skip the module cap; priority rows go first | `claim`, state/priority.json |
-| A row whose deps are pushed but not yet on main starts from the trunk's head | the project's claim base |
+| A row whose deps are pushed but not yet verified starts from the trunk's head | the project's claim base |
 | Every long-running loop survives exceptions, re-execs when its source changes and still parses, and reads events tolerantly | the verifier loop, `read_events` |
-| Freeze a working harness: one tested change at a time, a dated backup, revert if the rate on main drops | the manager |
+| Freeze a working harness: one tested change at a time, a dated backup, revert if the verified rate drops | the manager |
 | Writers scale to the account's session limit; the verifier never blocks them. Watch send-backs, reverts and holds, not a queue | `fleet_beat` FIRE cap, the cycle's status |
 
 ## One harness for every project
@@ -170,11 +170,11 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
    30 GB) and prune acceptance tests' leftover temp dirs (they once filled 26 GB).
 2. `py -3 harness.py frontier` must show rows. Build or sync the cycle's push script, verifier and collector
    (CYCLE.md), with their tests, before any writer starts.
-3. Native box (the shipped OS, for the gate's non-test stages, OS-only tests and the run behind main): ssh, Python,
+3. Native box (the shipped OS, for the gate's non-test stages, OS-only tests and the run behind `verified`): ssh, Python,
    git, the toolchain and a bare `<HARNESS_REMOTE_ROOT>/repo.git`; set HARNESS_REMOTE_HOST, HARNESS_REMOTE_ROOT,
    HARNESS_REMOTE_ENV, or a `[desk]` table in harness.toml (host, root, env, path). Seed repo.git once with a bundle
    of main and set refs/desk/base to that sha, or the first send carries the whole history. Keep it otherwise idle.
-4. Start the verifier (and the native run behind main, if the cloud OS differs) detached, under the 5-minute
+4. Start the verifier (and the native run behind `verified`, if the cloud OS differs) detached, under the 5-minute
    watchdog; turn sharding on with its flag once one probe session has returned a valid shard result.
 5. Writers: workflows/builders.js locally, or the cloud fleet; `remote.py` for a second PC.
 6. Measure fixes `verified` per wall-clock hour, send-backs per hour, reverts, holds and escapes, plus per-phase
