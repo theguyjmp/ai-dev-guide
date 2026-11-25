@@ -1,5 +1,14 @@
 # overhaul-build changelog
 
+## Derived test group roots, 2026-11-25
+A group root (`group_<area>.rs`) may list no modules: it includes `$OUT_DIR/test_groups/<dir>/<area>.rs`, which the
+repo's build.rs writes from the file names (every sibling test file whose stem starts with the area after an optional
+`test_`; a file no area fits stops the build). Parallel branches adding test files then never edit one shared sorted
+list, whose neighbouring lines made their diffs (and patch-ids) change on every rebase. rust_tests.py maps those files
+(`member_area`, DERIVED), rust_test_groups.py adds no `mod` line to a derived root and drops one a merge brought in,
+fmt_check.py checks the members rustfmt cannot reach through `include!`, and entry_lint.py allows exactly a derived
+root's own include. Tests: test_rust (2 new), test_rust_tools (1 new).
+
 ## Per-file test targets move into their group target, 2026-11-24
 `rust_test_groups.py <repo>` moves every test file a branch still adds as its own `[[test]]` target (or no target builds)
 into its folder's group target: the root by the longest `<lead><area>` prefix its stem starts with, `mod <stem>;` in
