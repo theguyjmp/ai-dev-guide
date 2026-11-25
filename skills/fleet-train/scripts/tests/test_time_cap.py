@@ -1,5 +1,5 @@
-"""A test whose alone re-run hits its time cap is no verdict, never red: run_one_alone marks it TIME_CAP and
-quarantine.slow puts it on the known-red list with a fix request (class slow tests).
+"""A test whose alone re-run hits its time cap: run_one_alone marks it TIME_CAP; when it is slow at the base too,
+quarantine.slow puts it on the known-red list with a fix request (class slow tests). gate_sha judges the rest.
 
 Usage: py -3 tests/test_time_cap.py"""
 from __future__ import annotations

@@ -125,8 +125,8 @@ The fix-by-class check and the footprint listing above, as pure functions over a
 - Ships as a tested reference to build on (the minimum cycle below runs on these alone):
   `trunk.py` (receipts, the CAS push with its exit codes, `main` following the trunk, unrecorded commits reverted
   first, a verifier round over closed prefixes n, n/2, ... that moves `verified` to the longest green and reverts an
-  isolated red push, holds); `gate_sha.py` (the full gate on one sha as the verifier's gate command: exit 0 green,
-  1 red, 2 no verdict); `task_loader.py` (the class check and footprint listing); `keepalive.py` (the watchdog).
+  isolated red push, holds); `gate_sha.py` (the duplicate review and the full gate on one sha against
+  `verified`: exit 0 green, 1 red, 2 no verdict); `push.sh` and `verify_loop.sh` (steps 2 and 3); `task_loader.py` (the class check and footprint listing); `keepalive.py` (the watchdog).
 - Specified here, built per project when the minimum cycle is too slow or too narrow, one module each with typed
   records: the gate scope (every test in the tree but unbuilt rows'; the shipped `gate_tests` still selects proven
   rows' tests only: widen it first); blame and true dependents before a revert (`trunk.py` reverts only an isolated
@@ -141,31 +141,22 @@ Run every command from `<skill>/scripts` with HARNESS_REPO (the landing clone, w
 HARNESS_HOME set. On Windows use `py -3`; elsewhere `python3`.
 1. Refs, once: `git -C $HARNESS_REPO branch integ main && git -C $HARNESS_REPO branch verified main`. Protect them
    on the host so only the landing clone pushes them; writers push only their own branches.
-2. Writer push (the only push path; lanes and the cloud land script run the same lines in the writer's worktree):
-   ```
-   git fetch -q && git rebase integ                       # a conflict refuses: resolve, check again
-   base=$(git rev-parse integ); sha=$(git rev-parse HEAD)
-   FINISH_NO_SUBMIT=1 py -3 finish.py --slot N --name X > check.log    # last line must be GATES OK
-   pid=$(git diff --binary $base $sha | git patch-id --stable | cut -d' ' -f1)
-   { echo "CHECKED $sha $pid"; cat check.log; } > receipt.log
-   py -3 trunk.py push --sha $sha --base $base --log receipt.log --name X --rows R1 R2
-   ```
-   Exit 0 PUSHED, 1 REFUSED, 3 HELD, 4 RECHECK (run the checks again), 5 RACE (rebase, push again; the receipt
-   stays valid while the patch-id is unchanged). Then `git -C $HARNESS_REPO push origin integ main`.
-3. Verifier loop: save as `<HARNESS_HOME>/verify_loop.sh` (S = this skill's scripts folder) and let the watchdog
-   start it detached:
-   ```
-   while true; do
-     py -3 "$S/trunk.py" verify --gate-cmd "py -3 \"$S/gate_sha.py\" {sha}"
-     git -C "$HARNESS_REPO" push -q origin integ main verified
-     sleep 300
-   done
-   ```
-   `trunk.py status` prints `main`, `verified`, unverified pushes, unrecorded commits and any hold;
-   `trunk.py unhold --why "<fix>"` clears a hold after its cause is fixed.
+2. Writer push, the only push path: `bash $S/push.sh <slot> <name> <rows...>` in the writer's committed worktree
+   (lanes and the cloud land script run the same file). It rebases onto `integ` (a conflict refuses), runs the
+   writer checks (`FINISH_NO_SUBMIT=1 finish.py`, last line `GATES OK`), writes the check log as
+   `CHECKED <sha> <patch-id>` + the checks, calls `trunk.py push` and mirrors `integ` and `main` to origin.
+   Exit 0 PUSHED, 1 REFUSED, 3 HELD, 4 RECHECK (run the checks again), 5 RACE (run it again; the receipt stays valid
+   while the patch-id is unchanged).
+3. Verifier loop: `bash $S/verify_loop.sh`, started detached by the watchdog. Each round runs `trunk.py verify`
+   with `gate_sha.py` as the gate (the duplicate review of `verified..sha`, then `harness.gate`, with every baseline
+   taken at `verified`: under merge first `main` may already hold the candidate, so a baseline at `main` would hide
+   its reds) and mirrors `integ`, `main` and `verified` to origin. `trunk.py status` prints `main`, `verified`,
+   unverified pushes, unrecorded commits and any hold; `trunk.py unhold --why "<fix>"` clears a hold.
+   Proven end to end on a toy repo: a clean push lands and is verified; a red the writer checks refuse never
+   lands; a red pushed past them is isolated, reverted on top of `main`, and the next round verifies the pair.
 4. Task loader: the collector runs `task_loader.py --state` each cycle and publishes `listed` (above).
 5. Watchdog: `<HARNESS_HOME>/keepalive.json` lists the verifier loop and the collector (`{"processes": [{"name":
-   "verifier", "cmd": ["bash", "verify_loop.sh"], "cwd": "."}], "disk": {"path": ".", "prune_below_gb":
+   "verifier", "cmd": ["bash", "<S>/verify_loop.sh"], "cwd": "."}], "disk": {"path": ".", "prune_below_gb":
    100, "alarm_below_gb": 30, "prune_cmd": []}}`) and is scheduled every 5 minutes with no window (Operations).
 6. Release only from `verified`. Measure (below) before adding sharding, bisect depth or a cache.
 
@@ -287,10 +278,11 @@ A writer never waits for the verifier; its next work bases on the trunk's head.
 4. Judging a red, one routine for every route: known-red dropped; every failing test re-run alone at the candidate
    (green alone = flaky: quarantined with a fix request, nothing reverted, no hold); red alone at `verified` too =
    pre-existing, healed by quarantine; a test red when every suspect push is documentation no code reads is no
-   push's. A re-run alone killed by its time cap is NO VERDICT for that test, never red: nothing is blamed or
-   reverted, the test is quarantined as slow with a fix request in the slow-tests class (`TIME_CAP`,
-   `quarantine.slow`), and the rest of the verdict stands (one 21-minute property test past a 15-minute cap under load made two candidates red and stalled
-   `verified` for hours). Only what stands is blamed.
+   push's. A re-run alone killed by its time cap is never red and never a pass: when it caps at `verified` too it
+   is pre-existing slow (quarantined with a fix request in the slow-tests class, the rest of the verdict stands);
+   when it caps only at the candidate the round is no verdict (nothing moves, nothing is reverted). Shipped:
+   `TIME_CAP`, `capped.json`, `gate_sha.verdict`, `quarantine.slow`. One 21-minute property test past a 15-minute
+   cap under load made two candidates red and stalled `verified` for hours. Only what stands is blamed.
 5. Green: move `verified` by CAS (fast-forward only). Bookkeeping the verifier writes (proven rows, ratchet
    tightening, regenerated indexes, reformatting) goes onto the trunk as its own recorded push. A quarantined test
    whose fix landed is released on the next green.

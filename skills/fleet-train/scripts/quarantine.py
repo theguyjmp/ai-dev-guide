@@ -50,7 +50,7 @@ def unowned(fails, rows: dict, ids) -> list:
 
 def on_main(h, test: str) -> bool:
     """A test file only the batch adds is its own test, never quarantined."""
-    return h.git("cat-file", "-e", f"main:{test.split('::')[0]}", check=False).returncode == 0
+    return h.git("cat-file", "-e", f"{h.BASE_REF}:{test.split('::')[0]}", check=False).returncode == 0
 
 
 def main_red(h, tests) -> dict:
@@ -61,7 +61,7 @@ def main_red(h, tests) -> dict:
 
 def main_baseline(h, tests) -> tuple:
     """({test: tail} red alone on main, unbuilt there: never cached)."""
-    sha = h.git("rev-parse", "main").stdout.strip()
+    sha = h.git("rev-parse", h.BASE_REF).stdout.strip()
     cache = h.load(BASELINE, {})
     if cache.get("sha") != sha:
         cache = {"sha": sha, "red": {}, "green": []}
@@ -103,11 +103,11 @@ def heal(h, merged: list, rows: dict, fails, ids) -> Healed:
     if not red:
         return Healed()
     if len(known) + len(red) > CAP:
-        sha = h.git("rev-parse", "main").stdout.strip()
+        sha = h.git("rev-parse", h.BASE_REF).stdout.strip()
         h.save(BROKEN, {"t": h.iso(), "sha": sha, "quarantined": sorted(known), "red": sorted(red)})
         h.event("quarantine_cap", sha=sha, quarantined=sorted(known), red=sorted(red)[:10])
         raise MainBroken(f"{len(known)} quarantined + {len(red)} more red on main {sha[:10]}: a human fix of main is needed")
-    sha = h.git("rev-parse", "main").stdout.strip()
+    sha = h.git("rev-parse", h.BASE_REF).stdout.strip()
     with h.lock("state"):
         kr = h.load(KNOWN, {})
         for t, tail in red.items():
@@ -187,7 +187,7 @@ def release(h) -> list:
         p = request_path(h, t)
         if p.exists() and not any(stem(k) == stem(t) for k in kr):
             p.replace(p.with_name(p.name + ".done"))
-        h.event("unquarantine", test=t, sha=h.git("rev-parse", "main").stdout.strip())
+        h.event("unquarantine", test=t, sha=h.git("rev-parse", h.BASE_REF).stdout.strip())
     return green
 
 
@@ -196,7 +196,7 @@ def paused(h) -> bool:
     b = h.load(BROKEN, None)
     if b is None:
         return False
-    sha = h.git("rev-parse", "main").stdout.strip()
+    sha = h.git("rev-parse", h.BASE_REF).stdout.strip()
     if sha == b.get("sha") and not recovered(h, b):
         return True
     (h.ST / BROKEN).unlink(missing_ok=True)

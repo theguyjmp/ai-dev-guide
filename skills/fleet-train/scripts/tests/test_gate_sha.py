@@ -26,5 +26,10 @@ check("only known-red failures are green", g.verdict(False, ["tests/a.rs::known"
 check("an environment failure is no verdict, never red", g.verdict(False, ["tests/a.rs::x"], "linker not found") ==
       g.NO_VERDICT)
 check("a red naming nothing is no verdict", g.verdict(False, [], "killed") == g.NO_VERDICT)
+slow = "tests/p.rs::slow"
+check("a time-capped test alone is no verdict, never a pass", g.verdict(False, [slow], "", {slow}) == g.NO_VERDICT)
+check("capped at the base too: pre-existing slow, the rest stands", g.verdict(False, [slow], "", {slow}, {slow}) ==
+      g.GREEN)
+check("a real red beside a capped test is red", g.verdict(False, [slow, "tests/a.rs::x"], "", {slow}) == g.RED)
 print("ALL PASS" if not FAILS else f"FAILED {FAILS}")
 sys.exit(1 if FAILS else 0)

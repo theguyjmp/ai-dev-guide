@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 GATE, ONE_OFF = "gate", "one-off"
-_ID = re.compile(r"[A-Za-z][\w.-]*")
+_ID = re.compile(r"[A-Za-z][\w./-]*")
 
 
 @dataclass(frozen=True)

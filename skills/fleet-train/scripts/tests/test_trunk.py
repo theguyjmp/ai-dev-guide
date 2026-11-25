@@ -101,6 +101,24 @@ with tempfile.TemporaryDirectory() as d:
     check("no verdict moves nothing and reverts nothing", r4.no_verdict and t.rev("verified") == before
           and t.rev("integ") == s, r4)
 
+    sneak = commit(repo, "sneak2.txt", "s\n", s)
+    git(repo, "update-ref", "refs/heads/integ", sneak, s)
+    t._record(tk.Receipt(f"unrecorded@{sneak[:12]}", s, sneak, "unrecorded"))  # its revert never landed
+    _, bad = t.pushes()
+    check("an unrecorded receipt without its revert is still unrecorded", bad == [sneak], bad)
+    orig, t.revert = t.revert, lambda specs, reason: ""  # the revert fails
+    r5 = t.verify(lambda sha: True)
+    t.revert = orig
+    check("a failed revert never lets the commit be gated or verified", t.rev("verified") == before
+          and not r5.verified, r5)
+    (st / "hold.txt").write_text("revert failed\n", encoding="utf-8")
+    r6 = t.verify(lambda sha: True)
+    check("a hold stops the verifier round", bool(r6.held) and t.rev("verified") == before, r6)
+    t.unhold("reverted by hand")
+    t.revert([sneak], "unrecorded push")
+    check("after its revert lands the chain verifies", t.verify(lambda sha: True).verified == t.rev("integ"))
+    s = t.rev("integ")
+
     (st / "hold.txt").write_text("test hold\n", encoding="utf-8")
     h = commit(repo, "h.txt", "h\n", s)
     check("a hold stops lane pushes", t.push(h, s, log_for(t, s, h))[0] == tk.HELD)

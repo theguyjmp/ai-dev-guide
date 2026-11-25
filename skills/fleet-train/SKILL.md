@@ -36,7 +36,8 @@ whose footprint overlaps nothing in flight and whose prerequisites landed.
 - `scripts/trunk.py` (tested reference, CYCLE.md "The minimum cycle"): receipts, the compare-and-swap push (exit 0
   PUSHED, 1 REFUSED, 3 HELD, 4 RECHECK, 5 RACE), `main` following the trunk, `verify` (one verifier round: unrecorded
   commits reverted first, `verified` moved to the longest green prefix, an isolated red push reverted), `status`,
-  `unhold`. `scripts/gate_sha.py <sha>`: the full gate on one sha as the verifier's gate command.
+  `unhold`. `scripts/gate_sha.py <sha>`: the duplicate review and full gate on one sha against `verified`.
+  `scripts/push.sh` (the writer's only push path) and `scripts/verify_loop.sh` (the verifier loop).
 - `scripts/task_loader.py`: the fix-by-class check and the footprint listing (`--check` over a plan, `--state` for the
   claimable list and the claims to release). `scripts/keepalive.py`: the windowless watchdog.
 - `workflows/builders.js`: Claude Code Workflow, N worker loops, each spawning a FRESH builder agent per row (args:
@@ -70,7 +71,7 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
 | The index builders search is never stale; no shared list is hand-edited | spec/INDEX.md and every generated list regenerated in the verifier's bookkeeping push; test registration by discovery (overhaul-build derived group roots) |
 | A recurring defect type is fixed as a class: its gate (lint, structural test, shrink-only ratchet or one owner) lands first, then sweeps; a per-instance packet is never published | `task_loader.py` class check (CYCLE.md "Fix by problem class") |
 | No public item (function, type, enum, trait, const, static) named like another module's, and no function grown into a near copy of a sibling, beyond the shrink-only debt; the owners index is regenerated on every push and checked | `rules_gate.py` `dup_problems` (debt `dups`), `index_api.py --check` (CYCLE.md "The owners index") |
-| A test re-run alone that hits its time cap is no verdict, never red: quarantined as slow with a fix request in the slow-tests class | `run_one_alone` (`TIME_CAP`), `quarantine.slow` |
+| A test re-run alone that hits its time cap is never red and never a pass: capped at `verified` too = pre-existing slow (quarantined with a fix request, slow-tests class), capped only at the candidate = no verdict | `run_one_alone` (`TIME_CAP`), `gate_sha.verdict`, `quarantine.slow` |
 | A codebase grown without these checks reaches 0 duplicates before any builder starts | workflows/cleanup.js, a semantic duplicate review, targeted refactors |
 | At most 3 kernel rows and 6 rows per module in flight, no two with overlapping declared files; rows unblocking 8+ others skip the module cap; priority rows go first | `claim`, state/priority.json |
 | A clean-up task is claimable only when its prerequisites landed and its footprint overlaps nothing in flight; a task whose push the base holds releases its claim at once; the gate packet leases first | `task_loader.py` listing |
@@ -189,12 +190,12 @@ repo (spec/FUNCTIONS.md and spec/ARCHITECTURE.md from overhaul-plan or dev-plan)
    targets about 5-9 GB each, a gate's release target about 30 GB) and prune acceptance tests' leftover temp dirs.
 2. `py -3 $S/rules_gate.py init` on main once (the debt every ratchet shrinks from), then `py -3 $S/harness.py
    frontier` must show rows.
-3. The minimum cycle (CYCLE.md, step by step): create `integ` and `verified`, write the project's push script from
-   step 2 there, save the verifier loop as `verify_loop.sh`, list it (and the collector, once cloud writers run) in
-   `keepalive.json`, schedule `keepalive.py` windowless. Run `py -3 -m py_compile $S/*.py` and the shipped tests
+3. The minimum cycle (CYCLE.md, step by step): create `integ` and `verified`; writers land with `push.sh`; list
+   `verify_loop.sh` (and the collector, once cloud writers run) in `keepalive.json`; schedule `keepalive.py`
+   windowless. Run `py -3 -m py_compile $S/*.py` and the shipped tests
    (`for f in $S/tests/test_*.py; do py -3 "$f" || echo "FAIL $f"; done`) before any writer starts.
 4. The owner's card: `/devping` (the devping skill) with a stats adapter that counts the whole platform.
-5. Writers: workflows/builders.js locally (args.push = the push command), or the cloud fleet (Cloud fleet above, with
+5. Writers: workflows/builders.js locally (args.push = `bash <S>/push.sh {slot} {row}`), or the cloud fleet (Cloud fleet above, with
    the land script and collector of CYCLE.md "Cloud writers"); `remote.py` for a second PC. Audit findings become
    class packets in a plan the task loader checks (`task_loader.py --check`), never one packet per instance.
 6. Optional, once measured as the bottleneck: a native box (the shipped OS, for OS-only tests and the run behind

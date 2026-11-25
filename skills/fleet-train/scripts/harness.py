@@ -25,6 +25,7 @@ import cargo_failures as cf, desk, quarantine, rules_gate, rules_langs
 REPO = Path(os.environ.get("HARNESS_REPO", "."))
 HOME = Path(os.environ.get("HARNESS_HOME", str(Path(__file__).parent)))
 ST = HOME / "state"
+BASE_REF = os.environ.get("HARNESS_BASE_REF", "main")  # the proven tree baselines compare with (merge first: verified)
 WT = Path(os.environ.get("HARNESS_WT", str(REPO.parent / "vh")))  # per-slot worktrees, fixed paths -> warm incremental builds
 TARGETS = REPO / ".overhaul" / "target"
 SPEC = "spec/FUNCTIONS.md"
@@ -762,7 +763,7 @@ def run_alone(tests, timeout=1800) -> dict:
         for t in tests:
             bad, log = run_cmd_test(t.split("::")[0], [t.split("::", 1)[1]], env)
             tails[t] = (log or "failed") if bad and not perf_debt(t, log) else ""
-    return {t: tail for t, tail in tails.items() if tail and not tail.startswith(TIME_CAP)}  # a time cap: no verdict
+    return {t: tail for t, tail in tails.items() if tail}
 
 
 def perf_debt(t, out) -> bool:
@@ -829,7 +830,8 @@ def build_test_exes(stems, env, timeout=1800) -> tuple:
     return exes, r
 
 
-TIME_CAP = "time cap: "  # run_one_alone's tail when the alone run was killed: no verdict, never red
+TIME_CAP = "time cap: "  # run_one_alone's tail when the alone run was killed by its cap
+CAPPED = "capped.json"  # {test: tail} the last acceptance run's time-capped tests (gate_sha.py judges them)
 
 
 def run_one_alone(exes, t, env) -> str:
@@ -935,11 +937,10 @@ def run_tests_cargo(tests, timeout=1800, solo=None):
         alone[t] = round(now() - s0)
         if tail.startswith(TIME_CAP):
             capped[t] = tail
-        elif tail:
+        if tail:
             fails.append(t)
             logs.append(f"== {Path(t.split('::')[0]).stem}::{t.split('::')[1]} (serial): {tail}")
-    if capped:
-        quarantine.slow(sys.modules[__name__], capped, git("rev-parse", "HEAD", cwd=TRAIN, check=False).stdout.strip())
+    save(CAPPED, {**load(CAPPED, {}), **capped})
     if logs:
         (ST / "last-gate.txt").write_text(chr(10).join(logs)[-20000:], encoding="utf-8")
     save(ACCEPT_TIMES, {**load(ACCEPT_TIMES, {}), **took})
@@ -1057,8 +1058,8 @@ def unit_verdict(r, base, cwd=None) -> tuple:
 
 @contextmanager
 def at_main():
-    """The train tree at main for a baseline run, restored after."""
-    sha = git("rev-parse", "main").stdout.strip()
+    """The train tree at BASE_REF for a baseline run, restored after."""
+    sha = git("rev-parse", BASE_REF).stdout.strip()
     cur = git("rev-parse", "HEAD", cwd=TRAIN).stdout.strip()
     git("checkout", "-q", "--detach", "-f", sha, cwd=TRAIN)
     try:
@@ -1068,8 +1069,8 @@ def at_main():
 
 
 def main_unit_baseline() -> cf.CargoFailures:
-    """Unit failures on main itself (cached per main sha)."""
-    sha = git("rev-parse", "main").stdout.strip()
+    """Unit failures on BASE_REF itself (cached per sha)."""
+    sha = git("rev-parse", BASE_REF).stdout.strip()
     cache = load("unit-baseline.json", {})
     if cache.get("sha") != sha:
         with at_main():

@@ -40,6 +40,7 @@ class Round:
     culprit: str = ""  # the one push a red isolated (reverted)
     unrecorded: list = field(default_factory=list)  # trunk commits with no valid receipt (reverted first)
     no_verdict: list = field(default_factory=list)
+    held: str = ""  # a hold stops the round: nothing gated, moved or reverted
 
 
 class Trunk:
@@ -135,12 +136,14 @@ class Trunk:
         shas = self.git("rev-list", "--first-parent", "--reverse", f"{v}..{head}" if v else head).split() if head else []
         recs, out, bad, pending = self.receipts(), [], [], []
         base = self.rev(f"{shas[0]}^") if shas else ""
+        undone = {x.split("..")[-1] for s in shas if (r := recs.get(s)) and r.kind == "revert" for x in r.reverts}
         for s in shas:
             r = recs.get(s)
             if r is None:
                 pending.append(s)
                 continue
-            if r.base == base and (r.kind != "lane" or self.patch_id(r.base, s) == r.patch_id):
+            if r.base == base and (r.kind != "lane" or self.patch_id(r.base, s) == r.patch_id) and (
+                    r.kind != "unrecorded" or s in undone):
                 out.append((s, r))
             else:
                 bad += [*pending, s]
@@ -181,6 +184,8 @@ class Trunk:
     def verify(self, gate: Callable[[str], bool | None], max_pushes: int = MAX_PUSHES) -> Round:
         """Unrecorded commits are reverted first; then closed prefixes of n, n/2 ... pushes, longest first: `verified`
         takes the longest green, a red single push is reverted. gate(sha): True, False or None (no verdict)."""
+        if why := self.hold():
+            return Round(held=why)
         pushes, bad = self.pushes()
         out = Round([s for s, _ in pushes], unrecorded=bad)
         if bad:

@@ -82,6 +82,11 @@ check("a packet waits while one it replaces is in flight", "waits for OLD9" in a
 prev = tl.listing(plan, set(), set(), {"P1"}, {"P5"}, none_on_main)
 check("the last publish keeps its place (never displaced)", "P5" in prev.listed and "P4" in prev.held, prev)
 
+paths = tl.read_plan(PLAN.replace("| P2 | alpha |", "| P2 | crates/core, src/io.rs |")
+                     .replace("| P4 | gamma |", "| P4 | crates/ui |"))
+check("path areas stay whole", paths.packets[1].areas == frozenset({"crates/core", "src/io.rs"}), paths.packets[1])
+check("different paths under one folder do not overlap", not paths.packets[1].overlap(paths.packets[3]))
+
 with tempfile.TemporaryDirectory() as d:
     g = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True)  # noqa: E731
     g("init", "-q", "-b", "main")
