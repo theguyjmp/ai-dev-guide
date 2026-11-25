@@ -1,6 +1,6 @@
 ---
 name: fleet-train
-description: Run many short-lived builder agents (local or cloud) on a planned rebuild's spec/FUNCTIONS.md rows and land their work through the continuous landing cycle (writers push to a trunk after a fast floor; a sharded verifier gates the full suite and moves main only to green). Use when the owner says "fleet-train", "start the train", "run the builders", or wants rows built fast.
+description: Run many short-lived builder agents (local or cloud) on a planned rebuild's spec/FUNCTIONS.md rows and land their work through the merge-first landing cycle (writers push to the trunk and main after their affected checks; a sharded verifier runs the full suite behind and moves `verified`, from which releases come). Use when the owner says "fleet-train", "start the train", "run the builders", or wants rows built fast.
 ---
 > **RULE ZERO (the most important rule, ever):** the work must be valuable, well made, clean code that can be built
 > out and extended. A very solid foundation beats functionality depth: missing depth is acceptable, a weak foundation
@@ -14,11 +14,17 @@ description: Run many short-lived builder agents (local or cloud) on a planned r
 Replaces drive.py/supervise.py for the build phase. The builder OWNS its row (implements missing deps, splits work,
 fixes stubs): there is no needs-plan exit.
 
-**Landing is the cycle in CYCLE.md, its one owner:** writers push to the `integ` trunk after a 2-5 min fast floor; a
-verifier gates a fixed candidate with the full suite sharded over cloud sessions (the native-OS part on a native box
-in parallel) and fast-forwards `main` only to green; blame and one auto-revert handle a red; a native run behind main
-never blocks it. The batch land train (`harness.py train --loop`) is retired: one serial gate everyone waited on
-landed ~1.5 packets/h (CHANGELOG 2026-11-24). Create `state/train.off` in every project so nothing restarts it.
+**Landing is the cycle in CYCLE.md, its one owner:** merge first. A push reaches the `integ` trunk and `main` after
+its affected checks; the verifier runs the full suite behind, sharded over cloud sessions (the native-OS part on a
+native box in parallel), with batch-first bisecting, and moves `verified` only to green; a red is blamed and reverted
+on top of main. Releases come only from `verified`. The batch land train (`harness.py train --loop`) is retired: one
+serial gate everyone waited on landed ~1.5 packets/h (CHANGELOG 2026-11-24). Create `state/train.off` in every
+project so nothing restarts it.
+
+**Before tuning the pipeline, question the work list (CYCLE.md):** fix by problem class (one gate lands first, then
+whole-codebase sweeps on non-overlapping module groups; one packet per instance is refused by the task loader), no
+shared append points (generated lists and indexes; agents never hand-edit a shared list), and claims only for tasks
+whose footprint overlaps nothing in flight and whose prerequisites landed.
 
 ## Parts
 - `scripts/harness.py` (no LLM): `claim --slot N --wait S` hands out the highest-impact buildable row and prepares a
@@ -43,7 +49,7 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
 
 | Rule | Mechanism |
 |---|---|
-| `main` moves only by fast-forward to a sha the full gate and the duplicate review passed; only the verifier moves it | CYCLE.md (receipts, CAS, fixed candidate) |
+| `main` follows the trunk after a push's affected checks; `verified` moves only by fast-forward to a sha the full gate and the duplicate review passed, and only the verifier moves it; releases come from `verified` | CYCLE.md (receipts, CAS, batch-first bisecting) |
 | The full gate runs every acceptance and property test in the tree, owned by a row or not; only tests of rows not built yet are excluded. One function owns that scope and the writer's selection reads it | a gate-scope function under `gate_tests` (to build: the shipped `gate_tests` still selects proven rows' tests only, which skipped half the files; widen it first) |
 | Gate stages: format, strict lint, workspace unit, static quality, acceptance + property built once in release and run as parallel binaries | `gate()` |
 | Rows that each add or edit their own spec rows, bullets or Cargo `[[test]]` entries never conflict: those files merge unit by unit; one key changed differently on both sides stays a conflict for that key only. Line-set .txt files merge as sets; counted `<key> <count>` entries merge three-way by count | `keyed_merge.py` (`merge=keyed`), `lineset_merge.py` (`merge=lineset`), registered by `ensure_merge_drivers`; another clone runs `git config merge.keyed.driver "py -3 <scripts>/keyed_merge.py %O %A %B %L %P"` once |
@@ -54,13 +60,14 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
 | No verdict is never a pass or a fail: a native-box job that is down, late, on another head, an env failure, a build refusing a target, a shard with 0 tests or a short census | `desk.job`, CYCLE.md census |
 | No gate without the stack's required env | `[profile] require_env` (rust on Windows: ProgramFiles(x86), which Git Bash drops) |
 | Quality has no switch. Every claim carries `must_also_before_commit` (index search and ARCHITECTURE owners first; dup_blocks, dup_literals, shape_check, check_cycles, strict lint). The gate adds the owner guard (allowlist stays EMPTY) and the size gate; the duplicate review rejects a copy of an existing owner under any name; the pre-push hook refuses a push to main whose commit fails the quality check | claim JSON, `owner_copies`, `oversized_files` (HARNESS_FILE_LINES 500, tests 600), `batch_review`, `scripts/pre-push.hook` |
-| The index builders search is never stale | spec/INDEX.md regenerated in the verifier's bookkeeping push |
+| The index builders search is never stale; no shared list is hand-edited | spec/INDEX.md and every generated list regenerated in the verifier's bookkeeping push; test registration by discovery (overhaul-build derived group roots) |
+| A recurring defect type is fixed as a class: its gate (lint, structural test, shrink-only ratchet or one owner) lands first, then sweeps; a per-instance packet is never published | the task loader's class check (CYCLE.md "Fix by problem class") |
 | A codebase grown without these checks reaches 0 duplicates before any builder starts | workflows/cleanup.js, a semantic duplicate review, targeted refactors |
 | At most 3 kernel rows and 6 rows per module in flight, no two with overlapping declared files; rows unblocking 8+ others skip the module cap; priority rows go first | `claim`, state/priority.json |
 | A row whose deps are pushed but not yet on main starts from the trunk's head | the project's claim base |
 | Every long-running loop survives exceptions, re-execs when its source changes and still parses, and reads events tolerantly | the verifier loop, `read_events` |
 | Freeze a working harness: one tested change at a time, a dated backup, revert if the rate on main drops | the manager |
-| Writers scale to the account's session limit; the verifier never blocks them. Watch reverts, RECHECKs and holds, not a queue | `fleet_beat` FIRE cap, the cycle's status |
+| Writers scale to the account's session limit; the verifier never blocks them. Watch send-backs, reverts and holds, not a queue | `fleet_beat` FIRE cap, the cycle's status |
 
 ## One harness for every project
 - Every project runs `scripts/harness.py` from this skill (or a copy synced from it), never a fork. A fix lands here
@@ -92,7 +99,7 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
 - `scripts/brevity_check.py` (fleet_beat BREVITY alarm): word caps on STATE.md, briefs, hand-backs, rulings, notes/,
   code comments; override in `<HARNESS_HOME>/brevity_budget.json`, never raise.
 - `harness.py note "<text>"` appends one line to notes/log/YYYY-MM.md without reading it; briefs end with it.
-- A proven row's bullet and spec/packets line are deleted when it reaches main. Ids in state/held-rows.txt are never
+- A proven row's bullet and spec/packets line are deleted when `verified` holds it. Ids in state/held-rows.txt are never
   handed out. Builders find owners with `index_api.py --find "<words>"`, never a raw grep.
 
 ## Lanes (local writers)
@@ -120,19 +127,24 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
   account resumes (`cloud/HANDOFF-ACCOUNT.md`). `collect` (every 5 min) expires claims silent for HARNESS_CLOUD_TTL
   (2 h) and tops assignments up to HARNESS_CLOUD_TARGET (40). Never stop `collect` while sessions work: it refreshes
   `cloud-base`, and sessions would build on a stale base.
-- Planners (`PLANNER.md`) turn roadmap rows into planned rows; fixers (`FIXER.md`) take clean-up packets from
-  `fix-tasks.txt`. Both claim with `claim_task.sh <kind>`; one `Lane` type carries every task lane.
-- A session lands by running the floor on its VM and pushing its branch plus an evidence commit; `collect` replays
-  the push with that evidence, git only (CYCLE.md "Cloud writers"). Work that comes back goes to its WIP ref with the
-  reason. The rebaser routine (`REBASER.md`) is retired with the train: a conflicting push goes back to its writer.
+- Planners (`PLANNER.md`) turn roadmap rows into planned rows; fixers (`FIXER.md`) take clean-up packets (one per
+  problem class and module group) from `fix-tasks.txt`. Both claim with `claim_task.sh <kind>`; one `Lane` type
+  carries every task lane. Only listed tasks are claimable: the loader lists a task when its prerequisites landed
+  and its footprint overlaps nothing in flight (CYCLE.md "Claiming"; the shipped script still takes the first free).
+- Sessions seed the shared warm build cache before their first build (CYCLE.md); a cold build is never a stop.
+- A session lands by running the writer checks on its VM and pushing its branch plus an evidence commit; `collect`
+  replays the push with that evidence, git only (CYCLE.md "Cloud writers"). Work that comes back goes to its WIP ref
+  with the reason, and the waiting land script lands it again. The rebaser routine (`REBASER.md`) is retired with
+  the train: a conflicting push goes back to its writer.
 - The real caps on agent count are the frontier (ready rows: deps proven, not claimed) and what the verifier
-  promotes, not slots. Run planners to grow the frontier. Only rows being built (claims) count against the module cap
+  verifies, not slots. Run planners to grow the frontier. Only rows being built (claims) count against the module cap
   and file-overlap filter; check `harness.py frontier` against the rows whose deps are all proven or pushed.
 - Private mirror (not in cloud.py): when sessions cannot reach the real repo, hand rows out on a private mirror whose
   main carries the real tree and move each finished branch over as a patch (`git diff base..branch` applied with
   `git apply --cached --3way`), then push it as any writer does. Keep that wrapper thin: it only moves branches.
 - Setup: copy `cloud/` to `<repo>/tools/cloud/`, fill the "extra system deps" hook in setup.sh, probe one session
-  (setup prints SETUP OK), then step 20 -> 50 -> 100 sessions while reverts stay rare and main keeps moving.
+  (setup prints SETUP OK), then step 20 -> 50 -> 100 sessions while reverts and send-backs stay rare and
+  `verified` keeps moving.
 
 ## Manager loop
 - Only the manager chat can start cloud sessions (a routine run). An hourly in-chat heartbeat runs
@@ -145,9 +157,10 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
   and briefs belong to the retired train; give the verifier the same checks (down, stalled, held, repeat red). A
   failure mode found by hand gets a new check in fleet_beat.py.
 - A dashboard reading state/health.json shows alarms only while `ts` is under 20 min old, else "beat off since
-  HH:MMZ"; 3 h with nothing reaching main while pushes wait is RED.
-- Long-running processes start detached through WMI (Win32_Process Create), never Start-Process or Popen from an
-  agent shell (the child dies with the shell's job); restart and kill act only on their own pid file's tree.
+  HH:MMZ"; 3 h with nothing reaching `verified` while pushes wait is RED.
+- Long-running processes start detached through WMI (Win32_Process Create, hidden window: no console may pop up on
+  the owner's screen), never Start-Process or Popen from an agent shell (the child dies with the shell's job);
+  restart and kill act only on their own pid file's tree.
 - NEVER attach a GitHub push webhook to a builder routine: builders push, so every push starts another builder.
 
 ## Run
@@ -164,4 +177,5 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
 4. Start the verifier (and the native run behind main, if the cloud OS differs) detached, under the 5-minute
    watchdog; turn sharding on with its flag once one probe session has returned a valid shard result.
 5. Writers: workflows/builders.js locally, or the cloud fleet; `remote.py` for a second PC.
-6. Measure only what reaches main per wall-clock hour, plus reverts, holds and escapes; never agents busy.
+6. Measure fixes `verified` per wall-clock hour, send-backs per hour, reverts, holds and escapes, plus per-phase
+   time per landed fix (CYCLE.md "Measure"); report only measured rates, never agents busy.

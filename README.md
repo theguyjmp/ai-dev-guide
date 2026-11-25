@@ -5,7 +5,7 @@ Claude Code skills for rebuilding a project, or building a new one, with a fleet
 - `skills/overhaul-check`: scores a codebase and decides whether it needs nothing, refactors, a partial rewrite, or a full overhaul.
 - `skills/overhaul-plan`: turns an overhaul verdict into a short, audited rebuild spec timed in agent-hours, with a live dashboard.
 - `skills/overhaul-build`: runs the master agent that carries out that spec: M0 machinery, a risk slice, soft launches, tripwires and kill checkpoints.
-- `skills/fleet-train`: runs short-lived builder agents on planned rows and lands their work through a continuous cycle (writers push to a trunk after a fast floor; a sharded verifier runs the full suite and moves main only to green, with blame and auto-revert). Replaces drive.py for the build phase.
+- `skills/fleet-train`: runs short-lived builder agents on planned rows and lands their work merge-first (a push reaches main after its affected checks; a sharded verifier runs the full suite behind, bisects and auto-reverts, and releases come from the `verified` ref), with work lists fixed by problem class and claims that never overlap. Replaces drive.py for the build phase.
 - `skills/overhaul-difference`: compares the rebuilt project with the original, from measurements only, and publishes the difference as a dashboard.
 - `skills/dev-setup`: installs Git and the GitHub CLI, signs you in, installs these skills and the agent rules, creates your project folder, then walks you through dev-prep, dev-plan and dev-build.
 - `skills/dev-prep`: brainstorms a new project with the owner in multiple-choice rounds plus research into similar apps, and writes a feature map of what to build now, later or maybe.

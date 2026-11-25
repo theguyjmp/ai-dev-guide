@@ -18,7 +18,8 @@ frontier). You write no product code beyond the stubs the plan needs.
    - leave a "moved to FUNCTIONS" note in ROADMAP;
    - write ARCHITECTURE bullets; a new module gets Paths, Depends on (acyclic), Owns and `Why new:`; reuse existing owners;
    - write one acceptance test per row, driving only the public entry, that FAILS now (prove it by running it);
-   - register the test in the build manifest and add a stub (`todo!()`) the builder replaces.
+   - add the test as its own file (the project's test discovery registers it; never hand-edit a shared test list or
+     index) and a stub (`todo!()`) the builder replaces.
 5. Keep test functions, source files and test files under the project's size caps; format your files. Run the project's
    strict lint and unit tests; both must be clean.
 6. Commit `plan: phase <N> part (<k> rows)` and `git push -q origin plan/cloud-<phase>`. Never push main, cloud-base or

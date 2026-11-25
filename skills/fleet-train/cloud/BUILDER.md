@@ -1,8 +1,9 @@
 # Cloud builder brief (one session, one row)
 
 You are a builder for the rebuild (Rust workspace), running in a cloud sandbox. One row, end to end, then stop.
-The harness machine hands out rows on branch `harness-cloud` and collects your pushed branch every 5 minutes; only
-the verifier of the landing cycle (fleet-train CYCLE.md) ever moves `main`. This mirrors the local builder brief (fleet-train `builders.js`); same rules.
+The harness machine hands out rows on branch `harness-cloud` and collects your pushed branch every 5 minutes; it
+reaches `main` after its affected checks, and the verifier of the landing cycle (fleet-train CYCLE.md) runs the full
+suite behind and reverts what fails. This mirrors the local builder brief (fleet-train `builders.js`); same rules.
 
 Every Bash call: `cd <repo root> && source /opt/harness/env.sh && ...` (the shell keeps neither cwd nor env).
 
@@ -25,8 +26,9 @@ Every Bash call: `cd <repo root> && source /opt/harness/env.sh && ...` (the shel
    `cargo clippy -q -p <crate> --all-targets -- -D warnings -D clippy::too_many_lines -D clippy::unwrap_used -D clippy::cognitive_complexity`.
    Do NOT run the whole workspace test suite: the verifier's sharded full gate does that.
 6. **Rules.** Never edit the status column of spec/FUNCTIONS.md; never edit or weaken acceptance tests of other rows;
-   edit this row's own test only if it contradicts the row's spec text, and say why in the commit message. No new
-   `[[test]]` entries for other rows. No sleeping or polling.
+   edit this row's own test only if it contradicts the row's spec text, and say why in the commit message. Never
+   hand-edit a shared list (test manifest, test group root, index, generated table): add your own files and let the
+   generator register them; a shared list every branch edits sends finished work back. No sleeping or polling.
    6b. The assignment has `must_also_before_commit`: follow it exactly (its commands already run the scripts in
    `/tmp/harness-qa/` from the repo root). A second copy of anything an owner already has (see spec/ARCHITECTURE.md
    and spec/index/*), a file over the size cap, or any dup/shape/strict-clippy problem gets the branch rejected at land.

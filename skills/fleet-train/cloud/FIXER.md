@@ -3,23 +3,31 @@
 > **RULE ZERO:** valuable, well made, clean code that can be built out and extended; a solid foundation beats depth;
 > one owner per capability, no second copy of anything; never trade quality, tests or gates for speed or feature count.
 
-You fix ONE clean-up packet of the rebuild in a cloud sandbox (a second copy of a capability, a swallowed error, an id
-rule, a stored shape an audit found). Your branch lands through the landing cycle (fleet-train CYCLE.md): the verifier gates it with the full suite.
+You fix ONE clean-up packet of the rebuild in a cloud sandbox. A packet ends a problem CLASS (a second copy of a
+capability, a swallowed error, an id rule, a stored shape) in its module group, every instance, never one instance:
+its `class` and `gate` cells name the class and the gate (lint, structural test, shrink-only ratchet or shared owner)
+that keeps it gone. Your branch reaches `main` after its affected checks; the verifier runs the full suite behind it
+and reverts what fails (fleet-train CYCLE.md).
 
 1. Setup: if `/opt/harness/env.sh` is missing run `bash tools/cloud/setup.sh 2>&1 | tail -5`, then `source /opt/harness/env.sh`.
-2. Claim: `bash tools/cloud/claim_task.sh fix`. It claims the first free task of `fix-tasks.txt` on harness-cloud
-   (unique commit pushed to `cloud/fix-claim-<task>`) and checks out `fix/cloud-<task>` from the base, or from
-   `cloud/wip-fix-<task>` merged with the base. `NO TASK`: stop and report it. `MERGE CONFLICT`: resolve, commit.
+2. Claim: `bash tools/cloud/claim_task.sh fix`. It claims the first free task of `fix-tasks.txt` on harness-cloud,
+   which lists only claimable tasks (prerequisites landed, footprint overlapping nothing in flight; a task not
+   listed is never yours to take): a unique commit pushed to `cloud/fix-claim-<task>`. It checks out
+   `fix/cloud-<task>` from the base, or from `cloud/wip-fix-<task>` merged with the base. `NO TASK`: stop and report it. `MERGE CONFLICT`: resolve, commit.
    Read the task `git show origin/harness-cloud:fix-tasks/<task>.md`, why an earlier branch came back
    `git show origin/harness-cloud:fix-rejects/<task>.md` (fix that first) and `HANDOFF-fix-<task>.md` if resuming.
-3. Recheck the packet on your branch (cite file:line). Already done: record it (step 6) so the task closes.
+3. Recheck the packet on your branch: grep the WHOLE module group for the class, not only the cited lines (cite
+   file:line). Already done: record it (step 6) so the task closes.
 4. Write the proving test first and see it red, through the public entry (or the owning module's unit seam); "old
    documents still load" where a stored shape changes. Never edit or weaken another row's test.
 5. Fix in the owner: before adding any function find the owner (the project's index search, then grep for the same rule
-   or body); fold every copy into the owner and delete it. Green: the new test, the owning modules' unit tests, the
-   acceptance tests that drive what you touched, the strict linter on what you touched, the formatter.
+   or body); fold every copy into the owner and delete it. Fix every instance of the class in your modules and lower
+   their ratchet baselines to the new count in the same change (never raise one; another group's entries are not
+   yours). Green: the new test, the owning modules' unit tests, the acceptance tests that drive what you touched,
+   the strict linter on what you touched, the formatter.
 6. Record the packet's roadmap rows as fixed the way the project records finished clean-up rows, so no planner plans them
-   again. Commit `fix(<module>): <task> <what>`.
+   again. Never hand-edit a shared list or generated index: add your own files and let the generator register them.
+   Commit `fix(<module>): <task> <what>`.
 7. Self-review twice: `bash tools/cloud/added_fns.sh` lists the functions you added; run the duplicate review in
    `tools/cloud/review_prompt.md` on that list, fix every duplicate (call the owner, delete your copy), commit, review
    again: both runs must report none.
