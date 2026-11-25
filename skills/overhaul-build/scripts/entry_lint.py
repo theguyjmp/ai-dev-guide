@@ -8,8 +8,9 @@ It may not use unittest.mock, MagicMock, patch or monkeypatch (nor Mock, AsyncMo
 not import any product package. Drive the product as a user does: a CLI through subprocess, a server over HTTP.
 Rust (.rs files there, read by rust_src.py): no mock crate (mockall, mockito, wiremock, httpmock, faux) and no
 `automock`, no `#[path = ..]` and no `include!`, and no use of a product crate (a package or lib name from a Cargo.toml
-in the repo, `-` read as `_`). One exception: a file holding a `lib:` row's test (spec/FUNCTIONS.md) may use that
-row's crate, since a library's public entry is its API.
+in the repo, `-` read as `_`). Two exceptions: a file holding a `lib:` row's test (spec/FUNCTIONS.md) may use that
+row's crate, since a library's public entry is its API; a derived group root (`group_<area>.rs`, rust_tests.py) may
+hold exactly its own area's `include!` of the module list build.rs writes, whose files are the siblings linted here.
     py -3 entry_lint.py [--repo R] [path ...]      repo-relative files or dirs; default tests/acceptance
 Prints `file:line: message` per violation. Exit 0 clean, 1 violations.
 """
@@ -22,6 +23,7 @@ import sys
 import tomllib
 
 import rust_src  # beside this script
+import rust_tests  # beside this script: the derived group root layout
 
 ALLOWED = ("subprocess", "urllib", "http.client", "json", "pathlib", "tempfile", "os", "sys", "time", "socket", "re",
            "shutil", "signal", "threading", "concurrent.futures", "pytest", "_entry")
@@ -178,6 +180,14 @@ def lib_crates(repo):
     return out
 
 
+def derived_include(rel):
+    """The one `include!` the test file `rel` may hold when it is a derived group root (`<dir>/group_<area>.rs`):
+    `$OUT_DIR/test_groups/<dir>/<area>.rs`, the `mod` list of its sibling test files (rust_tests.DERIVED); else None."""
+    m = rust_tests.DERIVED_ROOT.fullmatch(posixpath.splitext(posixpath.basename(rel))[0])
+    folder = posixpath.basename(posixpath.dirname(rel))
+    return f'{rust_tests.DERIVED}{folder}/{m.group(1)}.rs"));' if m else None
+
+
 def lint_rust(text, crates, allowed_crates=()):
     """[(line, message)] for one Rust acceptance file."""
     toks, out = rust_src.tokens(text), []
@@ -235,6 +245,8 @@ def main(argv=None):
     for rel in files:
         with open(os.path.join(repo, rel), encoding="utf-8-sig", errors="replace") as fh:
             text = fh.read()
+        if rel.endswith(".rs") and (own := derived_include(rel)):
+            text = text.replace(own, "", 1)  # its line stays (line numbers hold); any other include! is still found
         found = (lint_rust(text, crates, libs.get(rel, ())) if rel.endswith(".rs")
                  else lint_source(rel, text, product))
         out += [f"{rel}:{line}: {msg}" for line, msg in found]

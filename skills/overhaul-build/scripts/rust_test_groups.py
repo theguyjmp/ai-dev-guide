@@ -8,7 +8,8 @@ builds, rust_tests.problem) into the group target of its folder:
   file belongs to the root whose prefix (its members' common lead, e.g. `test_`, then `<area>`) is the longest one its
   stem starts with. No root or two equally long ones: refused.
 - the root gains `mod <stem>;` in sorted place among its test modules, and loses `mod <stem>;` lines whose file is gone
-  (a rename's old name).
+  (a rename's old name). A derived root (rust_tests.DERIVED: the repo's build.rs declares its modules) gains none and
+  loses every test module line a merge brought into it (that module would be declared twice).
 - the file's helper declarations (`mod entry;`, with or without `#[path = ".."]`) become `use crate::entry;` when the
   root declares that helper (one helper module per target), or go when the file never names `entry::`. A file
   declaring a module its root lacks is refused (its path would change as a module).
@@ -44,18 +45,21 @@ class Group:
     target: str  # its cargo test target
     prefix: str | None  # what a member's stem starts with (None: its members share no lead, so nothing is matched)
     helpers: frozenset[str]  # the root's out-of-line modules that are not test files (e.g. entry)
+    derived: bool = False  # build.rs declares its test modules (rust_tests.DERIVED): it lists none
 
 
 @dataclass
 class Result:
     moved: list[tuple[str, str, str]] = field(default_factory=list)  # (file, root, target)
     dropped: list[tuple[str, str]] = field(default_factory=list)  # (root, module whose file is gone)
+    listed: list[tuple[str, str]] = field(default_factory=list)  # (derived root, test module a line declared there)
     refused: list[str] = field(default_factory=list)
     changed: list[str] = field(default_factory=list)  # repo-relative files written
 
     def lines(self) -> list[str]:
         return ([f"refused {r}" for r in self.refused] + [f"moved {f} into {r} ({t})" for f, r, t in self.moved]
-                + [f"dropped mod {m}; from {r} (its file is gone)" for r, m in self.dropped])
+                + [f"dropped mod {m}; from {r} (its file is gone)" for r, m in self.dropped]
+                + [f"dropped mod {m}; from {r} (build.rs declares its modules)" for r, m in self.listed])
 
 
 def _read(p: Path) -> str:
@@ -87,9 +91,11 @@ def _groups(repo: Path, table: dict) -> dict[str, list[Group]]:
                      if all(s[n:].startswith(a) for s, a in members)), None)
         for rel, name, a in roots:
             names = {x.module for x in table.values() if x.module and x.name == name}
-            decls = _decls(repo / folder, _read(repo / rel))
+            root_text = _read(repo / rel)
+            decls = _decls(repo / folder, root_text)
             helpers = frozenset(d for d, p in decls.items() if d not in names and p is not None)
-            out.setdefault(folder, []).append(Group(rel, name, None if lead is None else lead + a, helpers))
+            out.setdefault(folder, []).append(Group(rel, name, None if lead is None else lead + a, helpers,
+                                                    rust_tests.DERIVED in root_text))
     return out
 
 
@@ -213,6 +219,10 @@ def convert(repo, write: bool = True) -> Result:
             for name in _gone(repo, g, text(g.root)):
                 texts[g.root] = _drop_mod(text(g.root), name)
                 res.dropped.append((g.root, name))
+            for name in rust_src.mod_decls(rust_src.tokens(text(g.root))) if g.derived else ():
+                if name not in g.helpers:
+                    texts[g.root] = _drop_mod(text(g.root), name)
+                    res.listed.append((g.root, name))
     loose = {str(p.relative_to(repo).as_posix()) for f in groups for p in (repo / f).glob("*.rs")}
     candidates = sorted({rel for rel, t in table.items() if not t.module and rel not in roots
                          and str(PurePosixPath(rel).parent) in groups}
@@ -236,11 +246,12 @@ def convert(repo, write: bool = True) -> Result:
     res.refused += [f"{rel}: {why}" for rel, why in bad.items()]
     if res.refused:
         res.dropped.clear()
+        res.listed.clear()
         return res
     texts["Cargo.toml"] = cargo
     for rel, stem, g in moving:
         texts[rel] = _helper_lines(text(rel), g.helpers)
-        if stem not in rust_src.mod_decls(rust_src.tokens(text(g.root))):
+        if not g.derived and stem not in rust_src.mod_decls(rust_src.tokens(text(g.root))):
             texts[g.root] = _insert_mod(text(g.root), stem, g.helpers)
         res.moved.append((rel, g.root, g.target))
     if not write:

@@ -90,6 +90,19 @@ class EntryLintRustTest(RustCase):
         self.assertIn("tests/acceptance/cart.rs:1: `#[path = ..]`", out)
         self.assertIn("tests/acceptance/cart.rs:3: `include!`", out)
 
+    def test_derived_group_root_may_include_only_its_own_module_list(self):
+        own = 'include!(concat!(env!("OUT_DIR"), "/test_groups/acceptance/a.rs"));\n'
+        self.write("tests/acceptance/group_a.rs", "mod entry;\n\n" + own)
+        self.write("tests/acceptance/a01_cart.rs", GOOD_TEST)
+        self.assert_clean(ENTRY)
+        self.write("tests/acceptance/group_a.rs", "mod entry;\n\n" + own.replace("/a.rs", "/b.rs"))
+        self.assertIn("tests/acceptance/group_a.rs:3: `include!`", self.assert_fails(ENTRY))
+        self.write("tests/acceptance/group_a.rs", "mod entry;\n\n" + own + own)
+        self.assertIn("tests/acceptance/group_a.rs:4: `include!`", self.assert_fails(ENTRY))
+        self.write("tests/acceptance/group_a.rs", "mod entry;\n\n" + own)
+        self.write("tests/acceptance/cart.rs", own)  # not a group root
+        self.assertIn("tests/acceptance/cart.rs:1: `include!`", self.assert_fails(ENTRY))
+
     def test_product_crate_banned(self):
         self.write("tests/acceptance/cart.rs", "use shop_core::cart;\nextern crate shop;\n" + GOOD_TEST
                    + "fn helper() -> u32 {\n    ::shop_core::cart::total(&[])\n}\n")

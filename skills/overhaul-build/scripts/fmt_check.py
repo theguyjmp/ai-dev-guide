@@ -3,7 +3,9 @@
 cargo fmt hands rustfmt every target root of a package on one command line; a package with a few hundred
 [[test]] targets under a long repo path dies with os error 206 (measured 2026-11-09 on the pilot project: 189 functions,
 ~400 test roots). This runs the same check: every target root `cargo metadata` lists for the workspace members,
-`rustfmt --check --edition <package edition>` in batches. Exit 0 when formatted, 1 on a diff, 2 on a tool error.
+`rustfmt --check --edition <package edition>` in batches, plus the test modules of derived group roots (rust_tests.py:
+rustfmt follows `mod` lines, not the `include!` that declares those). Exit 0 when formatted, 1 on a diff, 2 on a
+tool error.
 
 Usage: py -3 fmt_check.py [--repo DIR] [--batch N]
 """
@@ -13,6 +15,9 @@ import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rust_tests  # noqa: E402  beside this script: the one map of test files to cargo targets
 
 
 def roots(repo: Path) -> dict[str, list[str]]:
@@ -32,6 +37,8 @@ def roots(repo: Path) -> dict[str, list[str]]:
             except ValueError:
                 pass
             by_ed[pkg.get("edition") or "2021"].append(str(p))
+        if Path(pkg["manifest_path"]).resolve() == (repo / "Cargo.toml").resolve():  # its [[test]] group members
+            by_ed[pkg.get("edition") or "2021"] += [rel for rel, t in rust_tests.targets(repo).items() if t.module]
     return {ed: sorted(set(files)) for ed, files in by_ed.items()}
 
 

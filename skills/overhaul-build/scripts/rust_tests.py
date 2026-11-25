@@ -2,9 +2,12 @@
 
 A test file is either its own root Cargo.toml `[[test]]` target (its tests are named `<fn>`), or a module of a group
 target: a `[[test]]` whose root file, in the same directory, declares `mod <file stem>;` (its tests are named
-`<file stem>::<fn>`). Grouping a few thousand test files into a few targets keeps `cargo clippy --all-targets` and
-`cargo test --no-run` from checking and linking one crate per file. A repo may hold both layouts; a test's identity
-stays `<file>::<fn>` either way, and callers turn it into the cargo command through `Target`.
+`<file stem>::<fn>`). A derived group root (`group_<area>.rs`) lists no modules: it includes
+`$OUT_DIR/test_groups/<dir>/<area>.rs`, which the repo's build.rs writes, declaring every sibling test file of its
+area (DERIVED, `member_area`), so two branches adding test files never touch one shared line. Grouping a few thousand
+test files into a few targets keeps `cargo clippy --all-targets` and `cargo test --no-run` from checking and linking
+one crate per file. A repo may hold these layouts side by side; a test's identity stays `<file>::<fn>` either way, and
+callers turn it into the cargo command through `Target`.
 
   py -3 rust_tests.py <repo> <test file or stem>...   # per input: <target> <filter> (filter '' = the whole target)
 """
@@ -17,6 +20,20 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 MOD = re.compile(r"^mod (\w+);", re.M)  # a group root's out-of-line child modules (not `pub mod`, not inline ones)
+DERIVED = 'include!(concat!(env!("OUT_DIR"), "/test_groups/'  # a derived group root (build.rs writes its modules)
+DERIVED_ROOT = re.compile(r"group_(\w+)")  # a derived root's file stem: `group_<area>`
+MEMBER_LEAD = "test_"  # what a derived member's stem may start with before its area (`test_r0530` in area r0)
+
+
+def member_area(stem: str, areas) -> str | None:
+    """The area of the derived group whose member the test file `stem` is: the longest area its stem starts with
+    after an optional MEMBER_LEAD (None: no area fits, or `stem` is a group root). The repo's build.rs compiles the
+    files by this same rule; a file no area fits stops that build."""
+    if DERIVED_ROOT.fullmatch(stem):
+        return None
+    rest = stem.removeprefix(MEMBER_LEAD)
+    fits = [a for a in areas if rest.startswith(a)]
+    return max(fits, key=len) if fits else None
 
 
 @dataclass(frozen=True)
@@ -50,16 +67,24 @@ def targets(repo) -> dict[str, Target]:
         if isinstance(t, dict) and t.get("path") and t.get("name"):
             own[str(t["path"]).replace("\\", "/").removeprefix("./")] = Target(str(t["name"]))
     out = dict(own)
+    derived: dict[PurePosixPath, dict[str, str]] = {}  # folder: {area: target}
     for rel, t in own.items():
         try:
             text = (repo / rel).read_text(encoding="utf-8")
         except OSError:
             continue
         folder = PurePosixPath(rel).parent
+        if DERIVED in text and (m := DERIVED_ROOT.fullmatch(PurePosixPath(rel).stem)):
+            derived.setdefault(folder, {})[m.group(1)] = t.name
         for m in MOD.finditer(text):
             child = str(folder / f"{m.group(1)}.rs")
             if child not in own and (repo / child).is_file():
                 out.setdefault(child, Target(t.name, m.group(1)))
+    for folder, areas in derived.items():
+        for p in sorted((repo / folder).glob("*.rs")):
+            child = str(folder / p.name)
+            if child not in own and (area := member_area(p.stem, areas)) is not None:
+                out.setdefault(child, Target(areas[area], p.stem))
     return out
 
 
@@ -87,7 +112,8 @@ def problem(rel: str, table: dict[str, Target]) -> str:
     grouped = {t.name for t in table.values() if t.module}
     roots = sorted(p for p, t in table.items() if not t.module and t.name in grouped and PurePosixPath(p).parent == folder)
     if roots:
-        return f"{rel} is not a cargo test module: declare `mod {stem};` in its area's group root ({', '.join(roots)})"
+        return (f"{rel} is not a cargo test module: declare `mod {stem};` in its area's group root, or (a derived "
+                f"root) start its name with the root's area ({', '.join(roots)})")
     return f'{rel} is not a cargo test target: add [[test]] name = "{stem}" path = "{rel}" to the root Cargo.toml'
 
 

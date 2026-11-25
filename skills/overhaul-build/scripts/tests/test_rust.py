@@ -254,7 +254,8 @@ class GroupedTargetsTest(unittest.TestCase):
         self.assertEqual(rust_tests.problem("tests/acceptance/sum.rs", table), "")
         self.assertEqual(rust_tests.problem("tests/acceptance/mul.rs", table),
                          "tests/acceptance/mul.rs is not a cargo test module: declare `mod mul;` in its area's "
-                         "group root (tests/acceptance/group.rs)")
+                         "group root, or (a derived root) start its name with the root's area "
+                         "(tests/acceptance/group.rs)")
         self.assertEqual(rust_tests.problem("tests/other/mul.rs", table),
                          'tests/other/mul.rs is not a cargo test target: add [[test]] name = "mul" '
                          'path = "tests/other/mul.rs" to the root Cargo.toml')
@@ -383,6 +384,49 @@ class RustTestGroupsTest(unittest.TestCase):
         self.assertIn(b"use crate::entry;\r\n", (d / "tests/acceptance/a02_two.rs").read_bytes())
         self.assertEqual((d / "Cargo.toml").read_bytes().decode(), self.TOML.replace("\n", "\r\n"))
 
+
+    def derive(self, d):
+        """The group roots of `d` turned derived (build.rs declares their modules)."""
+        for rel in ("tests/acceptance/group_a.rs", "tests/acceptance/group_b1.rs", "tests/property/group_a.rs"):
+            text = (d / rel).read_bytes().decode()
+            kept = [ln for ln in text.splitlines(keepends=True) if not ln.startswith("mod ") or ln == "mod entry;\n"]
+            area = Path(rel).stem.removeprefix("group_")
+            include = f'include!(concat!(env!("OUT_DIR"), "/test_groups/{Path(rel).parent.name}/{area}.rs"));\n'
+            (d / rel).write_bytes(("".join(kept) + include).encode("utf-8"))
+
+    def test_derived_roots_build_every_file_of_their_area(self):
+        d = self.make(tests__acceptance__b1_DOT_rs="\n", tests__acceptance__c01_z_DOT_rs="\n")
+        self.derive(d)
+        table = rust_tests.targets(d)
+        self.assertEqual(table["tests/acceptance/a01_one.rs"], rust_tests.Target("acceptance_a", "a01_one"))
+        self.assertEqual(table["tests/acceptance/b101_x.rs"], rust_tests.Target("acceptance_b1", "b101_x"))  # longest
+        self.assertEqual(table["tests/acceptance/b1.rs"], rust_tests.Target("acceptance_b1", "b1"))
+        self.assertEqual(table["tests/property/test_a01.rs"], rust_tests.Target("property_a", "test_a01"))
+        self.assertEqual(table["tests/acceptance/group_a.rs"], rust_tests.Target("acceptance_a"))
+        self.assertNotIn("tests/acceptance/c01_z.rs", table)  # no area fits: build.rs stops the build
+        self.assertIn("start its name with the root's area", rust_tests.problem("tests/acceptance/c01_z.rs", table))
+        self.assertEqual(rust_tests.member_area("test_r0530", ["r0", "r", "s"]), "r0")
+        self.assertIsNone(rust_tests.member_area("group_r0", ["r0", "g"]))
+
+    def test_derived_root_gains_no_mod_line_and_loses_merged_ones(self):
+        d = self.make(self.own("tests/acceptance/a02_two.rs"), tests__acceptance__a02_two_DOT_rs=self.USES)
+        self.derive(d)
+        root = d / "tests/acceptance/group_a.rs"
+        derived = root.read_bytes().decode()
+        root.write_bytes(derived.replace("mod entry;\n", "mod entry;\nmod a01_one;\n").encode("utf-8"))  # a merge
+        res = rust_test_groups.convert(d)
+        self.assertEqual(res.refused, [])
+        self.assertEqual(res.lines(), ["moved tests/acceptance/a02_two.rs into tests/acceptance/group_a.rs (acceptance_a)",
+                                       "dropped mod a01_one; from tests/acceptance/group_a.rs (build.rs declares its "
+                                       "modules)"])
+        self.assertEqual(root.read_bytes().decode(), derived)
+        self.assertEqual((d / "Cargo.toml").read_bytes().decode(), self.TOML)
+        table = rust_tests.targets(d)
+        self.assertEqual(table["tests/acceptance/a02_two.rs"], rust_tests.Target("acceptance_a", "a02_two"))
+        before = self.snapshot(d)
+        again = rust_test_groups.convert(d)
+        self.assertEqual((again.lines(), again.changed), ([], []))
+        self.assertEqual(self.snapshot(d), before)
 
 class ProbeTestsTest(unittest.TestCase):
     def test_rust_module_gives_cfg_test_files_tests_dirs_and_property_files(self):
