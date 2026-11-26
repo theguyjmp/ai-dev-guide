@@ -141,6 +141,9 @@ with tempfile.TemporaryDirectory() as d:
         return sorted(x.split("/")[-1] for x in git(r, "for-each-ref", "--format=%(refname)").split())
     check("the CI host gets main only", heads(ci) == ["main"], heads(ci))
     check("the writers' mirror gets all three", heads(mirror) == ["integ", "main", "verified"], heads(mirror))
+    check("a ref can land under another name",
+          t.mirror([("ci", ("verified:refs/trunk/verified",))]) == [] and git(ci, "rev-parse", "refs/trunk/verified")
+          == t.rev("verified"))
     check("no config: origin with all three",
           tk.mirror_plan(Path(d) / "none") == [("origin", ("integ", "main", "verified"))])
     git(repo, "push", "-q", "ci", "+" + commit(repo, "x.txt", "x\n", root) + ":refs/heads/main")  # diverged by hand

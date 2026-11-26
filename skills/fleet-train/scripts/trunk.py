@@ -91,7 +91,8 @@ class Trunk:
         """Fast-forward each remote's refs; returns the failures (a lag the next mirror heals)."""
         bad = []
         for remote, refs in plan:
-            have = [f"refs/heads/{r}:refs/heads/{r}" for r in refs if self.rev(r)]
+            pairs = [(r.split(":", 1) + [""])[:2] for r in refs]  # "integ" or "integ:refs/trunk/integ" (no CI trigger)
+            have = [f"refs/heads/{a}:{b or 'refs/heads/' + a}" for a, b in pairs if self.rev(a)]
             r = subprocess.run(["git", "-C", str(self.repo), "push", "-q", remote, *have], capture_output=True,
                                text=True, check=False)
             if r.returncode:

@@ -39,6 +39,11 @@ def boom(sha, base):
     raise RuntimeError("desk unreachable")
 
 
+real_judge = g.judge
+g.h.desk.on = lambda st: True
+g.h.desk.lease_refusal = lambda h: "desk lease: a higher priority holds the desk"
+g.checkout = lambda sha: FAILS.append("checked out on a taken desk")
+check("a taken shared desk is no verdict before any review", real_judge("abc", "def")[0] == g.NO_VERDICT)
 g.judge = boom
 check("a crash in the gate is no verdict, never red", g.main(["abc"]) == g.NO_VERDICT)
 print("ALL PASS" if not FAILS else f"FAILED {FAILS}")

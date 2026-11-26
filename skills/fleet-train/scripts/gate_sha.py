@@ -37,6 +37,8 @@ def verdict(ok: bool, fails: list, log: str, capped: set = frozenset(), slow_at_
 
 def judge(sha: str, base: str) -> tuple:
     """(code, fails): the duplicate review, then harness.gate."""
+    if h.desk.on(h.ST) and (why := h.desk.lease_refusal(h)):
+        return NO_VERDICT, [why]
     checkout(sha)
     try:
         dups = h.dup_text(h.batch_review([], cwd=h.TRAIN, base=base))
@@ -69,7 +71,7 @@ def main(argv: list) -> int:
     try:
         with h.lock("train"):
             code, fails = judge(argv[0], base)
-    except Exception as e:  # noqa: BLE001  a crash exits 1, which reads as red and reverts an innocent push
+    except Exception as e:  # noqa: BLE001  exit 1 would read as red
         code, fails = NO_VERDICT, [f"{type(e).__name__}: {str(e)[-300:]}"]
     h.event("verifier_gate", sha=argv[0], verdict=["green", "red", "no verdict"][code], fails=fails[:20])
     print(["GREEN", "RED", "NO VERDICT"][code], argv[0][:12], " ".join(fails[:10]))
