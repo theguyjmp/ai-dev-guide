@@ -45,12 +45,21 @@ def alive(pid: int) -> bool | None:
     return None if r.returncode else f'"{pid}"' in r.stdout
 
 
+def run_file(p: Proc, home: Path) -> Path:
+    """<state>/<name>.run.cmd: p's command, quoted for cmd.exe, appending to <name>.out."""
+    f = home / "state" / f"{p.name}.run.cmd"
+    line = subprocess.list2cmdline(list(p.cmd)).replace("%", "%%")
+    out = home / "state" / f"{p.name}.out"
+    f.write_text(f'@echo off\r\n{line} >> "{out}" 2>&1\r\n', encoding="utf-8", newline="")
+    return f
+
+
 def start_detached(p: Proc, home: Path) -> int:
     """Starts p outside the caller's job, with no console window; returns its pid."""
     out = home / "state" / f"{p.name}.out"
     cwd = str((home / p.cwd).resolve())
     if os.name == "nt":
-        line = subprocess.list2cmdline(["cmd", "/c", subprocess.list2cmdline(list(p.cmd)), ">>", str(out), "2>&1"])
+        line = f'cmd /c "{run_file(p, home)}"'  # nesting the command in `cmd /c` mangled any argument with a space
         q = lambda s: s.replace("'", "''")  # noqa: E731
         ps = ("$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}; "
               f"(Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='{q(line)}'; "

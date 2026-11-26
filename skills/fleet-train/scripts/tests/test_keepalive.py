@@ -37,5 +37,10 @@ with tempfile.TemporaryDirectory() as d:
     check("a low disk is an owner alarm", any("OWNER ALARM" in l for l in lines), lines)
     check("the log records it", "verifier was down" in (home / "state" / "keepalive.log").read_text())
 
+    rf = ka.run_file(ka.Proc("spaced", ("C:/Program Files/x/bash.exe", "loop.sh", "50%")), home).read_text()
+    check("an argument with a space stays one argument", '"C:/Program Files/x/bash.exe" loop.sh' in rf, rf)
+    check("a percent sign survives cmd.exe", "50%%" in rf, rf)
+    check("output appends to <name>.out", rf.rstrip().endswith('spaced.out" 2>&1'), rf)
+
 print("ALL PASS" if not FAILS else f"FAILED {FAILS}")
 sys.exit(1 if FAILS else 0)
