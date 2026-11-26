@@ -144,13 +144,14 @@ HARNESS_HOME set. On Windows use `py -3`; elsewhere `python3`.
 2. Writer push, the only push path: `bash $S/push.sh <slot> <name> <rows...>` in the writer's committed worktree
    (lanes and the cloud land script run the same file). It rebases onto `integ` (a conflict refuses), runs the
    writer checks (`FINISH_NO_SUBMIT=1 finish.py`, last line `GATES OK`), writes the check log as
-   `CHECKED <sha> <patch-id>` + the checks, calls `trunk.py push` and mirrors `integ` and `main` to origin.
+   `CHECKED <sha> <patch-id>` + the checks, calls `trunk.py push` and `trunk.py mirror` (harness.toml `[trunk]
+   mirrors`: which remote gets which refs, e.g. a CI host `main` only; default origin, all three).
    Exit 0 PUSHED, 1 REFUSED, 3 HELD, 4 RECHECK (run the checks again), 5 RACE (run it again; the receipt stays valid
    while the patch-id is unchanged).
 3. Verifier loop: `bash $S/verify_loop.sh`, started detached by the watchdog. Each round runs `trunk.py verify`
    with `gate_sha.py` as the gate (the duplicate review of `verified..sha`, then `harness.gate`, with every baseline
    taken at `verified`: under merge first `main` may already hold the candidate, so a baseline at `main` would hide
-   its reds) and mirrors `integ`, `main` and `verified` to origin. `trunk.py status` prints `main`, `verified`,
+   its reds) and runs `trunk.py mirror`. `trunk.py status` prints `main`, `verified`,
    unverified pushes, unrecorded commits and any hold; `trunk.py unhold --why "<fix>"` clears a hold.
    Proven end to end on a toy repo: a clean push lands and is verified; a red the writer checks refuse never
    lands; a red pushed past them is isolated, reverted on top of `main`, and the next round verifies the pair.
@@ -274,7 +275,8 @@ A writer never waits for the verifier; its next work bases on the trunk's head.
    verified in round one and the bad one is isolated in about log2(n) rounds. A round runs to its end. Verdicts are
    reused per (tree id, test list). Throughput over a full day: not yet measured.
 3. Duplicate review of verified..candidate (duplicates = red; reviewer unavailable = no verdict and an owner alarm,
-   never a pass), then the full gate.
+   never a pass), then the full gate. Any crash of the gate command is no verdict (`gate_sha` exits 2): a crash exits 1,
+   which reads as red and would revert an innocent push.
 4. Judging a red, one routine for every route: known-red dropped; every failing test re-run alone at the candidate
    (green alone = flaky: quarantined with a fix request, nothing reverted, no hold); red alone at `verified` too =
    pre-existing, healed by quarantine; a test red when every suspect push is documentation no code reads is no

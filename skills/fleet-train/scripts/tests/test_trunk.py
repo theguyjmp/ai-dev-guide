@@ -125,5 +125,26 @@ with tempfile.TemporaryDirectory() as d:
     t.unhold("fixed")
     check("unhold lets pushes through", t.push(h, s, log_for(t, s, h))[0] == tk.PUSHED)
 
+    ci, mirror = Path(d) / "ci.git", Path(d) / "mirror.git"
+    for r in (ci, mirror):
+        subprocess.run(["git", "init", "-q", "--bare", str(r)], check=True)
+        git(repo, "remote", "add", r.stem, str(r))
+    home = Path(d) / "home"
+    home.mkdir()
+    (home / "harness.toml").write_text('[trunk]\nmirrors = [{remote = "ci", refs = ["main"]}, '
+                                       '{remote = "mirror", refs = ["integ", "main", "verified"]}]\n', encoding="utf-8")
+    plan = tk.mirror_plan(home)
+    check("mirrors come from [trunk] in harness.toml",
+          plan == [("ci", ("main",)), ("mirror", ("integ", "main", "verified"))], plan)
+    check("mirror pushes each remote its refs", t.mirror(plan) == [], plan)
+    def heads(r: Path) -> list:
+        return sorted(x.split("/")[-1] for x in git(r, "for-each-ref", "--format=%(refname)").split())
+    check("the CI host gets main only", heads(ci) == ["main"], heads(ci))
+    check("the writers' mirror gets all three", heads(mirror) == ["integ", "main", "verified"], heads(mirror))
+    check("no config: origin with all three",
+          tk.mirror_plan(Path(d) / "none") == [("origin", ("integ", "main", "verified"))])
+    git(repo, "push", "-q", "ci", "+" + commit(repo, "x.txt", "x\n", root) + ":refs/heads/main")  # diverged by hand
+    check("a diverged remote is a reported lag, never forced", len(t.mirror(plan)) == 1, t.mirror(plan))
+
 print("ALL PASS" if not FAILS else f"FAILED {FAILS}")
 sys.exit(1 if FAILS else 0)

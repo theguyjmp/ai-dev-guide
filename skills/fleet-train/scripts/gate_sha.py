@@ -66,8 +66,11 @@ def main(argv: list) -> int:
         print(f"NO VERDICT no `{VERIFIED}` ref")
         return NO_VERDICT
     h.BASE_REF = VERIFIED  # main may already hold the candidate
-    with h.lock("train"):
-        code, fails = judge(argv[0], base)
+    try:
+        with h.lock("train"):
+            code, fails = judge(argv[0], base)
+    except Exception as e:  # noqa: BLE001  a crash exits 1, which reads as red and reverts an innocent push
+        code, fails = NO_VERDICT, [f"{type(e).__name__}: {str(e)[-300:]}"]
     h.event("verifier_gate", sha=argv[0], verdict=["green", "red", "no verdict"][code], fails=fails[:20])
     print(["GREEN", "RED", "NO VERDICT"][code], argv[0][:12], " ".join(fails[:10]))
     return code

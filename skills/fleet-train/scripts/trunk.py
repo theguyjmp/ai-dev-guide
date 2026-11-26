@@ -4,6 +4,7 @@
     py -3 trunk.py verify --gate-cmd "<cmd; {sha} is replaced; exit 0 green, 1 red, other no verdict>"
     py -3 trunk.py status
     py -3 trunk.py unhold --why "<fix>"
+    py -3 trunk.py mirror        each remote of harness.toml [trunk] mirrors gets its refs (default: origin, all three)
 """
 from __future__ import annotations
 
@@ -85,6 +86,17 @@ class Trunk:
     def hold(self) -> str:
         p = self.state / "hold.txt"
         return p.read_text(encoding="utf-8").strip() if p.exists() else ""
+
+    def mirror(self, plan: list) -> list:
+        """Fast-forward each remote's refs; returns the failures (a lag the next mirror heals)."""
+        bad = []
+        for remote, refs in plan:
+            have = [f"refs/heads/{r}:refs/heads/{r}" for r in refs if self.rev(r)]
+            r = subprocess.run(["git", "-C", str(self.repo), "push", "-q", remote, *have], capture_output=True,
+                               text=True, check=False)
+            if r.returncode:
+                bad.append(f"{remote}: {r.stderr.strip()[-200:]}")
+        return bad
 
     def unhold(self, why: str) -> None:
         (self.state / "hold.txt").unlink(missing_ok=True)
@@ -218,6 +230,17 @@ def closed(pushes: list, size: int) -> bool:
     return not undone & {s for s, _ in pushes[:size]}
 
 
+def mirror_plan(home: Path) -> list:
+    """[(remote, refs)]: harness.toml `[trunk] mirrors = [{remote, refs}]`, the one place naming where refs go."""
+    p = Path(home) / "harness.toml"
+    if p.exists():
+        import tomllib
+        ms = tomllib.loads(p.read_text(encoding="utf-8")).get("trunk", {}).get("mirrors")
+        if ms is not None:
+            return [(m["remote"], tuple(m["refs"])) for m in ms]
+    return [("origin", (TRUNK, MAIN, VERIFIED))]
+
+
 def run_gate(cmd: str) -> Callable[[str], bool | None]:
     def gate(sha: str) -> bool | None:
         rc = subprocess.run(cmd.replace("{sha}", shlex.quote(sha)), shell=True).returncode
@@ -238,8 +261,13 @@ def main(argv=None) -> int:
     sp.add_parser("verify").add_argument("--gate-cmd", required=True)
     sp.add_parser("status")
     sp.add_parser("unhold").add_argument("--why", required=True)
+    sp.add_parser("mirror")
     a = ap.parse_args(argv)
     t = Trunk(a.repo, a.state)
+    if a.cmd == "mirror":
+        bad = t.mirror(mirror_plan(Path(os.environ.get("HARNESS_HOME", "."))))
+        print("\n".join(f"MIRROR LAG {b}" for b in bad) or "MIRRORED")
+        return 1 if bad else 0
     if a.cmd == "push":
         code, msg = t.push(a.sha, a.base, Path(a.log).read_text(encoding="utf-8"), a.kind, a.name, tuple(a.rows))
         print(f"{PUSH_CODES[code]} {msg}")

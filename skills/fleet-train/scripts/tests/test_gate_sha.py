@@ -31,5 +31,15 @@ check("a time-capped test alone is no verdict, never a pass", g.verdict(False, [
 check("capped at the base too: pre-existing slow, the rest stands", g.verdict(False, [slow], "", {slow}, {slow}) ==
       g.GREEN)
 check("a real red beside a capped test is red", g.verdict(False, [slow, "tests/a.rs::x"], "", {slow}) == g.RED)
+g.h.git = lambda *a, **k: type("R", (), {"stdout": "abc"})()
+g.h.event = lambda *a, **k: None
+
+
+def boom(sha, base):
+    raise RuntimeError("desk unreachable")
+
+
+g.judge = boom
+check("a crash in the gate is no verdict, never red", g.main(["abc"]) == g.NO_VERDICT)
 print("ALL PASS" if not FAILS else f"FAILED {FAILS}")
 sys.exit(1 if FAILS else 0)

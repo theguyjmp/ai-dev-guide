@@ -14,6 +14,6 @@ FINISH_NO_SUBMIT=1 $PY "$S/finish.py" --slot "$slot" --name "$name" > "$log" 2>&
 pid=$(git diff --binary "$base" "$sha" | git patch-id --stable | cut -d' ' -f1)
 { echo "CHECKED $sha ${pid:-empty}"; cat "$log"; } > "$log.receipt"
 $PY "$S/trunk.py" push --sha "$sha" --base "$base" --log "$log.receipt" --name "$name" --rows "$@"; rc=$?
-[ $rc -eq 0 ] && git -C "${HARNESS_REPO:-.}" push -q origin integ main
+[ $rc -eq 0 ] && $PY "$S/trunk.py" mirror
 rm -f "$log" "$log.receipt"
 exit $rc
