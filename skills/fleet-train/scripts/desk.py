@@ -19,10 +19,12 @@ class Conf:
     root: str
     env: str  # cmd.exe prefix
     configured: bool
+    lease: str = ""  # desk_lease.py home on a shared desk
+    project: str = ""  # this project's name there
 
 
 def load_conf(environ, home: Path) -> Conf:
-    """HARNESS_REMOTE_* beat [desk] host, root, env, path (dirs put first on PATH)."""
+    """HARNESS_REMOTE_* beat [desk] host, root, env, path (dirs put first on PATH), lease + project (a shared desk)."""
     toml = home / "harness.toml"
     t = {}
     if toml.exists():
@@ -31,12 +33,17 @@ def load_conf(environ, home: Path) -> Conf:
     env = environ.get("HARNESS_REMOTE_ENV") or t.get("env") or "set CARGO_BUILD_JOBS=3"
     if t.get("path"):
         env += f'&& set "PATH={";".join(t["path"])};%PATH%"'
+    lease, project = t.get("lease", ""), t.get("project", "")
+    if bool(lease) != bool(project):
+        raise ValueError("[desk] lease and project go together: the lease home on the desk and this project's name")
     return Conf(environ.get("HARNESS_REMOTE_HOST") or t.get("host") or "remote-host",
-                environ.get("HARNESS_REMOTE_ROOT") or t.get("root") or "D:\\fleet", env, bool(t.get("host")))
+                environ.get("HARNESS_REMOTE_ROOT") or t.get("root") or "D:\\fleet", env, bool(t.get("host")), lease,
+                project)
 
 
 CONF = load_conf(os.environ, Path(os.environ.get("HARNESS_HOME", str(Path(__file__).parent))))
 HOST, ROOT, ENV = CONF.host, CONF.root, CONF.env
+LEASE, PROJECT = CONF.lease, CONF.project
 KIT = ROOT + "\\desk-kit"
 RREPO = ROOT + "\\repo.git"
 ON = "desk-on"
@@ -129,7 +136,8 @@ def runner_scripts(h) -> dict:
     env = "".join(f'set "{k}={v}"\r\n' for k, v in sorted({**keep, "HARNESS_HOME": KIT, "HARNESS_REPO": RREPO,
                                                            "HARNESS_WT": ROOT + "\\vh"}.items()))
     return {
-        "run.cmd": f"@echo off\r\n{ENV}\r\n{env}cd /d {KIT}\r\npy -3 -u desk.py accept --rid %1 > runs\\%1.out 2>&1\r\n",
+        "run.cmd": f"@echo off\r\n{ENV}\r\n{env}cd /d {KIT}\r\n"
+                   f"{leased('py -3 -u desk.py accept --rid %1')} > runs\\%1.out 2>&1\r\n",
         "start.ps1": "param($rid)\r\n" f"$k = '{KIT}'\r\n"
                      "Remove-Item \"$k\\runs\\$rid.result.json\" -ErrorAction SilentlyContinue\r\n"
                      "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments "
@@ -137,6 +145,24 @@ def runner_scripts(h) -> dict:
                      "Set-Content \"$k\\runs\\$rid.pid\" $r.ProcessId\r\n\"pid $($r.ProcessId) rc $($r.ReturnValue)\"\r\n",
         "stop.cmd": f"@echo off\r\nif exist {KIT}\\runs\\%1.pid for /f %%p in ({KIT}\\runs\\%1.pid) do taskkill /T /F /PID %%p\r\n",
     }
+
+
+def leased(cmd: str) -> str:
+    """cmd under the desk lease of a shared desk (desk_lease.py run: deferred or yielded = no verdict)."""
+    if not LEASE:
+        return cmd
+    return (f"py -3 {LEASE}\\desk_lease.py --home {LEASE} run --project {PROJECT} --job %1 "
+            f"--result {KIT}\\runs\\%1.result.json -- {cmd}")
+
+
+def lease_refusal(h) -> str:
+    """Why the desk lease refuses a run now ("" = go); asked before a bundle is sent."""
+    if not LEASE:
+        return ""
+    r = ssh(h, f"py -3 {LEASE}\\desk_lease.py --home {LEASE} may --project {PROJECT}", timeout=180)
+    if r.returncode == 0:
+        return ""
+    return "desk lease: " + ((r.stdout or r.stderr).strip().splitlines() or [f"exit {r.returncode}"])[0][:300]
 
 
 def kit(h) -> str:
@@ -450,6 +476,9 @@ def remote(h, rid: str, sha: str, spec: dict, limit: float, alive=lambda: True, 
     t0 = time.time()
     if ssh(h, "echo ok", timeout=60).stdout.strip() != "ok":
         raise Unavailable(f"{HOST} unreachable")
+    why = lease_refusal(h)
+    if why:
+        raise Unavailable(why)
     why = send(h, sha) or kit(h)
     why = why or (start(h, rid, {**spec, "rid": rid, "sha": sha}) if alive() else "preempted")
     if why:
@@ -529,7 +558,7 @@ class Desk:
         pick_stop(self.h)
         if ssh(self.h, "echo ok", timeout=60).stdout.strip() != "ok":
             return f"{HOST} unreachable"
-        return send(self.h, self.sha) or kit(self.h)
+        return lease_refusal(self.h) or send(self.h, self.sha) or kit(self.h)
 
     def rid(self, k: int) -> str:
         return f"{self.gid}-{k}" + ("-env" if k in self.env else "")

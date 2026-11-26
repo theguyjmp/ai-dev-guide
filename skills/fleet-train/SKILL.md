@@ -51,6 +51,8 @@ whose footprint overlaps nothing in flight and whose prerequisites landed.
 - `scripts/dash.py`: static dashboard page from state/events.jsonl; publish it as an artifact.
 - `scripts/finish.py --slot N --name X [--tests ...]`: a lane's local check (Lanes, below); FINISH_NO_SUBMIT=1.
 - `scripts/priority_keeper.ps1`: on a Windows machine shared by a gate and lanes, keeps the gate's process tree ahead.
+- `scripts/desk_lease.py`: one lease for a native box several projects share; the higher priority always wins, by its
+  lease, its `want` or a process probe (CYCLE.md "Shared desk"); `[desk] lease` + `project` wire desk.py to it.
 
 ## Gate rules (the verifier's full gate and the writer floor)
 Each rule is enforced in code; the incident behind it is in CHANGELOG.md.

@@ -84,60 +84,48 @@ def proc_start(pid: int) -> str | None:
         return ""
 
 
-def processes() -> list[tuple[int, str]]:
-    """(pid, command line) of every running process: psutil when installed, else CIM (Windows) or /proc."""
+def process_table() -> list[tuple[int, int, str]]:
+    """(pid, parent pid, command line) of every running process, in one read: psutil when installed, else CIM
+    (Windows) or /proc. [] when the table cannot be read."""
     try:
         import psutil
         out = []
-        for p in psutil.process_iter(["pid", "cmdline"]):
-            cmd = p.info.get("cmdline") or []
-            out.append((p.info["pid"], " ".join(cmd)))
+        for p in psutil.process_iter(["pid", "ppid", "cmdline"]):
+            out.append((p.info["pid"], p.info.get("ppid") or 0, " ".join(p.info.get("cmdline") or [])))
         return out
     except ImportError:
         pass
     if os.name == "nt":
         ps = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-CimInstance Win32_Process | "
-              "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress")
+              "Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress")
         r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=120, check=False)
+                           encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=120, check=False,
+                           creationflags=0x08000000)  # CREATE_NO_WINDOW
         try:
             rows = json.loads(r.stdout or "[]")
         except ValueError:
             return []
-        return [(int(x["ProcessId"]), x.get("CommandLine") or "") for x in (rows if isinstance(rows, list) else [rows])]
+        rows = rows if isinstance(rows, list) else [rows]
+        return [(int(x["ProcessId"]), int(x.get("ParentProcessId") or 0), x.get("CommandLine") or "") for x in rows]
     out = []
     for d in Path("/proc").glob("[0-9]*"):
         try:
-            out.append((int(d.name), (d / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")))
-        except OSError:
-            pass
-    return out
-
-
-def parents() -> dict[int, int]:
-    """pid -> parent pid of every running process: psutil when installed, else CIM (Windows) or /proc."""
-    try:
-        import psutil
-        return {p.info["pid"]: p.info.get("ppid") or 0 for p in psutil.process_iter(["pid", "ppid"])}
-    except ImportError:
-        pass
-    if os.name == "nt":
-        ps = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress"
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=120, check=False)
-        try:
-            rows = json.loads(r.stdout or "[]")
-        except ValueError:
-            return {}
-        rows = rows if isinstance(rows, list) else [rows]
-        return {int(x["ProcessId"]): int(x.get("ParentProcessId") or 0) for x in rows}
-    out = {}
-    for d in Path("/proc").glob("[0-9]*"):
-        try:
-            out[int(d.name)] = int((d / "stat").read_text().rsplit(")", 1)[1].split()[1])
+            ppid = int((d / "stat").read_text().rsplit(")", 1)[1].split()[1])
+            cmd = (d / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+            out.append((int(d.name), ppid, cmd))
         except (OSError, IndexError, ValueError):
             pass
     return out
+
+
+def processes() -> list[tuple[int, str]]:
+    """(pid, command line) of every running process."""
+    return [(pid, cmd) for pid, _, cmd in process_table()]
+
+
+def parents() -> dict[int, int]:
+    """pid -> parent pid of every running process."""
+    return {pid: ppid for pid, ppid, _ in process_table()}
 
 
 def descendants(roots: set[int], table: dict[int, int] | None = None) -> set[int]:
@@ -188,8 +176,13 @@ def lock_path(repo: Path) -> Path:
 
 def holder(repo: Path) -> dict | None:
     """The live holder's record, or None when the lock is free or its holder is gone."""
+    return path_holder(lock_path(repo))
+
+
+def path_holder(path: Path) -> dict | None:
+    """The live holder's record of the lock file `path`, or None when it is free or its holder is gone."""
     try:
-        rec = json.loads(lock_path(repo).read_text(encoding="utf-8"))
+        rec = json.loads(Path(path).read_text(encoding="utf-8"))
         pid, start = int(rec["pid"]), str(rec.get("start") or "")
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -211,7 +204,7 @@ def describe(rec: dict) -> str:
 
 def _take_stale(path: Path, seen: str) -> None:
     """Move a dead holder's lock aside; restore it if another process replaced it after we read it."""
-    aside = path.with_name(f"{LOCK}.stale-{os.getpid()}")
+    aside = path.with_name(f"{path.name}.stale-{os.getpid()}")
     try:
         os.replace(path, aside)
     except OSError:
@@ -230,43 +223,57 @@ def acquire(repo: Path, owner: str) -> str:
     raises Held when another live drive or supervise holds it."""
     if inherited(repo):
         return "inherited"
-    path = lock_path(repo)
+    rec = take(lock_path(repo), owner, why="one drive per repo")
+    os.environ[ENV] = f"{rec['pid']} {rec['start']}".strip()
+    return "taken"
+
+
+def take(path: Path, owner: str, why: str = "") -> dict:
+    """Create the lock file `path` exclusively for this process, taking over a dead holder's; returns the record
+    written. Raises Held at once while a live process holds it (callers that wait retry). The one exclusive-file lock
+    of this skill and fleet-train's desk lease."""
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     for _ in range(20):
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
+        except (FileExistsError, PermissionError):  # Windows: a holder's unlink may still be pending
             try:
                 seen = path.read_text(encoding="utf-8")
             except OSError:
                 time.sleep(0.05)
                 continue
-            rec = holder(repo)
+            rec = path_holder(path)
             if rec:
-                raise Held(f"{path.as_posix()} is held by {describe(rec)}: one drive per repo")
+                raise Held(f"{path.as_posix()} is held by {describe(rec)}" + (f": {why}" if why else ""))
             if not seen.strip():  # being written by a taker right now
                 time.sleep(0.05)
                 continue
             _take_stale(path, seen)
             continue
-        pid, start = os.getpid(), proc_start(os.getpid()) or ""
+        rec = {"pid": os.getpid(), "start": proc_start(os.getpid()) or "", "owner": owner,
+               "since": datetime.now().isoformat(timespec="seconds")}
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"pid": pid, "start": start, "owner": owner,
-                                "since": datetime.now().isoformat(timespec="seconds")}))
-        os.environ[ENV] = f"{pid} {start}".strip()
-        return "taken"
+            f.write(json.dumps(rec))
+        return rec
     raise Held(f"{path.as_posix()}: could not take the lock")
+
+
+def drop(path: Path) -> bool:
+    """Remove the lock file `path` if this process holds it; True when it did."""
+    try:
+        if int(json.loads(Path(path).read_text(encoding="utf-8"))["pid"]) == os.getpid():
+            Path(path).unlink()
+            return True
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return False
 
 
 def release(repo: Path) -> None:
     """Remove the lock if this process holds it."""
-    path = lock_path(repo)
-    try:
-        if int(json.loads(path.read_text(encoding="utf-8"))["pid"]) == os.getpid():
-            path.unlink()
-            os.environ.pop(ENV, None)
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
+    if drop(lock_path(repo)):
+        os.environ.pop(ENV, None)
 
 
 def refuse_admin(repo: Path, flag: str, live_replan: bool) -> str:

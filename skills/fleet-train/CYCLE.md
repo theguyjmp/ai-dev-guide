@@ -324,6 +324,26 @@ and only a test red again alone at the candidate (red alone at the base too is p
 dropped is no verdict: nothing reverted, the ref kept. Each standing test joins the native-red list so later sharded
 gates run it natively.
 
+## Shared desk (several projects on one native box)
+- One lease per machine, one owner: `scripts/desk_lease.py`, installed once on the box (its home holds
+  `projects.json`, `leases.json` and the state lock; copy `drivelock.py` from overhaul-build beside it). Every
+  project's heavy desk job (gates, tests, builds) runs through it; git-only work (a collector, ref mirroring) and the
+  watchdog do not need it.
+- `projects.json`: `{"projects": {"<name>": {"priority": 0, "probe": {"match": [re], "ignore": [re],
+  "children_of": [re]}}}}`. A lower number wins. A job may start, and keeps running, only while no higher-priority
+  project holds a live lease, has an unexpired `want`, or shows work in its probe; another project of the same
+  priority holding the desk blocks too (first come).
+- The probe lets a project win without calling the lease: a process counts when its command line matches `match` or
+  it runs under one matching `children_of`, unless it matches `ignore` (console hosts never count). List a project's
+  idle loops and servers in `ignore` and `children_of`, so an idle verifier loop blocks nobody while the gate it
+  starts does. A project that can call the lease also sends `want` before it ships work, so lower ones yield earlier.
+- `run` takes the lease or exits 3 (deferred, never started), re-checks every 15 s and on a higher priority kills the
+  job's tree by pid and exits 75 (yielded). With `--result F` both write `{"error": "desk lease: ..."}` to F, so the
+  caller's poll ends at once with no verdict. Fail closed: an unreadable process table or config is "not now".
+- `desk.py` wires it with `[desk] lease = '<lease home>'` and `project = "<name>"`: every desk run's command goes
+  through `desk_lease.py run`, and `may` is asked before a bundle is sent. A lower-priority project's `verified` can
+  then starve while the box is busy: give its full gate a path that does not need the box (cloud shards).
+
 ## Operations
 - A lock whose holder process is positively gone is dead at once (a failed probe is no evidence; probed at most every
   5 s), an age limit catches a hung holder, and the takeover moves the file aside and puts it back if it changed
