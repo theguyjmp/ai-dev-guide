@@ -40,10 +40,18 @@ def boom(sha, base):
 
 
 real_judge = g.judge
-g.h.desk.on = lambda st: True
+g.h.desk.offload = lambda h: True
 g.h.desk.lease_refusal = lambda h: "desk lease: a higher priority holds the desk"
+real_checkout = g.checkout
 g.checkout = lambda sha: FAILS.append("checked out on a taken desk")
 check("a taken shared desk is no verdict before any review", real_judge("abc", "def")[0] == g.NO_VERDICT)
+g.h.desk.offload = lambda h: False  # cargo: units fall back to this machine, so the gate still runs
+g.checkout = lambda sha: (_ for _ in ()).throw(RuntimeError("reached the gate"))
+try:
+    real_judge("abc", "def")
+    check("a desk that only splits units never stops the gate early", False)
+except RuntimeError as e:
+    check("a desk that only splits units never stops the gate early", "reached the gate" in str(e), e)
 g.judge = boom
 check("a crash in the gate is no verdict, never red", g.main(["abc"]) == g.NO_VERDICT)
 print("ALL PASS" if not FAILS else f"FAILED {FAILS}")

@@ -37,7 +37,7 @@ def verdict(ok: bool, fails: list, log: str, capped: set = frozenset(), slow_at_
 
 def judge(sha: str, base: str) -> tuple:
     """(code, fails): the duplicate review, then harness.gate."""
-    if h.desk.on(h.ST) and (why := h.desk.lease_refusal(h)):
+    if h.desk.offload(h) and (why := h.desk.lease_refusal(h)):  # cargo falls back to local units instead
         return NO_VERDICT, [why]
     checkout(sha)
     try:
