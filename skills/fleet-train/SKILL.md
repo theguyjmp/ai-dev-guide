@@ -162,8 +162,11 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
   `verified` keeps moving.
 
 ## Manager loop
-- Only the manager chat can start cloud sessions (a routine run). An hourly in-chat heartbeat runs
-  `py -3 scripts/fleet_beat.py`, which compares rows waiting for a session with sessions running and prints `FIRE n`.
+- Only the manager chat can start cloud sessions (a routine run). A 15-minute in-chat heartbeat (CronCreate, set on
+  every manager start: it dies with the chat) runs `py -3 scripts/fleet_beat.py`, which compares rows waiting for a
+  session with sessions running and prints `FIRE n`, and reads the verifier: `verified` not moving, integ held, the
+  review unavailable or a worker idle while work waits is fixed in that same beat, never watched (VOIDCAD 11-27: a
+  hold nobody read stopped every fixer for 7 h, ~30 h without a verified move).
   Scale with several routines on staggered minutes, never by firing runs by hand.
 - The owner's Discord card: the devping skill (one message edited in place; only owner-important events show on it:
   blocked on the owner, work stopped, money or data at risk, cycle done). Its stats adapter counts the WHOLE platform and survives re-planning
@@ -180,6 +183,12 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
   the owner's screen), never Start-Process or Popen from an agent shell (the child dies with the shell's job);
   restart and kill act only on their own pid file's tree.
 - NEVER attach a GitHub push webhook to a builder routine: builders push, so every push starts another builder.
+- A pause flag (state/dispatch-off, autofire-off, ...) names its reason and is lifted when the reason ends; the
+  manager lists the ones present on every start (VOIDCAD: dispatch-off from a paused build silenced every alarm 11 days).
+- Every headless `claude -p` the harness runs (reviewer, fixers, alarm briefs) uses the account the cloud is bound to,
+  never the machine's default login (an out-of-usage default login made every review unavailable).
+- The gate's unit run caps test threads (4): at one per core, a many-core worker flakes lock-wait tests at random,
+  main's own baseline goes red and the verifier bisects innocent pushes.
 
 ## Run
 Needs: Python 3.10+, git 2.38+ (`merge-tree --write-tree`), the stack's toolchain, the overhaul-build skill (its
