@@ -316,6 +316,10 @@ A writer never waits for the verifier; its next work bases on the trunk's head.
   head by CAS, which `main` then follows. Files with keyed or line-set merge drivers (generated roots, spec tables)
   make no dependency; read their attributes from the tree. A push already reverted is never a dependent. No
   compiling revert, or a red before the last revert: hold.
+- A revert set bigger than the culprits plus 3 dependents is no revert: hold and raise a fix-forward alarm (the
+  manager fixes the culprit's red on the head within one beat). VOIDCAD 11-27: one spec line red in CU-578 reverted
+  81 good pushes (a day's landings) because 80 were its "dependents"; before that, the hold sat 7 h unread.
+- A hold is an alarm, never a state to wait in: the manager's 15-minute beat reads it and fixes forward.
 - Escapes: a failure the culprit's own selection did not run is logged and widens the selection index.
 
 ## Native run behind

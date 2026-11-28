@@ -189,6 +189,14 @@ Each rule is enforced in code; the incident behind it is in CHANGELOG.md.
   never the machine's default login (an out-of-usage default login made every review unavailable).
 - The gate's unit run caps test threads (4): at one per core, a many-core worker flakes lock-wait tests at random,
   main's own baseline goes red and the verifier bisects innocent pushes.
+- The writer floor reads the same host baseline as the verifier for unit tests: a unit test red at the push's base on
+  this host is not the push's red (VOIDCAD 11-27: desk-only writer-lock flakes refused a correct fix-forward 3 times,
+  2.5 h each).
+- A long push or gate the manager starts runs detached (WMI, own pid file), never as a tool's background command: a
+  tool time limit killed a 2-hour push mid-run, and the kill left a stale `index.lock` that failed every native shard
+  for 3 h. Workers and the verifier remove an `index.lock` older than 10 min when no git process runs in that repo.
+- A document's own random id (or any minted identity) never enters its content hash: a replay into a new document must
+  reach the recorded hash (VOIDCAD r1903, red from CU-171 until fixed forward).
 
 ## Run
 Needs: Python 3.10+, git 2.38+ (`merge-tree --write-tree`), the stack's toolchain, the overhaul-build skill (its

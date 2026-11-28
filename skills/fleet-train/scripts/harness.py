@@ -522,7 +522,7 @@ STACKS = {
         "train_env": {"CARGO_TARGET_DIR": "{targets}/land-0", "CARGO_PROFILE_RELEASE_INCREMENTAL": "true",
                       "PROPTEST_DISABLE_FAILURE_PERSISTENCE": "1"},
         "fmt": "rustfmt",  # batched rustfmt over every workspace target root (fmt_tree)
-        "unit": "cargo test -q --workspace --lib --bins --no-fail-fast",
+        "unit": "cargo test -q --workspace --lib --bins --no-fail-fast -- --test-threads=4",  # 4: one per core flakes lock-wait tests (VOIDCAD 11-26)
         "unit_one": "cargo test -q --workspace --lib --bins -- --exact {name} --test-threads=1",
         "name_escape": False,  # unit_one gets the raw test name
         "unit_parser": "cargo",  # cargo_failures.parse; a binary that crashed naming no test is kept by selector
